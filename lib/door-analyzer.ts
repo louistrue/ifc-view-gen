@@ -174,12 +174,11 @@ function findNearbyDevices(
 }
 
 /**
- * Analyze all doors in the model and find their context (walls, devices)
+ * Analyze all doors in the model and find their context (devices only, no walls)
  */
 export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
     // Separate elements by type
     const doors: ElementInfo[] = []
-    const walls: ElementInfo[] = []
     const devices: ElementInfo[] = []
 
     for (const element of model.elements) {
@@ -191,20 +190,17 @@ export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
         if (isDoorType(element.typeName, element.ifcType)) {
             doors.push(element)
             console.log(`Found door: ExpressID ${element.expressID}, typeName="${element.typeName}"`)
-        } else if (isWallType(element.typeName, element.ifcType)) {
-            walls.push(element)
         } else if (isElectricalDeviceType(element.typeName)) {
             devices.push(element)
         }
     }
 
-    console.log(`Found ${doors.length} doors, ${walls.length} walls, ${devices.length} electrical devices`)
+    console.log(`Found ${doors.length} doors, ${devices.length} electrical devices`)
 
     // Analyze each door
     const doorContexts: DoorContext[] = []
 
     for (const door of doors) {
-        const wall = findHostWall(door, walls)
         const nearbyDevices = findNearbyDevices(door, devices, 1.0)
 
         const center = door.boundingBox
@@ -213,13 +209,16 @@ export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
 
         const normal = calculateDoorNormal(door)
 
+        // Use GlobalId for doorId if available, otherwise fallback to ExpressID (no prefix)
+        const doorId = door.globalId || String(door.expressID)
+
         doorContexts.push({
             door,
-            wall,
+            wall: null, // No wall detection
             nearbyDevices,
             normal,
             center,
-            doorId: `door_${door.expressID}`,
+            doorId,
         })
     }
 

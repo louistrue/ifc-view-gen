@@ -16,8 +16,7 @@ export interface ElementInfo {
     mesh: THREE.Mesh
     meshes?: THREE.Mesh[] // All meshes for this element
     boundingBox?: THREE.Box3
-    isGlass?: boolean // True if element contains glass material
-    materialName?: string // Material name if available
+    globalId?: string // IFC GlobalId (GUID) of the element
 }
 
 export interface LoadedIFCModel {

@@ -291,9 +291,53 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 }
             }
 
+            // Extract GlobalId (GUID) from element properties
+            // web-ifc returns GlobalId as an object with a .value property
+            // IFC GlobalId is typically 22 characters (base64-like encoding)
+            let globalId: string | undefined = undefined
+            try {
+                if (elementProps) {
+                    const props = elementProps as any
+
+                    // web-ifc wraps attributes in objects with .value property
+                    // Try props.GlobalId.value first (correct web-ifc pattern)
+                    if (props.GlobalId?.value) {
+                        globalId = String(props.GlobalId.value).trim()
+                    } else if (props.GlobalId && typeof props.GlobalId === 'string') {
+                        globalId = props.GlobalId.trim()
+                    } else if (props.globalId?.value) {
+                        globalId = String(props.globalId.value).trim()
+                    } else if (props.globalId && typeof props.globalId === 'string') {
+                        globalId = props.globalId.trim()
+                    }
+
+                    // Reject if it's just a number (likely ExpressID, not GUID)
+                    if (globalId && /^\d+$/.test(globalId)) {
+                        globalId = undefined
+                    }
+                }
+
+                // Log for first 5 doors to debug - show what we found
+                if (typeName.toLowerCase().includes('door') && expressID < 200000) {
+                    const props = elementProps as any
+                    console.log(`Door ExpressID ${expressID}:`)
+                    console.log(`  GlobalId.value: "${props.GlobalId?.value || 'undefined'}"`)
+                    console.log(`  GlobalId type: ${typeof props.GlobalId}`)
+                    console.log(`  GlobalId extracted: "${globalId || 'NOT FOUND'}"`)
+                }
+
+                // Empty string is not valid, treat as undefined
+                if (globalId === '') {
+                    globalId = undefined
+                }
+            } catch (e) {
+                // GlobalId extraction failed, continue without it
+                console.warn(`Failed to extract GlobalId for ExpressID ${expressID}:`, e)
+            }
+
             // Log for debugging
             if (expressID % 100 === 0 || typeName.toLowerCase().includes('door') || typeName.toLowerCase().includes('wall')) {
-                console.log(`ExpressID ${expressID}: type=${ifcType}, typeName=${typeName}`)
+                console.log(`ExpressID ${expressID}: type=${ifcType}, typeName=${typeName}, globalId=${globalId || 'N/A'}`)
             }
 
             // Calculate bounding box for all meshes of this element
@@ -326,38 +370,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 console.warn(`Failed to calculate bounding box for ExpressID ${expressID}:`, e)
             }
 
-            // Detect glass materials by checking material properties
-            let isGlass = false
-            let materialName = ''
-
-            for (const mesh of meshes) {
-                const material = mesh.material as THREE.MeshStandardMaterial
-                if (material) {
-                    // Check opacity - glass typically has opacity < 0.8
-                    if (material.opacity < 0.8 && material.transparent) {
-                        isGlass = true
-                    }
-                    // Store material color info for name detection
-                    if (material.color) {
-                        // Blue-ish tint often indicates glass in IFC models
-                        const r = material.color.r
-                        const g = material.color.g
-                        const b = material.color.b
-                        // Check if color is blue-ish or very light (clear glass)
-                        if ((b > r && b > g) || (r > 0.8 && g > 0.8 && b > 0.8 && material.opacity < 0.9)) {
-                            isGlass = true
-                        }
-                    }
-                }
-            }
-
-            // Also check typeName for glass indicators
-            const lowerTypeName = typeName.toLowerCase()
-            if (lowerTypeName.includes('glass') || lowerTypeName.includes('glazing') ||
-                lowerTypeName.includes('window') || lowerTypeName.includes('curtainwall')) {
-                isGlass = true
-            }
-
             // Create element info - use first mesh as representative, store all meshes
             const elementInfo: ElementInfo = {
                 expressID,
@@ -366,8 +378,7 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 mesh: meshes[0],
                 meshes: meshes, // Store all meshes for this element
                 boundingBox: (!bboxInitialized || !bbox || bbox.isEmpty()) ? undefined : bbox,
-                isGlass,
-                materialName,
+                globalId,
             }
 
             elements.push(elementInfo)
@@ -376,7 +387,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
             meshes.forEach(mesh => {
                 mesh.userData.expressID = expressID
                 mesh.userData.elementInfo = elementInfo
-                mesh.userData.isGlass = isGlass
             })
 
             // Debug logging
@@ -395,14 +405,14 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 fallbackTypeName = String((error as any).typeName)
             }
 
-            // Detect glass even in fallback case
-            let isGlass = false
-            for (const mesh of meshes) {
-                const material = mesh.material as THREE.MeshStandardMaterial
-                if (material && material.transparent && material.opacity < 0.8) {
-                    isGlass = true
-                    break
+            // Try to extract GlobalId even in error case
+            let globalId: string | undefined = undefined
+            try {
+                if (error && typeof error === 'object' && 'GlobalId' in error) {
+                    globalId = String((error as any).GlobalId)
                 }
+            } catch (e) {
+                // GlobalId extraction failed
             }
 
             // Create element info - preserve what we can
@@ -412,7 +422,7 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 typeName: fallbackTypeName,
                 mesh: meshes[0],
                 meshes: meshes,
-                isGlass,
+                globalId,
             }
             elements.push(elementInfo)
 
@@ -420,7 +430,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
             meshes.forEach(mesh => {
                 mesh.userData.expressID = expressID
                 mesh.userData.elementInfo = elementInfo
-                mesh.userData.isGlass = isGlass
             })
         }
     }

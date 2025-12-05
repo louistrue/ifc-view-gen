@@ -9,7 +9,7 @@ export interface SVGRenderOptions {
     doorColor?: string
     wallColor?: string
     deviceColor?: string
-    glassColor?: string // Color for glass elements
+    backgroundColor?: string // Background color for area outside door
     lineWidth?: number
     lineColor?: string
     showFills?: boolean
@@ -22,7 +22,7 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     doorColor: '#333333',
     wallColor: '#888888',
     deviceColor: '#CC0000',
-    glassColor: '#4da6ff', // Light blue for glass
+    backgroundColor: '#f5f5f5', // Light gray background
     lineWidth: 1.5,
     lineColor: '#000000',
     showFills: true,
@@ -87,27 +87,13 @@ function setupDoorCamera(
 }
 
 /**
- * Get color for element based on type and material
+ * Get color for element based on type
  */
 function getElementColor(
     expressID: number,
     context: DoorContext,
-    options: Required<SVGRenderOptions>,
-    mesh?: THREE.Mesh
+    options: Required<SVGRenderOptions>
 ): string {
-    // Check if mesh is glass material
-    if (mesh) {
-        // Check userData for glass flag
-        if (mesh.userData.isGlass) {
-            return options.glassColor
-        }
-        // Also check material opacity directly
-        const material = mesh.material as THREE.MeshStandardMaterial
-        if (material && material.transparent && material.opacity < 0.8) {
-            return options.glassColor
-        }
-    }
-
     if (expressID === context.door.expressID) {
         return options.doorColor
     } else if (context.wall && expressID === context.wall.expressID) {
@@ -280,7 +266,7 @@ function generateSVGString(
     polygons: ProjectedPolygon[],
     options: Required<SVGRenderOptions>
 ): string {
-    const { width, height, lineWidth, showFills } = options
+    const { width, height, lineWidth, showFills, backgroundColor } = options
 
     // Compute bounding box of all edges
     let minX = Infinity, maxX = -Infinity
@@ -332,7 +318,7 @@ function generateSVGString(
 
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <rect width="100%" height="100%" fill="white"/>
+  <rect width="100%" height="100%" fill="${backgroundColor}"/>
   <g id="fills">
 `
 
@@ -416,15 +402,7 @@ export async function renderDoorElevationSVG(
     for (const mesh of contextMeshes) {
         try {
             const expressID = mesh.userData.expressID
-            const color = getElementColor(expressID, context, opts, mesh)
-
-            // Check if this is a glass mesh and log it
-            const isGlass = mesh.userData.isGlass ||
-                ((mesh.material as THREE.MeshStandardMaterial)?.transparent &&
-                    (mesh.material as THREE.MeshStandardMaterial)?.opacity < 0.8)
-            if (isGlass) {
-                console.log(`  Glass mesh detected for expressID ${expressID}`)
-            }
+            const color = getElementColor(expressID, context, opts)
 
             const posCount = mesh.geometry?.attributes?.position?.count || 0
             if (posCount === 0) {
