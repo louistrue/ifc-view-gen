@@ -1,0 +1,3 @@
+# This directory should contain WASM files from web-ifc
+# Run 'npm run setup-wasm' or 'npm install' to copy the files here
+
