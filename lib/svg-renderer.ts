@@ -13,6 +13,8 @@ export interface SVGRenderOptions {
     lineWidth?: number
     lineColor?: string
     showFills?: boolean
+    showLegend?: boolean
+    showLabels?: boolean
 }
 
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
@@ -26,6 +28,8 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     lineWidth: 1.5,
     lineColor: '#000000',
     showFills: true,
+    showLegend: true,
+    showLabels: true,
 }
 
 interface ProjectedEdge {
@@ -61,8 +65,11 @@ function setupDoorCamera(
     const center = context.center
 
     // Calculate view dimensions with margin
-    const width = Math.max(size.x, size.z) + options.margin * 2
-    const height = size.y + options.margin * 2
+    // Client requested 25cm margin around door leaf
+    // We use the provided margin option (default 0.5m) but ensure at least 0.25m
+    const margin = Math.max(options.margin, 0.25)
+    const width = Math.max(size.x, size.z) + margin * 2
+    const height = size.y + margin * 2
 
     // Create orthographic camera
     const camera = new THREE.OrthographicCamera(
@@ -79,6 +86,52 @@ function setupDoorCamera(
     const distance = Math.max(width, height) * 1.5
     camera.position.copy(center.clone().add(normal.multiplyScalar(distance)))
     camera.up.set(0, 1, 0)
+    camera.lookAt(center)
+    camera.updateProjectionMatrix()
+    camera.updateMatrixWorld()
+
+    return camera
+}
+
+/**
+ * Setup orthographic camera for door plan view (Top View)
+ */
+function setupPlanCamera(
+    context: DoorContext,
+    options: Required<SVGRenderOptions>
+): THREE.OrthographicCamera {
+    const door = context.door
+    const bbox = door.boundingBox
+
+    if (!bbox) {
+        throw new Error('Door bounding box not available')
+    }
+
+    const size = bbox.getSize(new THREE.Vector3())
+    const center = context.center
+
+    // Calculate view dimensions with margin
+    const margin = Math.max(options.margin, 0.25)
+    const width = Math.max(size.x, size.z) + margin * 2
+    // For plan view, "height" is the depth (thickness) of the door/wall area
+    // We want to see enough context around the door thickness
+    const depth = Math.min(size.x, size.z) + margin * 2
+
+    // Create orthographic camera
+    // Looking down Y axis (Top View)
+    const camera = new THREE.OrthographicCamera(
+        -width / 2,
+        width / 2,
+        depth / 2,
+        -depth / 2,
+        0.1,
+        100
+    )
+
+    // Position camera above door
+    const distance = Math.max(width, depth) * 1.5
+    camera.position.copy(center.clone().add(new THREE.Vector3(0, distance, 0)))
+    camera.up.set(0, 0, -1) // Standard top view orientation (Z is up on screen)
     camera.lookAt(center)
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
@@ -353,6 +406,91 @@ function generateSVGString(
 }
 
 /**
+ * Format opening direction enum to readable string
+ */
+function formatOpeningDirection(direction: string): string {
+    // Map common IFC enumerations to readable text
+    const map: Record<string, string> = {
+        'SINGLE_SWING_LEFT': 'Left Swing',
+        'SINGLE_SWING_RIGHT': 'Right Swing',
+        'DOUBLE_DOOR_SINGLE_SWING': 'Double Door',
+        'DOUBLE_DOOR_DOUBLE_SWING': 'Double Swing',
+        'SLIDING_TO_LEFT': 'Sliding Left',
+        'SLIDING_TO_RIGHT': 'Sliding Right',
+        'FOLDING_TO_LEFT': 'Folding Left',
+        'FOLDING_TO_RIGHT': 'Folding Right',
+        'SWING_FIXED_LEFT': 'Fixed Left',
+        'SWING_FIXED_RIGHT': 'Fixed Right'
+    }
+
+    return map[direction] || direction.replace(/_/g, ' ')
+}
+
+/**
+ * Generate SVG legend and labels
+ */
+function addLegendAndLabels(
+    svgContent: string,
+    context: DoorContext,
+    options: Required<SVGRenderOptions>,
+    viewType: 'Front' | 'Back' | 'Plan'
+): string {
+    const { width, height, showLegend, showLabels } = options
+
+    // Parse existing SVG to insert content before closing tag
+    const closingTagIndex = svgContent.lastIndexOf('</svg>')
+    if (closingTagIndex === -1) return svgContent
+
+    let additionalContent = ''
+
+    // Add labels
+    if (showLabels) {
+        const fontSize = Math.min(width, height) * 0.05
+        const padding = fontSize
+
+        // View type label
+        additionalContent += `
+    <text x="${padding}" y="${padding}" font-family="Arial" font-size="${fontSize}" fill="#000000">${viewType}</text>`
+
+        // Opening direction (only for Front/Back)
+        if (viewType === 'Front' || viewType === 'Back') {
+            const direction = context.openingDirection
+                ? formatOpeningDirection(context.openingDirection)
+                : 'Unknown'
+
+            additionalContent += `
+    <text x="${width - padding}" y="${padding}" text-anchor="end" font-family="Arial" font-size="${fontSize}" fill="#000000">Opening: ${direction}</text>`
+        }
+    }
+
+    // Add legend
+    if (showLegend) {
+        const fontSize = Math.min(width, height) * 0.03
+        const padding = fontSize
+        const legendY = height - padding
+
+        let legendItems = []
+        legendItems.push({ color: options.doorColor, text: 'Door' })
+        // if (context.hostWall) legendItems.push({ color: options.wallColor, text: 'Wall' })
+        if (context.nearbyDevices.length > 0) legendItems.push({ color: options.deviceColor, text: 'Electrical' })
+
+        let currentX = padding
+        additionalContent += `    <g id="legend">`
+
+        for (const item of legendItems) {
+            additionalContent += `
+        <rect x="${currentX}" y="${legendY - fontSize}" width="${fontSize}" height="${fontSize}" fill="${item.color}"/>
+        <text x="${currentX + fontSize * 1.5}" y="${legendY}" font-family="Arial" font-size="${fontSize}" fill="#000000">${item.text}</text>`
+            currentX += fontSize * 6 // Spacing
+        }
+
+        additionalContent += `    </g>`
+    }
+
+    return svgContent.slice(0, closingTagIndex) + additionalContent + svgContent.slice(closingTagIndex)
+}
+
+/**
  * Render door elevation to SVG (front or back view)
  * Uses simple edge projection instead of halfedge structures
  */
@@ -431,7 +569,70 @@ export async function renderDoorElevationSVG(
     // Generate SVG
     const svg = generateSVGString(allEdges, allPolygons, opts)
 
-    return svg
+    // Add legend and labels
+    return addLegendAndLabels(svg, context, opts, isBackView ? 'Back' : 'Front')
+}
+
+/**
+ * Render door plan (top view) to SVG
+ */
+export async function renderDoorPlanSVG(
+    context: DoorContext,
+    options: SVGRenderOptions = {}
+): Promise<string> {
+    const opts = { ...DEFAULT_OPTIONS, ...options }
+
+    // Setup camera for plan view
+    let camera = setupPlanCamera(context, opts)
+
+    // Get all meshes for this door context
+    const contextMeshes = getContextMeshes(context)
+
+    if (contextMeshes.length === 0) {
+        if (context.door.mesh) {
+            contextMeshes.push(context.door.mesh)
+        }
+    }
+
+    if (contextMeshes.length === 0) {
+        throw new Error('No meshes found for door context')
+    }
+
+    // Collect all edges and polygons
+    const allEdges: ProjectedEdge[] = []
+    const allPolygons: ProjectedPolygon[] = []
+
+    for (const mesh of contextMeshes) {
+        try {
+            const expressID = mesh.userData.expressID
+            const color = getElementColor(expressID, context, opts)
+
+            const posCount = mesh.geometry?.attributes?.position?.count || 0
+            if (posCount === 0) continue
+
+            // Extract edges
+            const edges = extractEdges(mesh, camera, opts.lineColor, opts.width, opts.height)
+            allEdges.push(...edges)
+
+            // Extract polygons for fills
+            if (opts.showFills) {
+                const polygons = extractPolygons(mesh, camera, color, opts.width, opts.height)
+                allPolygons.push(...polygons)
+            }
+        } catch (error) {
+            console.warn(`Failed to extract edges for mesh:`, error)
+        }
+    }
+
+    if (allEdges.length === 0) {
+        throw new Error('No edges could be extracted from meshes')
+    }
+
+    // Generate SVG
+    const svg = generateSVGString(allEdges, allPolygons, opts)
+
+    // Add legend and labels
+    return addLegendAndLabels(svg, context, opts, 'Plan')
 }
 
 /**
@@ -440,9 +641,10 @@ export async function renderDoorElevationSVG(
 export async function renderDoorViews(
     context: DoorContext,
     options: SVGRenderOptions = {}
-): Promise<{ front: string; back: string }> {
+): Promise<{ front: string; back: string; plan: string }> {
     const front = await renderDoorElevationSVG(context, false, options)
     const back = await renderDoorElevationSVG(context, true, options)
+    const plan = await renderDoorPlanSVG(context, options)
 
-    return { front, back }
+    return { front, back, plan }
 }

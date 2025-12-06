@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
 import JSZip from 'jszip'
-import { renderDoorViews, renderDoorElevationSVG } from '@/lib/svg-renderer'
+import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
 
 interface BatchProcessorProps {
@@ -26,6 +26,8 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
     lineWidth: 1.5,
     lineColor: '#000000',
     showFills: true,
+    showLegend: true,
+    showLabels: true,
   })
 
   // Add global unhandled rejection handler to catch any missed promise rejections
@@ -35,9 +37,9 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
       // Prevent default browser error handling
       event.preventDefault()
     }
-    
+
     window.addEventListener('unhandledrejection', handleUnhandledRejection)
-    
+
     return () => {
       window.removeEventListener('unhandledrejection', handleUnhandledRejection)
     }
@@ -65,12 +67,13 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
         setCurrentIndex(i + 1)
 
         try {
-          // Render both views
-          const { front, back } = await renderDoorViews(context, options)
+          // Render all views
+          const { front, back, plan } = await renderDoorViews(context, options)
 
           // Add to ZIP
           zip.file(`${context.doorId}_front.svg`, front)
           zip.file(`${context.doorId}_back.svg`, back)
+          zip.file(`${context.doorId}_plan.svg`, plan)
 
           // Update progress
           setProgress(((i + 1) / total) * 100)
@@ -102,9 +105,14 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
   }, [doorContexts, options, onComplete])
 
   const downloadSingleDoor = useCallback(
-    async (context: DoorContext, view: 'front' | 'back') => {
+    async (context: DoorContext, view: 'front' | 'back' | 'plan') => {
       try {
-        const svg = await renderDoorElevationSVG(context, view === 'back', options)
+        let svg = ''
+        if (view === 'plan') {
+          svg = await renderDoorPlanSVG(context, options)
+        } else {
+          svg = await renderDoorElevationSVG(context, view === 'back', options)
+        }
         const blob = new Blob([svg], { type: 'image/svg+xml' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
@@ -206,6 +214,30 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
               }
             />
           </div>
+          <div className="control-group">
+            <label>
+              <input
+                type="checkbox"
+                checked={options.showLegend}
+                onChange={(e) =>
+                  setOptions({ ...options, showLegend: e.target.checked })
+                }
+              />
+              Show Legend
+            </label>
+          </div>
+          <div className="control-group">
+            <label>
+              <input
+                type="checkbox"
+                checked={options.showLabels}
+                onChange={(e) =>
+                  setOptions({ ...options, showLabels: e.target.checked })
+                }
+              />
+              Show Labels
+            </label>
+          </div>
         </div>
       </div>
 
@@ -217,7 +249,7 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
         >
           {isProcessing
             ? `Processing... ${currentIndex}/10`
-            : `Generate First 10 Door Views (20 SVGs)`}
+            : `Generate First 10 Door Views (30 SVGs)`}
         </button>
 
         {isProcessing && (
@@ -256,12 +288,19 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
                 >
                   Back
                 </button>
+                <button
+                  onClick={() => downloadSingleDoor(context, 'plan')}
+                  disabled={isProcessing}
+                  className="download-button"
+                >
+                  Plan
+                </button>
               </div>
             </div>
           ))}
         </div>
       </div>
-    </div>
+    </div >
   )
 }
 

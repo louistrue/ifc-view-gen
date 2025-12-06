@@ -81,3 +81,4 @@ door-view-creator/
 - Large IFC files may take some time to load
 - The viewer automatically centers and scales models to fit the viewport
 
+

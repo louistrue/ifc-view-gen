@@ -1,13 +1,16 @@
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
+import * as WebIFC from 'web-ifc'
 
 export interface DoorContext {
     door: ElementInfo
     wall: ElementInfo | null
+    hostWall: ElementInfo | null
     nearbyDevices: ElementInfo[]
     normal: THREE.Vector3
     center: THREE.Vector3
     doorId: string
+    openingDirection: string | null
 }
 
 /**
@@ -174,11 +177,54 @@ function findNearbyDevices(
 }
 
 /**
- * Analyze all doors in the model and find their context (devices only, no walls)
+ * Get the opening direction of a door from its type operation type
  */
+function getDoorOpeningDirection(model: LoadedIFCModel, doorExpressID: number): string | null {
+    try {
+        const api = model.api
+        const modelID = model.modelID
+
+        // Check instance first
+        const door = api.GetLine(modelID, doorExpressID);
+        if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
+            return door.OperationType.value;
+        }
+
+        // Check type
+        // Get all IfcRelDefinesByType
+        const relLines = api.GetLineIDsWithType(modelID, WebIFC.IFCRELDEFINESBYTYPE);
+
+        for (let i = 0; i < relLines.size(); i++) {
+            const relID = relLines.get(i);
+            const rel = api.GetLine(modelID, relID);
+
+            if (!rel.RelatedObjects) continue;
+
+            const relatedIds = Array.isArray(rel.RelatedObjects) ? rel.RelatedObjects : [rel.RelatedObjects];
+
+            for (const related of relatedIds) {
+                if (related.value === doorExpressID) {
+                    // Found the type relation
+                    const typeID = rel.RelatingType.value;
+                    const type = api.GetLine(modelID, typeID);
+
+                    if (type.OperationType && type.OperationType.value) {
+                        return type.OperationType.value;
+                    }
+                }
+            }
+        }
+
+        return null;
+    } catch (e) {
+        console.warn('Error getting opening direction:', e);
+        return null;
+    }
+}
 export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
     // Separate elements by type
     const doors: ElementInfo[] = []
+    const walls: ElementInfo[] = []
     const devices: ElementInfo[] = []
 
     for (const element of model.elements) {
@@ -190,12 +236,14 @@ export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
         if (isDoorType(element.typeName, element.ifcType)) {
             doors.push(element)
             console.log(`Found door: ExpressID ${element.expressID}, typeName="${element.typeName}"`)
+        } else if (isWallType(element.typeName, element.ifcType)) {
+            walls.push(element)
         } else if (isElectricalDeviceType(element.typeName)) {
             devices.push(element)
         }
     }
 
-    console.log(`Found ${doors.length} doors, ${devices.length} electrical devices`)
+    console.log(`Found ${doors.length} doors, ${walls.length} walls, ${devices.length} electrical devices`)
 
     // Analyze each door
     const doorContexts: DoorContext[] = []
@@ -212,15 +260,29 @@ export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
         // Use GlobalId for doorId if available, otherwise fallback to ExpressID (no prefix)
         const doorId = door.globalId || String(door.expressID)
 
+        // Get opening direction
+        const openingDirection = getDoorOpeningDirection(model, door.expressID)
+        if (openingDirection) {
+            console.log(`Door ${doorId} opening direction: ${openingDirection}`)
+        }
+
         doorContexts.push({
             door,
-            wall: null, // No wall detection
+            wall: null, // Legacy field
+            hostWall: findHostWall(door, walls, 0.3),
             nearbyDevices,
             normal,
             center,
             doorId,
+            openingDirection,
         })
     }
+
+    // Populate opening direction (requires WebIFC)
+    // We need to import WebIFC to get the constants
+    // Since we can't easily change imports in this chunk, we'll do it in a separate step or assume it's available.
+    // Actually, I'll add the logic here and then add the import in another tool call if needed.
+    // But wait, I can use the `multi_replace` to add the import too!
 
     return doorContexts
 }
@@ -237,8 +299,19 @@ export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
     console.log(`  Door meshes: ${doorMeshes.length}`)
     meshes.push(...doorMeshes)
 
-    // Skip wall meshes - they're typically entire walls, not door frames
-    // Skip device meshes - they're often far from the door
+    // Add host wall meshes if available
+    // if (context.hostWall) {
+    //     const wallMeshes = collectMeshesFromElement(context.hostWall)
+    //     console.log(`  Wall meshes: ${wallMeshes.length}`)
+    //     meshes.push(...wallMeshes)
+    // }
+
+    // Add nearby device meshes
+    for (const device of context.nearbyDevices) {
+        const deviceMeshes = collectMeshesFromElement(device)
+        console.log(`  Device meshes (${device.typeName}): ${deviceMeshes.length}`)
+        meshes.push(...deviceMeshes)
+    }
 
     return meshes
 }
