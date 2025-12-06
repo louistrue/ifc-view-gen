@@ -11,6 +11,7 @@ export interface DoorContext {
     center: THREE.Vector3
     doorId: string
     openingDirection: string | null
+    doorTypeName: string | null
 }
 
 /**
@@ -177,9 +178,11 @@ function findNearbyDevices(
 }
 
 /**
- * Get the opening direction of a door from its type operation type
+ * Get the opening direction and type name of a door from its type
  */
-function getDoorOpeningDirection(model: LoadedIFCModel, doorExpressID: number): string | null {
+function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number): { direction: string | null, typeName: string | null } {
+    const result = { direction: null as string | null, typeName: null as string | null }
+
     try {
         const api = model.api
         const modelID = model.modelID
@@ -187,7 +190,7 @@ function getDoorOpeningDirection(model: LoadedIFCModel, doorExpressID: number): 
         // Check instance first
         const door = api.GetLine(modelID, doorExpressID);
         if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
-            return door.OperationType.value;
+            result.direction = door.OperationType.value;
         }
 
         // Check type
@@ -208,19 +211,30 @@ function getDoorOpeningDirection(model: LoadedIFCModel, doorExpressID: number): 
                     const typeID = rel.RelatingType.value;
                     const type = api.GetLine(modelID, typeID);
 
-                    if (type.OperationType && type.OperationType.value) {
-                        return type.OperationType.value;
+                    if (type.Name && type.Name.value) {
+                        result.typeName = type.Name.value
                     }
+
+                    // Only overwrite direction if not found on instance
+                    if (!result.direction && type.OperationType && type.OperationType.value) {
+                        result.direction = type.OperationType.value;
+                    }
+
+                    return result;
                 }
             }
         }
 
-        return null;
+        return result;
     } catch (e) {
-        console.warn('Error getting opening direction:', e);
-        return null;
+        console.warn('Error getting door type info:', e);
+        return result;
     }
 }
+
+/**
+ * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name)
+ */
 export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
     // Separate elements by type
     const doors: ElementInfo[] = []
@@ -260,10 +274,13 @@ export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
         // Use GlobalId for doorId if available, otherwise fallback to ExpressID (no prefix)
         const doorId = door.globalId || String(door.expressID)
 
-        // Get opening direction
-        const openingDirection = getDoorOpeningDirection(model, door.expressID)
+        // Get opening direction and type name
+        const { direction: openingDirection, typeName: doorTypeName } = getDoorTypeInfo(model, door.expressID)
         if (openingDirection) {
             console.log(`Door ${doorId} opening direction: ${openingDirection}`)
+        }
+        if (doorTypeName) {
+            console.log(`Door ${doorId} type name: ${doorTypeName}`)
         }
 
         doorContexts.push({
@@ -275,14 +292,9 @@ export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
             center,
             doorId,
             openingDirection,
+            doorTypeName,
         })
     }
-
-    // Populate opening direction (requires WebIFC)
-    // We need to import WebIFC to get the constants
-    // Since we can't easily change imports in this chunk, we'll do it in a separate step or assume it's available.
-    // Actually, I'll add the logic here and then add the import in another tool call if needed.
-    // But wait, I can use the `multi_replace` to add the import too!
 
     return doorContexts
 }

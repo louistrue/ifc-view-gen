@@ -15,6 +15,8 @@ export interface SVGRenderOptions {
     showFills?: boolean
     showLegend?: boolean
     showLabels?: boolean
+    fontSize?: number
+    fontFamily?: string
 }
 
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
@@ -30,6 +32,8 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     showFills: true,
     showLegend: true,
     showLabels: true,
+    fontSize: 14,
+    fontFamily: 'Arial',
 }
 
 interface ProjectedEdge {
@@ -319,7 +323,23 @@ function generateSVGString(
     polygons: ProjectedPolygon[],
     options: Required<SVGRenderOptions>
 ): string {
-    const { width, height, lineWidth, showFills, backgroundColor } = options
+    const { width, height, lineWidth, showFills, backgroundColor, fontSize, fontFamily, showLegend, showLabels } = options
+
+    // Check if legend is actually needed (only if more than 1 item)
+    // We need to know context for this, but context is activeContext. 
+    // Ideally we would pass context to this function, but using the global activeContext is the current pattern.
+    const hasDevices = activeContext ? activeContext.nearbyDevices.length > 0 : false
+    const showLegendActual = showLegend && hasDevices // Only show legend if we have devices (so > 1 item with Door)
+
+    // Calculate Title Block area
+    // Reserve lines for text + legend if needed
+    // Text takes about 2 lines (View/Type + Opening)
+    // Legend takes about 1 line if shown
+    const textLines = 3 // View, ID/Type, Opening
+    const legendHeight = showLegendActual ? (fontSize + 10) : 0
+
+    const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
+    const viewHeight = height - titleBlockHeight
 
     // Compute bounding box of all edges
     let minX = Infinity, maxX = -Infinity
@@ -346,14 +366,14 @@ function generateSVGString(
     const contentWidth = maxX - minX
     const contentHeight = maxY - minY
     const availWidth = width - padding * 2
-    const availHeight = height - padding * 2
+    const availHeight = viewHeight - padding * 2 // Use viewHeight instead of full height
 
     const scale = Math.min(
         availWidth / (contentWidth || 1),
         availHeight / (contentHeight || 1)
     )
 
-    // Calculate offset to center content
+    // Calculate offset to center content in the view area
     const scaledWidth = contentWidth * scale
     const scaledHeight = contentHeight * scale
     const offsetX = padding + (availWidth - scaledWidth) / 2
@@ -399,28 +419,139 @@ function generateSVGString(
         svg += `    <line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${edge.color}" stroke-width="${lineWidth}" stroke-linecap="round"/>\n`
     }
 
-    svg += `  </g>
-</svg>`
+    svg += `  </g>`
+
+    // Render Title Block
+    if (titleBlockHeight > 0) {
+        svg += renderTitleBlock(width, height, titleBlockHeight, options, activeContext, activeViewType)
+    }
+
+    svg += `\n</svg>`
 
     return svg
 }
 
+// Temporary globals to pass context to generateSVGString without changing signature entirely 
+// (Refactoring to pass context to generateSVGString would be cleaner but requires changing all calls)
+// Alternatively, we can pass it via options but that's hacky.
+// Actually, let's update generateSVGString signature. I'll need to update call sites.
+// Wait, I can't easily change call sites if they are inside this file without multiple chunks.
+// I will change the signature of generateSVGString in this chunk and update the calls in the OTHER chunks or same chunk if possible.
+// Wait, `generateSVGString` is called in `renderDoorElevationSVG` and `renderDoorPlanSVG`.
+// I will update them all.
+
+// Helper to keep context available
+let activeContext: DoorContext | null = null
+let activeViewType: string = ''
+
 /**
- * Format opening direction enum to readable string
+ * Render Title Block content
+ */
+function renderTitleBlock(
+    fullWidth: number,
+    fullHeight: number,
+    blockHeight: number,
+    options: Required<SVGRenderOptions>,
+    context: DoorContext | null,
+    viewType: string
+): string {
+    if (!context) return ''
+
+    const { fontSize, fontFamily, showLegend, showLabels, backgroundColor } = options
+    const padding = 15
+    const startY = fullHeight - blockHeight
+
+    // Title Block container (slightly darker background)
+    // Blend background with black to darken it a bit
+    // Or just use a separator line
+    const separatorY = startY
+
+    let content = `
+  <g id="title-block">
+    <line x1="0" y1="${separatorY}" x2="${fullWidth}" y2="${separatorY}" stroke="#000000" stroke-width="1"/>
+    <rect x="0" y="${separatorY}" width="${fullWidth}" height="${blockHeight}" fill="${backgroundColor}" fill-opacity="0.5"/>
+`
+
+    let currentY = startY + padding + fontSize
+    const leftX = padding
+
+    // Translate View Type
+    const viewTypeMap: Record<string, string> = {
+        'Front': 'Vorderansicht',
+        'Back': 'Rückansicht',
+        'Plan': 'Grundriss'
+    }
+    const localizedViewType = viewTypeMap[viewType] || viewType
+
+    // 1. View Title & Type Name (instead of ID)
+    if (showLabels) {
+        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="bold" fill="#000000">Ansicht: ${localizedViewType}</text>`
+
+        const typeLabel = context.doorTypeName ? context.doorTypeName : context.doorId
+        const labelPrefix = context.doorTypeName ? "Typ" : "ID"
+        content += `    <text x="${leftX + 250}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${labelPrefix}: ${typeLabel}</text>`
+        currentY += fontSize * 1.5
+
+        // 2. Opening Direction (if valid)
+        if (context.openingDirection && (viewType === 'Front' || viewType === 'Back')) {
+            const dirText = formatOpeningDirection(context.openingDirection)
+            content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
+            currentY += fontSize * 1.5
+        }
+    }
+
+    // 3. Legend (Conditional)
+    // Only show if we have devices (total items > 1, since Door is always there)
+    const hasDevices = context.nearbyDevices.length > 0
+
+    if (showLegend && hasDevices) {
+        currentY += 10 // Extra spacing for legend
+        const legendSize = fontSize * 0.8
+
+        // Group: Legend Title
+        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${legendSize}" font-weight="bold" fill="#555555">LEGENDE:</text>`
+
+        // Legend Items
+        let legendX = leftX + 80
+        const items = [
+            { color: options.doorColor, text: 'Tür' },
+            // { color: options.wallColor, text: 'Wand' }, 
+        ]
+
+        if (hasDevices) {
+            items.push({ color: options.deviceColor, text: 'Elektro' })
+        }
+
+        for (const item of items) {
+            // Box
+            content += `    <rect x="${legendX}" y="${currentY - legendSize + 2}" width="${legendSize}" height="${legendSize}" fill="${item.color}"/>`
+            // Text
+            content += `    <text x="${legendX + legendSize + 5}" y="${currentY}" font-family="${fontFamily}" font-size="${legendSize}" fill="#000000">${item.text}</text>`
+            legendX += legendSize + item.text.length * (legendSize * 0.7) + 20
+        }
+    }
+
+    content += `  </g>`
+
+    return content
+}
+
+/**
+ * Format opening direction enum to readable German string
  */
 function formatOpeningDirection(direction: string): string {
-    // Map common IFC enumerations to readable text
+    // Map common IFC enumerations to readable German text
     const map: Record<string, string> = {
-        'SINGLE_SWING_LEFT': 'Left Swing',
-        'SINGLE_SWING_RIGHT': 'Right Swing',
-        'DOUBLE_DOOR_SINGLE_SWING': 'Double Door',
-        'DOUBLE_DOOR_DOUBLE_SWING': 'Double Swing',
-        'SLIDING_TO_LEFT': 'Sliding Left',
-        'SLIDING_TO_RIGHT': 'Sliding Right',
-        'FOLDING_TO_LEFT': 'Folding Left',
-        'FOLDING_TO_RIGHT': 'Folding Right',
-        'SWING_FIXED_LEFT': 'Fixed Left',
-        'SWING_FIXED_RIGHT': 'Fixed Right'
+        'SINGLE_SWING_LEFT': 'DIN Links',
+        'SINGLE_SWING_RIGHT': 'DIN Rechts',
+        'DOUBLE_DOOR_SINGLE_SWING': 'Zweiflügelig',
+        'DOUBLE_DOOR_DOUBLE_SWING': 'Pendeltür',
+        'SLIDING_TO_LEFT': 'Schiebetür Links',
+        'SLIDING_TO_RIGHT': 'Schiebetür Rechts',
+        'FOLDING_TO_LEFT': 'Falttür Links',
+        'FOLDING_TO_RIGHT': 'Falttür Rechts',
+        'SWING_FIXED_LEFT': 'Fest verglast Links',
+        'SWING_FIXED_RIGHT': 'Fest verglast Rechts'
     }
 
     return map[direction] || direction.replace(/_/g, ' ')
@@ -566,11 +697,16 @@ export async function renderDoorElevationSVG(
         throw new Error('No edges could be extracted from meshes')
     }
 
+    // Set active context for title block rendering (hacky side effect)
+    activeContext = context
+    activeViewType = isBackView ? 'Back' : 'Front'
+
     // Generate SVG
     const svg = generateSVGString(allEdges, allPolygons, opts)
 
-    // Add legend and labels
-    return addLegendAndLabels(svg, context, opts, isBackView ? 'Back' : 'Front')
+    // Labels are now handled by Title Block in generateSVGString
+    // return addLegendAndLabels(svg, context, opts, isBackView ? 'Back' : 'Front')
+    return svg
 }
 
 /**
@@ -628,11 +764,15 @@ export async function renderDoorPlanSVG(
         throw new Error('No edges could be extracted from meshes')
     }
 
+    // Set active context for title block rendering
+    activeContext = context
+    activeViewType = 'Plan'
+
     // Generate SVG
     const svg = generateSVGString(allEdges, allPolygons, opts)
 
-    // Add legend and labels
-    return addLegendAndLabels(svg, context, opts, 'Plan')
+    // Labels handled locally
+    return svg
 }
 
 /**

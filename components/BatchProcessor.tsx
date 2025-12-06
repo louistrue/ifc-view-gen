@@ -28,6 +28,8 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
     showFills: true,
     showLegend: true,
     showLabels: true,
+    fontSize: 14,
+    fontFamily: 'Arial',
   })
 
   // Add global unhandled rejection handler to catch any missed promise rejections
@@ -237,6 +239,37 @@ export default function BatchProcessor({ doorContexts, onComplete }: BatchProces
               />
               Show Labels
             </label>
+          </div>
+          <div className="control-group">
+            <h3>Typography</h3>
+          </div>
+          <div className="control-group">
+            <label>Font Size</label>
+            <input
+              type="number"
+              min="8"
+              max="48"
+              step="1"
+              value={options.fontSize || 14}
+              onChange={(e) =>
+                setOptions({ ...options, fontSize: parseInt(e.target.value) })
+              }
+            />
+          </div>
+          <div className="control-group">
+            <label>Font Family</label>
+            <select
+              value={options.fontFamily || 'Arial'}
+              onChange={(e) =>
+                setOptions({ ...options, fontFamily: e.target.value })
+              }
+            >
+              <option value="Arial">Arial</option>
+              <option value="Helvetica">Helvetica</option>
+              <option value="Verdana">Verdana</option>
+              <option value="Times New Roman">Times New Roman</option>
+              <option value="Courier New">Courier New</option>
+            </select>
           </div>
         </div>
       </div>
