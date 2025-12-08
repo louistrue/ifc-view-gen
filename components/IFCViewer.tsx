@@ -15,11 +15,20 @@ export default function IFCViewer() {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const modelGroupRef = useRef<THREE.Group | null>(null)
+  const electricalModelGroupRef = useRef<THREE.Group | null>(null)
+
   const loadedModelRef = useRef<LoadedIFCModel | null>(null)
+  const electricalModelRef = useRef<LoadedIFCModel | null>(null)
+
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [doorContexts, setDoorContexts] = useState<DoorContext[]>([])
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
+
+  // File names for display
+  const [archFileName, setArchFileName] = useState<string>('')
+  const [elecFileName, setElecFileName] = useState<string>('')
+
   const mouseDownRef = useRef(false)
   const mousePositionRef = useRef({ x: 0, y: 0 })
 
@@ -94,14 +103,14 @@ export default function IFCViewer() {
         const deltaX = e.clientX - mousePositionRef.current.x
         const deltaY = e.clientY - mousePositionRef.current.y
         mousePositionRef.current = { x: e.clientX, y: e.clientY }
-        
+
         if (cameraRef.current) {
           const spherical = new THREE.Spherical()
           spherical.setFromVector3(cameraRef.current.position)
           spherical.theta -= deltaX * 0.01
           spherical.phi += deltaY * 0.01
           spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi))
-          
+
           cameraRef.current.position.setFromSpherical(spherical)
           cameraRef.current.lookAt(0, 0, 0)
         }
@@ -141,7 +150,7 @@ export default function IFCViewer() {
       renderer.domElement.removeEventListener('mouseleave', handleMouseUp)
       renderer.domElement.removeEventListener('wheel', handleWheel)
       renderer.domElement.removeEventListener('contextmenu', handleContextMenu)
-      
+
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current)
       }
@@ -152,95 +161,154 @@ export default function IFCViewer() {
     }
   }, [])
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'arch' | 'elec') => {
     const file = e.target.files?.[0]
     if (!file) return
 
     setIsLoading(true)
     setError(null)
     setShowBatchProcessor(false)
-    setDoorContexts([])
+    // Don't clear contexts immediately if loading secondary model, 
+    // but maybe we should purely refresh everything
+
+    // Actually simplicity: if Architectural model changes, reset everything.
+    // If Electrical model changes, re-analyze using existing Arch model.
+
+    if (type === 'arch') {
+      setDoorContexts([])
+      setArchFileName(file.name)
+    } else {
+      setElecFileName(file.name)
+    }
 
     try {
-      // Close previous model if exists
-      if (loadedModelRef.current) {
-        closeIFCModel(loadedModelRef.current.modelID)
-        loadedModelRef.current = null
-      }
+      if (type === 'arch') {
+        // Close previous model if exists
+        if (loadedModelRef.current) {
+          closeIFCModel(loadedModelRef.current.modelID)
+          loadedModelRef.current = null
+        }
 
-      // Remove previous model from scene
-      if (modelGroupRef.current && sceneRef.current) {
-        sceneRef.current.remove(modelGroupRef.current)
-        modelGroupRef.current.traverse((child) => {
-          if (child instanceof THREE.Mesh) {
-            child.geometry.dispose()
-            if (Array.isArray(child.material)) {
-              child.material.forEach((mat) => mat.dispose())
-            } else {
-              child.material.dispose()
+        // Remove previous model from scene
+        if (modelGroupRef.current && sceneRef.current) {
+          sceneRef.current.remove(modelGroupRef.current)
+          modelGroupRef.current.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              child.geometry.dispose()
+              if (Array.isArray(child.material)) {
+                child.material.forEach((mat) => mat.dispose())
+              } else {
+                child.material.dispose()
+              }
             }
-          }
-        })
-        modelGroupRef.current = null
-      }
+          })
+          modelGroupRef.current = null
+        }
 
-      // Load new model with metadata
-      const loadedModel = await loadIFCModelWithMetadata(file)
-      loadedModelRef.current = loadedModel
-      
-      const group = loadedModel.group
-      
-      // Center the model at origin
-      const box = new THREE.Box3().setFromObject(group)
-      const center = box.getCenter(new THREE.Vector3())
-      group.position.sub(center)
-      
-      if (sceneRef.current) {
-        sceneRef.current.add(group)
-        modelGroupRef.current = group
-      }
+        // Load new model with metadata
+        const loadedModel = await loadIFCModelWithMetadata(file)
+        loadedModelRef.current = loadedModel
 
-      // Focus camera on the model geometry
-      if (cameraRef.current && containerRef.current) {
-        // Recalculate bounding box after centering
-        const centeredBox = new THREE.Box3().setFromObject(group)
-        const size = centeredBox.getSize(new THREE.Vector3())
-        const maxDim = Math.max(size.x, size.y, size.z)
-        
-        // Calculate optimal camera distance to fit the model
-        const fov = cameraRef.current.fov * (Math.PI / 180)
-        const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2))
-        const distance = cameraZ * 1.5 // Add some padding
-        
-        // Position camera in a nice angle
-        const angle = Math.PI / 4 // 45 degrees
-        cameraRef.current.position.set(
-          distance * Math.cos(angle),
-          distance * Math.sin(angle),
-          distance * Math.cos(angle)
-        )
-        cameraRef.current.lookAt(0, 0, 0)
-        cameraRef.current.updateProjectionMatrix()
-      }
+        const group = loadedModel.group
 
-      // Analyze doors
-      console.log('Starting door analysis...')
-      console.log(`Total elements loaded: ${loadedModel.elements.length}`)
-      const contexts = analyzeDoors(loadedModel)
-      console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
-      setDoorContexts(contexts)
-      
-      // Always show batch processor if we have elements, even if no doors found
-      // This helps with debugging
-      if (loadedModel.elements.length > 0) {
-        setShowBatchProcessor(true)
-        if (contexts.length === 0) {
-          console.warn('No doors detected. Check console for element types.')
-          // Log all unique type names for debugging
-          const uniqueTypes = new Set(loadedModel.elements.map(e => e.typeName))
-          console.log('Unique element types found:', Array.from(uniqueTypes).slice(0, 20))
+        // Center the model at origin
+        const box = new THREE.Box3().setFromObject(group)
+        const center = box.getCenter(new THREE.Vector3())
+        group.position.sub(center)
+
+        if (sceneRef.current) {
+          sceneRef.current.add(group)
+          modelGroupRef.current = group
+        }
+
+        // Focus camera on the model geometry
+        if (cameraRef.current && containerRef.current) {
+          // Recalculate bounding box after centering
+          const centeredBox = new THREE.Box3().setFromObject(group)
+          const size = centeredBox.getSize(new THREE.Vector3())
+          const maxDim = Math.max(size.x, size.y, size.z)
+
+          // Calculate optimal camera distance to fit the model
+          const fov = cameraRef.current.fov * (Math.PI / 180)
+          const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2))
+          const distance = cameraZ * 1.5 // Add some padding
+
+          // Position camera in a nice angle
+          const angle = Math.PI / 4 // 45 degrees
+          cameraRef.current.position.set(
+            distance * Math.cos(angle),
+            distance * Math.sin(angle),
+            distance * Math.cos(angle)
+          )
+          cameraRef.current.lookAt(0, 0, 0)
+          cameraRef.current.updateProjectionMatrix()
+        }
+      } else {
+        // Load Electrical Model
+        // Close previous electrical model if exists
+        if (electricalModelRef.current) {
+          closeIFCModel(electricalModelRef.current.modelID)
+          electricalModelRef.current = null
+        }
+
+        // Remove previous electrical model from scene
+        if (electricalModelGroupRef.current && sceneRef.current) {
+          sceneRef.current.remove(electricalModelGroupRef.current)
+          electricalModelGroupRef.current.traverse((child) => {
+            // ... disposal logic ...
+            if (child instanceof THREE.Mesh) {
+              child.geometry.dispose()
+              if (Array.isArray(child.material)) {
+                child.material.forEach((mat) => mat.dispose())
+              } else {
+                child.material.dispose()
+              }
+            }
+          })
+          electricalModelGroupRef.current = null
+        }
+
+        const loadedElecModel = await loadIFCModelWithMetadata(file)
+        electricalModelRef.current = loadedElecModel
+
+        const group = loadedElecModel.group
+
+        // Apply same centering as architectural model?
+        // Assumption: Both models have same origin (0,0,0) relative to each other.
+        // IF we centered the Arch model by subtracting 'center', we must subtract the SAME vector from Elec model.
+        // BUT: 'center' was calculated from Arch model bounding box.
+        // So we need to store the offset applied to Arch model.
+
+        if (modelGroupRef.current) {
+          // We need to know what transformation we applied to Arch model.
+          // In the code above: group.position.sub(center)
+          // We can read the position from modelGroupRef.current
+          const offset = modelGroupRef.current.position.clone()
+          group.position.copy(offset)
+        } else {
+          // If no arch model loaded (unlikely flow), just center it? 
+          // Better to insist on Arch model first?
+          // For now, let's just add it.
+        }
+
+        if (sceneRef.current) {
+          sceneRef.current.add(group)
+          electricalModelGroupRef.current = group
         }
       }
+
+      // Re-analyze doors if Arch model is loaded
+      if (loadedModelRef.current) {
+        console.log('Starting door analysis...')
+        const contexts = analyzeDoors(loadedModelRef.current, electricalModelRef.current || undefined)
+        console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
+        setDoorContexts(contexts)
+
+        if (loadedModelRef.current.elements.length > 0) {
+          setShowBatchProcessor(true)
+        }
+      }
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load IFC file')
       console.error('Error loading IFC:', err)
@@ -252,17 +320,36 @@ export default function IFCViewer() {
   return (
     <div className="ifc-viewer-container">
       <div className="controls">
-        <label htmlFor="ifc-file-input" className="file-input-label">
-          {isLoading ? 'Loading...' : 'Select IFC File'}
-        </label>
-        <input
-          id="ifc-file-input"
-          type="file"
-          accept=".ifc"
-          onChange={handleFileChange}
-          disabled={isLoading}
-          className="file-input"
-        />
+        <div className="file-inputs">
+          <div className="input-group">
+            <label htmlFor="ifc-file-input" className="file-input-label">
+              {isLoading ? 'Loading...' : (archFileName || '1. Select Architectural IFC')}
+            </label>
+            <input
+              id="ifc-file-input"
+              type="file"
+              accept=".ifc"
+              onChange={(e) => handleFileChange(e, 'arch')}
+              disabled={isLoading}
+              className="file-input"
+            />
+          </div>
+
+          <div className="input-group">
+            <label htmlFor="elec-file-input" className="file-input-label secondary">
+              {isLoading ? 'Loading...' : (elecFileName || '2. Select Electrical IFC (Optional)')}
+            </label>
+            <input
+              id="elec-file-input"
+              type="file"
+              accept=".ifc"
+              onChange={(e) => handleFileChange(e, 'elec')}
+              disabled={isLoading}
+              className="file-input"
+            />
+          </div>
+        </div>
+
         {error && <div className="error-message">{error}</div>}
         {doorContexts.length > 0 && (
           <div className="door-count">
@@ -284,6 +371,24 @@ export default function IFCViewer() {
           </div>
         )}
       </div>
+
+      <style jsx>{`
+        .file-inputs {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 0.5rem;
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+        }
+        .file-input-label.secondary {
+            background-color: #555;
+        }
+        .file-input-label.secondary:hover {
+            background-color: #666;
+        }
+      `}</style>
     </div>
   )
 }

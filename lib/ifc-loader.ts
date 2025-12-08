@@ -1,6 +1,26 @@
-import { IfcAPI } from 'web-ifc'
+import { IfcAPI, IFCDOOR, IFCWALL, IFCWALLSTANDARDCASE } from 'web-ifc'
+import * as WebIFC from 'web-ifc'
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
+
+// Create a reverse mapping of IFC type codes to names
+// accessing WebIFC properties dynamically to build the map
+const IFC_TYPE_MAP = new Map<number, string>()
+try {
+    // Iterate over all keys in WebIFC to find numeric constants
+    for (const key in WebIFC) {
+        const value = (WebIFC as any)[key]
+        if (typeof value === 'number') {
+            IFC_TYPE_MAP.set(value, key)
+        }
+    }
+} catch (e) {
+    console.warn('Failed to build IFC type map:', e)
+}
+
+function getIfcTypeName(typeCode: number): string | undefined {
+    return IFC_TYPE_MAP.get(typeCode)
+}
 
 let ifcAPI: IfcAPI | null = null
 
@@ -274,20 +294,30 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 // Try to get type name from various possible properties
                 if (elementProps.typeName) {
                     typeName = String(elementProps.typeName)
-                } else if (elementProps.constructor?.name) {
-                    typeName = elementProps.constructor.name
                 } else if (typeof ifcType === 'number' && ifcType >= 0) {
-                    // Try to get name from type code using web-ifc API if available
-                    try {
-                        // web-ifc might have GetNameFromTypeCode or similar
-                        if (api.GetNameFromTypeCode) {
-                            typeName = api.GetNameFromTypeCode(ifcType) || `Type_${ifcType}`
-                        } else {
+                    // Reverse lookup from WebIFC constants
+                    // This is robust against minification
+                    const typeNameFromCode = getIfcTypeName(ifcType)
+                    if (typeNameFromCode) {
+                        typeName = typeNameFromCode
+                    } else if (elementProps.constructor?.name && elementProps.constructor.name.length > 2) {
+                        // Only use constructor name if it looks like a real name (not minified)
+                        typeName = elementProps.constructor.name
+                    } else {
+                        // Try to get name from type code using web-ifc API if available
+                        try {
+                            // web-ifc might have GetNameFromTypeCode or similar
+                            if (api.GetNameFromTypeCode) {
+                                typeName = api.GetNameFromTypeCode(ifcType) || `Type_${ifcType}`
+                            } else {
+                                typeName = `Type_${ifcType}`
+                            }
+                        } catch {
                             typeName = `Type_${ifcType}`
                         }
-                    } catch {
-                        typeName = `Type_${ifcType}`
                     }
+                } else if (elementProps.constructor?.name) {
+                    typeName = elementProps.constructor.name
                 }
             }
 

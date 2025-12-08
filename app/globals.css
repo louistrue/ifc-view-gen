@@ -244,6 +244,13 @@ main {
   margin-bottom: 1rem;
 }
 
+.door-subset-info {
+  color: #aaa;
+  font-size: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-style: italic;
+}
+
 .door-items {
   display: flex;
   flex-direction: column;
@@ -290,3 +297,36 @@ main {
   cursor: not-allowed;
 }
 
+/* Airtable button styles */
+.airtable-button {
+  flex: 1;
+  padding: 0.5rem;
+  background-color: #18bfff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.airtable-button:hover:not(:disabled) {
+  background-color: #0da8e6;
+}
+
+.airtable-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.airtable-button.sending {
+  background-color: #f0ad4e;
+}
+
+.airtable-button.success {
+  background-color: #5cb85c;
+}
+
+.airtable-button.error {
+  background-color: #d9534f;
+}

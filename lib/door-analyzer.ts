@@ -23,8 +23,11 @@ function isDoorType(typeName: string, ifcType?: number): boolean {
         lower.includes('door') ||
         typeName === 'IFCDOOR' ||
         typeName.startsWith('IFCDOOR') ||
-        // Also check type code if available (IFCDOOR is typically type 64)
-        (ifcType !== undefined && (ifcType === 64 || ifcType === 0))
+        // Check regular type code
+        (ifcType !== undefined && (
+            ifcType === WebIFC.IFCDOOR ||
+            ifcType === 64
+        ))
     )
 }
 
@@ -38,8 +41,12 @@ function isWallType(typeName: string, ifcType?: number): boolean {
         typeName === 'IFCWALL' ||
         typeName === 'IFCWALLSTANDARDCASE' ||
         typeName.startsWith('IFCWALL') ||
-        // Also check type code if available (IFCWALL is typically type 65)
-        (ifcType !== undefined && (ifcType === 65 || ifcType === 1))
+        // Check regular type code
+        (ifcType !== undefined && (
+            ifcType === WebIFC.IFCWALL ||
+            ifcType === WebIFC.IFCWALLSTANDARDCASE ||
+            ifcType === 65
+        ))
     )
 }
 
@@ -57,39 +64,59 @@ function isElectricalDeviceType(typeName: string): boolean {
         lower.includes('light') ||
         lower.includes('fixture') ||
         lower.includes('panel') ||
-        lower.includes('distribution')
+        lower.includes('distribution') ||
+        typeName === 'IFCELECTRICAPPLIANCE' ||
+        typeName.startsWith('IFCELECTRICAPPLIANCE')
     )
 }
 
 /**
- * Calculate the normal vector of a door based on bounding box
- * The door face normal is along the SMALLEST horizontal dimension (thickness)
- * This is the direction we want to look FROM to see the door front
+ * Calculate the normal vector of an element based on mesh rotation (preferred) or bounding box
+ * The element face normal is along the SMALLEST horizontal dimension (thickness)
+ * This is the direction we want to look FROM to see the element front
  */
-function calculateDoorNormal(door: ElementInfo): THREE.Vector3 {
-    if (!door.boundingBox) {
+function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
+    // 1. Try to use Mesh Rotation (Most accurate for rotated elements)
+    if (element.mesh) {
+        const mesh = element.mesh
+        mesh.updateMatrixWorld(true) // Ensure matrix is updated
+
+        // We need to determine which LOCAL axis is the "thickness".
+        // Use Geometry Bounding Box (Local Space)
+        if (mesh.geometry) {
+            if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
+            const geom = mesh.geometry
+            if (geom.boundingBox) {
+                const localSize = geom.boundingBox.getSize(new THREE.Vector3())
+
+                // Determine Local Normal Axis
+                // Assume Y is Up (Height). 
+                // Thickness is min(X, Z).
+                let localNormal = new THREE.Vector3(0, 0, 1) // Default Z
+                if (localSize.x < localSize.z) {
+                    localNormal.set(1, 0, 0)
+                }
+
+                // Transform Local Normal to World Normal using Mesh Rotation
+                const rotationMatrix = new THREE.Matrix4().extractRotation(mesh.matrixWorld)
+                const worldNormal = localNormal.applyMatrix4(rotationMatrix).normalize()
+
+                return worldNormal
+            }
+        }
+    }
+
+    // 2. Fallback to World Bounding Box logic (Less accurate for rotated elements)
+    if (!element.boundingBox) {
         return new THREE.Vector3(0, 0, 1)
     }
 
-    const size = door.boundingBox.getSize(new THREE.Vector3())
+    const size = element.boundingBox.getSize(new THREE.Vector3())
 
-    // Debug: log dimensions
-    console.log(`Door ${door.expressID} bbox size: X=${size.x.toFixed(3)}, Y=${size.y.toFixed(3)}, Z=${size.z.toFixed(3)}`)
-
-    // Y is typically height (vertical). We need to find which horizontal axis is the door thickness.
-    // Door thickness is the SMALLEST horizontal dimension.
-    // The viewing normal should be ALONG that axis (perpendicular to door face).
-
-    // Compare X and Z (horizontal dimensions)
+    // Compare X and Z (horizontal dimensions) - Naive axis alignment
     if (size.x < size.z) {
-        // X is smaller = door is thin in X direction = door face is in YZ plane
-        // To see the front, look along X axis
-        console.log(`Door ${door.expressID}: Normal along X (door thin in X)`)
         return new THREE.Vector3(1, 0, 0)
     } else {
-        // Z is smaller = door is thin in Z direction = door face is in XY plane  
-        // To see the front, look along Z axis
-        console.log(`Door ${door.expressID}: Normal along Z (door thin in Z)`)
         return new THREE.Vector3(0, 0, 1)
     }
 }
@@ -103,7 +130,7 @@ function findHostWall(
     threshold: number = 0.3 // meters - how far outside wall bbox door can be
 ): ElementInfo | null {
     if (!door.boundingBox) {
-        console.log(`Door ${door.expressID}: No bounding box`)
+        // console.log(`Door ${door.expressID}: No bounding box`)
         return null
     }
 
@@ -142,9 +169,9 @@ function findHostWall(
     }
 
     if (closestWall) {
-        console.log(`Door ${door.expressID}: Found host wall ${closestWall.expressID}`)
+        // console.log(`Door ${door.expressID}: Found host wall ${closestWall.expressID}`)
     } else {
-        console.log(`Door ${door.expressID}: No host wall found (checked ${walls.length} walls)`)
+        // console.log(`Door ${door.expressID}: No host wall found (checked ${walls.length} walls)`)
     }
 
     return closestWall
@@ -156,6 +183,7 @@ function findHostWall(
 function findNearbyDevices(
     door: ElementInfo,
     devices: ElementInfo[],
+    normal: THREE.Vector3,
     radius: number = 1.0
 ): ElementInfo[] {
     if (!door.boundingBox) return []
@@ -169,7 +197,29 @@ function findNearbyDevices(
         const deviceCenter = device.boundingBox.getCenter(new THREE.Vector3())
         const distance = doorCenter.distanceTo(deviceCenter)
 
-        if (distance <= radius) {
+        // Check if device is roughly in the same plane as the door (wall)
+        // Vector from door to device
+        const toDevice = deviceCenter.clone().sub(doorCenter)
+
+        // Project vector onto door normal (which points OUT of the wall)
+        // This gives the distance perpendicular to the wall plane
+        const distFromPlane = Math.abs(toDevice.dot(normal))
+
+        // Threshold: 30cm (0.3m). Standard walls are ~10-20cm. 
+        // If device is >30cm away from the plane, it's likely on a perpendicular wall.
+        const isAlignedWithWallPlane = distFromPlane < 0.3
+
+        // NEW: Check orientation match
+        // Even if device is "in plane" (e.g. at corner), it might be on perpendicular wall.
+        // We check if Element Normal is parallel to Door Normal.
+        const deviceNormal = calculateElementNormal(device)
+        const orientationDot = Math.abs(normal.dot(deviceNormal))
+
+        // Dot product of parallel vectors is 1 (or -1). Perpendicular is 0.
+        // Allow some tolerance (e.g. > 0.8 means < ~36 degrees difference)
+        const isOrientationMatching = orientationDot > 0.8
+
+        if (distance <= radius && isAlignedWithWallPlane && isOrientationMatching) {
             nearby.push(device)
         }
     }
@@ -235,26 +285,33 @@ function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number): { direct
 /**
  * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name)
  */
-export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
+export function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCModel): DoorContext[] {
     // Separate elements by type
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
     const devices: ElementInfo[] = []
 
-    for (const element of model.elements) {
-        // Log first few elements to debug
-        if (model.elements.indexOf(element) < 5) {
-            console.log(`Element ${element.expressID}: typeName="${element.typeName}", ifcType=${element.ifcType}`)
+    // Helper to process elements from a model
+    const processElements = (elements: ElementInfo[]) => {
+        for (const element of elements) {
+            if (isDoorType(element.typeName, element.ifcType)) {
+                doors.push(element)
+                // console.log(`Found door: ExpressID ${element.expressID}, typeName="${element.typeName}"`)
+            } else if (isWallType(element.typeName, element.ifcType)) {
+                walls.push(element)
+            } else if (isElectricalDeviceType(element.typeName)) {
+                devices.push(element)
+            }
         }
+    }
 
-        if (isDoorType(element.typeName, element.ifcType)) {
-            doors.push(element)
-            console.log(`Found door: ExpressID ${element.expressID}, typeName="${element.typeName}"`)
-        } else if (isWallType(element.typeName, element.ifcType)) {
-            walls.push(element)
-        } else if (isElectricalDeviceType(element.typeName)) {
-            devices.push(element)
-        }
+    // Process primary model
+    processElements(model.elements)
+
+    // Process secondary model if provided
+    if (secondaryModel) {
+        console.log(`Processing secondary model elements: ${secondaryModel.elements.length}`)
+        processElements(secondaryModel.elements)
     }
 
     console.log(`Found ${doors.length} doors, ${walls.length} walls, ${devices.length} electrical devices`)
@@ -263,30 +320,59 @@ export function analyzeDoors(model: LoadedIFCModel): DoorContext[] {
     const doorContexts: DoorContext[] = []
 
     for (const door of doors) {
-        const nearbyDevices = findNearbyDevices(door, devices, 1.0)
+        // Only analyse if door comes from primary model (or should we support doors in secondary? Assumption: doors are in AR model)
+        // Check if door belongs to primary model elements
+        const isPrimaryDoor = model.elements.includes(door)
+        if (!isPrimaryDoor) continue
+
+        // CRITICAL: Ensure door bounding box and center are derived from WORLD coordinates
+        // The loader might give local boxes or stale ones.
+        if (door.mesh) {
+            door.mesh.updateMatrixWorld(true)
+            const worldBox = new THREE.Box3().setFromObject(door.mesh)
+            door.boundingBox = worldBox
+        }
+
+        // Default normal from door
+        let normal = calculateElementNormal(door)
+        const hostWall = findHostWall(door, walls, 0.3)
+
+        // IMPROVEMENT: Use Host Wall normal if available and aligned
+        // This ensures the camera aligns with the WALL plane, which is the reference for devices.
+        if (hostWall) {
+            const wallNormal = calculateElementNormal(hostWall)
+            // Check if wall normal is roughly parallel to door normal (dot > 0.8)
+            // If they are parallel (same direction OR opposite), we might want to align to wall.
+            // But strict parallel check: abs(dot) > 0.8
+            if (Math.abs(normal.dot(wallNormal)) > 0.8) {
+                // Use Wall Normal, but ensure it points in same general direction as Door Normal
+                if (normal.dot(wallNormal) < 0) {
+                    normal = wallNormal.negate()
+                } else {
+                    normal = wallNormal
+                }
+            }
+        }
+
+        // Find devices using the (potentially updated) normal
+        const nearbyDevices = findNearbyDevices(door, devices, normal, 1.0)
 
         const center = door.boundingBox
             ? door.boundingBox.getCenter(new THREE.Vector3())
             : new THREE.Vector3(0, 0, 0)
 
-        const normal = calculateDoorNormal(door)
+        // const normal = calculateDoorNormal(door) // Moved up
 
         // Use GlobalId for doorId if available, otherwise fallback to ExpressID (no prefix)
         const doorId = door.globalId || String(door.expressID)
 
         // Get opening direction and type name
         const { direction: openingDirection, typeName: doorTypeName } = getDoorTypeInfo(model, door.expressID)
-        if (openingDirection) {
-            console.log(`Door ${doorId} opening direction: ${openingDirection}`)
-        }
-        if (doorTypeName) {
-            console.log(`Door ${doorId} type name: ${doorTypeName}`)
-        }
 
         doorContexts.push({
             door,
             wall: null, // Legacy field
-            hostWall: findHostWall(door, walls, 0.3),
+            hostWall,
             nearbyDevices,
             normal,
             center,
