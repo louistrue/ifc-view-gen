@@ -16,16 +16,25 @@ interface AirtableStatus {
   [doorId: string]: 'idle' | 'sending' | 'success' | 'error'
 }
 
+interface AirtableAuthStatus {
+  isAuthenticated: boolean
+  hasBaseId: boolean
+  tableName: string
+}
+
 export default function BatchProcessor({ doorContexts, onComplete, modelSource }: BatchProcessorProps) {
   const [isProcessing, setIsProcessing] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [airtableStatus, setAirtableStatus] = useState<AirtableStatus>({})
-  const [airtableConfigured, setAirtableConfigured] = useState<boolean | null>(null)
+  const [authStatus, setAuthStatus] = useState<AirtableAuthStatus | null>(null)
   const [batchMode, setBatchMode] = useState<'test' | 'all'>('test')
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
+  const [baseId, setBaseId] = useState('')
+  const [tableName, setTableName] = useState('Doors')
+  const [showAirtableConfig, setShowAirtableConfig] = useState(false)
 
   const [options, setOptions] = useState<SVGRenderOptions>({
     width: 1000,
@@ -73,13 +82,36 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     }
   }, [])
 
-  // Check Airtable configuration on mount
-  useEffect(() => {
+  // Check Airtable authentication status on mount and after OAuth
+  const checkAuthStatus = useCallback(() => {
     fetch('/api/airtable')
       .then(res => res.json())
-      .then(data => setAirtableConfigured(data.configured))
-      .catch(() => setAirtableConfigured(false))
+      .then(data => {
+        setAuthStatus(data)
+        if (data.tableName) setTableName(data.tableName)
+      })
+      .catch(() => setAuthStatus({ isAuthenticated: false, hasBaseId: false, tableName: 'Doors' }))
   }, [])
+
+  useEffect(() => {
+    checkAuthStatus()
+
+    // Check for OAuth success/error in URL
+    const params = new URLSearchParams(window.location.search)
+    const oauthStatus = params.get('oauth')
+    const oauthError = params.get('error')
+
+    if (oauthStatus === 'success') {
+      checkAuthStatus()
+      setShowAirtableConfig(true)
+      // Clean up URL
+      window.history.replaceState({}, '', window.location.pathname)
+    } else if (oauthError) {
+      setError(`OAuth error: ${oauthError}`)
+      // Clean up URL
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [checkAuthStatus])
 
   // Send door to Airtable with all 3 views
   const sendToAirtable = useCallback(async (context: DoorContext) => {
@@ -104,6 +136,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           frontView: svgToDataUrl(front),
           backView: svgToDataUrl(back),
           topView: svgToDataUrl(plan),
+          baseId: baseId || undefined,
+          tableName: tableName || undefined,
         }),
       })
 
@@ -118,7 +152,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
       setAirtableStatus(prev => ({ ...prev, [context.doorId]: 'error' }))
       setError(err instanceof Error ? err.message : 'Failed to send to Airtable')
     }
-  }, [options, modelSource])
+  }, [options, modelSource, baseId, tableName])
 
   // Batch upload all doors to Airtable
   const performUpload = useCallback(async () => {
@@ -163,6 +197,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             frontView: svgToDataUrl(front),
             backView: svgToDataUrl(back),
             topView: svgToDataUrl(plan),
+            baseId: baseId || undefined,
+            tableName: tableName || undefined,
           }),
         })
 
@@ -202,7 +238,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
       setIsProcessing(false)
       setPendingAction(null)
     }
-  }, [doorsToProcess, options, modelSource, onComplete])
+  }, [doorsToProcess, options, modelSource, onComplete, baseId, tableName])
 
   const performDownload = useCallback(async () => {
     if (doorsToProcess.length === 0) {
@@ -310,6 +346,26 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     [options]
   )
 
+  const handleConnectAirtable = () => {
+    window.location.href = '/api/auth/airtable/authorize'
+  }
+
+  const handleDisconnectAirtable = async () => {
+    try {
+      const response = await fetch('/api/auth/logout', { method: 'POST' })
+      if (response.ok) {
+        setAuthStatus({ isAuthenticated: false, hasBaseId: false, tableName: 'Doors' })
+        setBaseId('')
+        setTableName('Doors')
+        setShowAirtableConfig(false)
+      }
+    } catch (err) {
+      setError('Failed to disconnect from Airtable')
+    }
+  }
+
+  const isAirtableReady = authStatus?.isAuthenticated && (authStatus?.hasBaseId || baseId)
+
   return (
     <div className="batch-processor">
       <div className="batch-header">
@@ -334,6 +390,62 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             </div>
           )}
         </div>
+      </div>
+
+      <div className="airtable-connection">
+        <div className="connection-header">
+          <h3>Airtable Connection</h3>
+          {authStatus?.isAuthenticated && (
+            <button onClick={handleDisconnectAirtable} className="disconnect-button" disabled={isProcessing}>
+              Disconnect
+            </button>
+          )}
+        </div>
+
+        {!authStatus?.isAuthenticated ? (
+          <div className="connection-prompt">
+            <p>Connect to Airtable to upload door views directly to your database.</p>
+            <button onClick={handleConnectAirtable} className="connect-button">
+              Connect to Airtable
+            </button>
+            <p className="privacy-note">
+              Your credentials are never stored on our servers. Session expires in 8 hours.
+              See our <a href="/privacy-policy" target="_blank">Privacy Policy</a> and <a href="/terms-of-service" target="_blank">Terms of Service</a>.
+            </p>
+          </div>
+        ) : (
+          <div className="connection-config">
+            <div className="status-indicator">
+              <span className="status-dot connected"></span>
+              <span>Connected</span>
+            </div>
+            <div className="config-form">
+              <div className="form-group">
+                <label htmlFor="baseId">Base ID *</label>
+                <input
+                  id="baseId"
+                  type="text"
+                  value={baseId}
+                  onChange={(e) => setBaseId(e.target.value)}
+                  placeholder="appXXXXXXXXXXXXXX"
+                  disabled={isProcessing}
+                />
+                <small>Find this in your Airtable base URL</small>
+              </div>
+              <div className="form-group">
+                <label htmlFor="tableName">Table Name</label>
+                <input
+                  id="tableName"
+                  type="text"
+                  value={tableName}
+                  onChange={(e) => setTableName(e.target.value)}
+                  placeholder="Doors"
+                  disabled={isProcessing}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="style-controls">
@@ -474,7 +586,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             : `Generate ZIP (${doorsToProcess.length} Doors)`}
         </button>
 
-        {airtableConfigured && (
+        {isAirtableReady && (
           <button
             onClick={() => initiateAction('upload')}
             disabled={isProcessing || doorContexts.length === 0}
@@ -534,7 +646,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
                 >
                   Plan
                 </button>
-                {airtableConfigured && (
+                {isAirtableReady && (
                   <button
                     onClick={() => sendToAirtable(context)}
                     disabled={isProcessing || airtableStatus[context.doorId] === 'sending'}
@@ -650,6 +762,120 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           justify-content: space-between;
           align-items: center;
           margin-bottom: 2rem;
+        }
+        .airtable-connection {
+          background: #f8f9fa;
+          padding: 1.5rem;
+          border-radius: 8px;
+          margin-bottom: 2rem;
+        }
+        .connection-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 1rem;
+        }
+        .connection-header h3 {
+          margin: 0;
+        }
+        .disconnect-button {
+          background: #dc3545;
+          color: white;
+          border: none;
+          padding: 0.5rem 1rem;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 0.9rem;
+        }
+        .disconnect-button:hover:not(:disabled) {
+          background: #c82333;
+        }
+        .disconnect-button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .connection-prompt {
+          text-align: center;
+          padding: 1rem;
+        }
+        .connection-prompt p {
+          margin-bottom: 1rem;
+        }
+        .connect-button {
+          background: #28a745;
+          color: white;
+          border: none;
+          padding: 0.75rem 1.5rem;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 1rem;
+          font-weight: 500;
+        }
+        .connect-button:hover {
+          background: #218838;
+        }
+        .privacy-note {
+          font-size: 0.85rem;
+          color: #666;
+          margin-top: 1rem;
+        }
+        .privacy-note a {
+          color: #007bff;
+          text-decoration: none;
+        }
+        .privacy-note a:hover {
+          text-decoration: underline;
+        }
+        .connection-config {
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+        }
+        .status-indicator {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-weight: 500;
+        }
+        .status-dot {
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+        }
+        .status-dot.connected {
+          background: #28a745;
+        }
+        .config-form {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 1rem;
+        }
+        .form-group {
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+        .form-group label {
+          font-weight: 500;
+          font-size: 0.9rem;
+        }
+        .form-group input {
+          padding: 0.5rem;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+          font-size: 0.9rem;
+        }
+        .form-group input:focus {
+          outline: none;
+          border-color: #007bff;
+        }
+        .form-group input:disabled {
+          background: #e9ecef;
+          cursor: not-allowed;
+        }
+        .form-group small {
+          font-size: 0.8rem;
+          color: #666;
         }
       `}</style>
     </div>

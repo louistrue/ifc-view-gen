@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-
-// Hardcoded Airtable configuration - update after running setup script
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || '' // Set after running setup
-const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Doors'
+import { getIronSession } from 'iron-session'
+import { cookies } from 'next/headers'
+import { sessionOptions, SessionData } from '@/lib/session'
 
 const AIRTABLE_API_BASE = 'https://api.airtable.com/v0'
 
@@ -17,13 +15,18 @@ interface DoorData {
     topView?: string
 }
 
-async function findOrCreateDoorRecord(doorId: string): Promise<{ recordId: string; exists: boolean }> {
+async function findOrCreateDoorRecord(
+    doorId: string,
+    token: string,
+    baseId: string,
+    tableName: string
+): Promise<{ recordId: string; exists: boolean }> {
     // Search for existing record
-    const searchUrl = `${AIRTABLE_API_BASE}/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}?filterByFormula={Door ID}="${doorId}"`
+    const searchUrl = `${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}?filterByFormula={Door ID}="${doorId}"`
 
     const searchResponse = await fetch(searchUrl, {
         headers: {
-            'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
+            'Authorization': `Bearer ${token}`,
         },
     })
 
@@ -39,10 +42,10 @@ async function findOrCreateDoorRecord(doorId: string): Promise<{ recordId: strin
     }
 
     // Create new record if not found
-    const createResponse = await fetch(`${AIRTABLE_API_BASE}/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`, {
+    const createResponse = await fetch(`${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}`, {
         method: 'POST',
         headers: {
-            'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
+            'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -95,7 +98,13 @@ async function uploadToBlob(dataUrl: string | undefined, doorId: string, viewTyp
     }
 }
 
-async function updateDoorRecord(recordId: string, data: DoorData): Promise<void> {
+async function updateDoorRecord(
+    recordId: string,
+    data: DoorData,
+    token: string,
+    baseId: string,
+    tableName: string
+): Promise<void> {
     const fields: Record<string, unknown> = {}
 
     if (data.doorType) fields['Door Type'] = data.doorType
@@ -111,10 +120,10 @@ async function updateDoorRecord(recordId: string, data: DoorData): Promise<void>
     if (backUrl) fields['Back View'] = [{ url: backUrl }]
     if (topUrl) fields['Top View'] = [{ url: topUrl }]
 
-    const updateResponse = await fetch(`${AIRTABLE_API_BASE}/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}/${recordId}`, {
+    const updateResponse = await fetch(`${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}/${recordId}`, {
         method: 'PATCH',
         headers: {
-            'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
+            'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json',
         },
         body: JSON.stringify({ fields }),
@@ -126,24 +135,24 @@ async function updateDoorRecord(recordId: string, data: DoorData): Promise<void>
     }
 }
 
+interface AirtableRequestBody extends DoorData {
+    baseId?: string
+    tableName?: string
+}
+
 export async function POST(request: NextRequest) {
     try {
-        // Check configuration
-        if (!AIRTABLE_TOKEN) {
+        // Get session data
+        const session = await getIronSession<SessionData>(await cookies(), sessionOptions)
+
+        if (!session.isAuthenticated || !session.airtableAccessToken) {
             return NextResponse.json(
-                { error: 'AIRTABLE_TOKEN not configured' },
-                { status: 500 }
+                { error: 'Not authenticated. Please connect to Airtable first.' },
+                { status: 401 }
             )
         }
 
-        if (!AIRTABLE_BASE_ID) {
-            return NextResponse.json(
-                { error: 'AIRTABLE_BASE_ID not configured. Run the setup script first.' },
-                { status: 500 }
-            )
-        }
-
-        const body = await request.json() as DoorData
+        const body = await request.json() as AirtableRequestBody
 
         if (!body.doorId) {
             return NextResponse.json(
@@ -152,11 +161,37 @@ export async function POST(request: NextRequest) {
             )
         }
 
+        // Get baseId and tableName from request body or session (fallback to defaults)
+        const baseId = body.baseId || session.airtableBaseId
+        const tableName = body.tableName || session.airtableTableName || 'Doors'
+
+        if (!baseId) {
+            return NextResponse.json(
+                { error: 'baseId is required. Please provide it in the request or save it in your session.' },
+                { status: 400 }
+            )
+        }
+
+        // Save baseId and tableName to session if provided in the request
+        if (body.baseId && body.baseId !== session.airtableBaseId) {
+            session.airtableBaseId = body.baseId
+            await session.save()
+        }
+        if (body.tableName && body.tableName !== session.airtableTableName) {
+            session.airtableTableName = body.tableName
+            await session.save()
+        }
+
         // Find or create the door record
-        const { recordId, exists } = await findOrCreateDoorRecord(body.doorId)
+        const { recordId, exists } = await findOrCreateDoorRecord(
+            body.doorId,
+            session.airtableAccessToken,
+            baseId,
+            tableName
+        )
 
         // Update the record with the door data
-        await updateDoorRecord(recordId, body)
+        await updateDoorRecord(recordId, body, session.airtableAccessToken, baseId, tableName)
 
         return NextResponse.json({
             success: true,
@@ -176,14 +211,13 @@ export async function POST(request: NextRequest) {
     }
 }
 
-// GET endpoint to check configuration
+// GET endpoint to check authentication status
 export async function GET() {
-    const configured = !!(AIRTABLE_TOKEN && AIRTABLE_BASE_ID)
+    const session = await getIronSession<SessionData>(await cookies(), sessionOptions)
 
     return NextResponse.json({
-        configured,
-        hasToken: !!AIRTABLE_TOKEN,
-        hasBaseId: !!AIRTABLE_BASE_ID,
-        tableName: AIRTABLE_TABLE_NAME,
+        isAuthenticated: session.isAuthenticated || false,
+        hasBaseId: !!session.airtableBaseId,
+        tableName: session.airtableTableName || 'Doors',
     })
 }
