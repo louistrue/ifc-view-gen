@@ -1,132 +1,45 @@
 #!/usr/bin/env node
 
 /**
- * Script to import all doors from an IFC file into Airtable
+ * Script to analyze and list doors from an IFC file with filtering options
  *
  * This script:
  * 1. Parses the IFC file to extract all doors
  * 2. Gets door GlobalId, type name, opening direction, and building storey
  * 3. Optionally filters doors by type, storey, or specific GUIDs
- * 4. Creates a record in Airtable for each door
+ * 4. Displays detailed information about the filtered doors
  *
  * Usage:
- *   node scripts/import-doors-to-airtable.js [ifc-file-path] [options]
+ *   node scripts/analyze-doors-filtered.js [ifc-file-path] [options]
  *
  * Options:
  *   --door-types <types>     Filter by door type names (comma-separated)
  *   --storeys <storeys>      Filter by building storeys (comma-separated)
  *   --guids <guids>          Filter by specific door GUIDs (comma-separated)
+ *   --list-types             List all door types found in the model
+ *   --list-storeys           List all building storeys found in the model
  *
  * Examples:
- *   # Import all doors
- *   node scripts/import-doors-to-airtable.js model.ifc
+ *   # Analyze all doors
+ *   node scripts/analyze-doors-filtered.js model.ifc
  *
- *   # Import only specific door types
- *   node scripts/import-doors-to-airtable.js model.ifc --door-types "T30,T60"
+ *   # List all door types and storeys
+ *   node scripts/analyze-doors-filtered.js model.ifc --list-types --list-storeys
  *
- *   # Import doors from specific storeys
- *   node scripts/import-doors-to-airtable.js model.ifc --storeys "EG,OG1"
+ *   # Analyze only specific door types
+ *   node scripts/analyze-doors-filtered.js model.ifc --door-types "T30,T60"
  *
- *   # Import specific doors by GUID
- *   node scripts/import-doors-to-airtable.js model.ifc --guids "2O2Fr$t4X7Zf8NOew3FLOH,1S8LodzGX8dRt2NjBjEZHe"
+ *   # Analyze doors from specific storeys
+ *   node scripts/analyze-doors-filtered.js model.ifc --storeys "EG,OG1"
  *
- * Required environment variables:
- *   AIRTABLE_TOKEN - Your Airtable Personal Access Token
- *   AIRTABLE_BASE_ID - Your Airtable Base ID
- *   AIRTABLE_TABLE_NAME - Table name (defaults to "Doors")
+ *   # Analyze specific doors by GUID
+ *   node scripts/analyze-doors-filtered.js model.ifc --guids "2O2Fr$t4X7Zf8NOew3FLOH,1S8LodzGX8dRt2NjBjEZHe"
  */
 
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const WebIFC = require('web-ifc');
-
-// Airtable configuration
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Doors';
-const AIRTABLE_API_BASE = 'https://api.airtable.com/v0';
-
-if (!AIRTABLE_TOKEN) {
-    console.error('❌ AIRTABLE_TOKEN environment variable is required');
-    process.exit(1);
-}
-
-if (!AIRTABLE_BASE_ID) {
-    console.error('❌ AIRTABLE_BASE_ID environment variable is required');
-    console.error('   Run the setup script first: node scripts/setup-airtable.js');
-    process.exit(1);
-}
-
-async function fetchWithAuth(url, options = {}) {
-    const response = await fetch(url, {
-        ...options,
-        headers: {
-            'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
-            'Content-Type': 'application/json',
-            ...options.headers,
-        },
-    });
-
-    if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Airtable API error: ${response.status} - ${error}`);
-    }
-
-    return response.json();
-}
-
-async function createDoorRecords(doors, modelSource) {
-    console.log(`\n📤 Uploading ${doors.length} doors to Airtable...\n`);
-
-    let created = 0;
-    let failed = 0;
-
-    // Airtable allows batch creates of up to 10 records at a time
-    const batchSize = 10;
-
-    for (let i = 0; i < doors.length; i += batchSize) {
-        const batch = doors.slice(i, i + batchSize);
-
-        const records = batch.map(door => ({
-            fields: {
-                'Door ID': door.globalId,
-                'Door Type': door.typeName || '',
-                'Opening Direction': door.openingDirection || '',
-                'Model Source': modelSource,
-                'Created At': new Date().toISOString(),
-            }
-        }));
-
-        try {
-            await fetchWithAuth(`${AIRTABLE_API_BASE}/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    records,
-                    typecast: true
-                }),
-            });
-
-            created += batch.length;
-            process.stdout.write(`\r  Progress: ${created}/${doors.length} doors created`);
-        } catch (error) {
-            console.error(`\n  ❌ Batch failed: ${error.message}`);
-            failed += batch.length;
-        }
-
-        // Small delay to avoid rate limiting
-        if (i + batchSize < doors.length) {
-            await new Promise(resolve => setTimeout(resolve, 200));
-        }
-    }
-
-    console.log(`\n\n✅ Created ${created} door records`);
-    if (failed > 0) {
-        console.log(`❌ Failed to create ${failed} records`);
-    }
-
-    return { created, failed };
-}
 
 /**
  * Parse command-line arguments
@@ -138,6 +51,8 @@ function parseArguments() {
         doorTypes: null,
         storeys: null,
         guids: null,
+        listTypes: false,
+        listStoreys: false,
     }
 
     for (let i = 0; i < args.length; i++) {
@@ -149,6 +64,10 @@ function parseArguments() {
             options.storeys = args[++i]
         } else if (arg === '--guids' && i + 1 < args.length) {
             options.guids = args[++i]
+        } else if (arg === '--list-types') {
+            options.listTypes = true
+        } else if (arg === '--list-storeys') {
+            options.listStoreys = true
         } else if (!arg.startsWith('--')) {
             // Assume it's the file path
             options.filePath = arg
@@ -340,11 +259,11 @@ async function extractDoorsFromIFC(filePath, filters) {
 
     ifcApi.CloseModel(modelID);
 
-    return filteredDoors;
+    return { allDoors: doors, filteredDoors };
 }
 
 async function main() {
-    console.log('🚀 IFC Door Import to Airtable\n');
+    console.log('🔍 IFC Door Analysis Tool\n');
     console.log('='.repeat(50) + '\n');
 
     // Parse command-line arguments
@@ -361,8 +280,6 @@ async function main() {
         process.exit(1);
     }
 
-    const modelSource = path.basename(filePath);
-
     // Show filter options if any
     if (options.doorTypes || options.storeys || options.guids) {
         console.log('🔍 Filter options:');
@@ -374,34 +291,70 @@ async function main() {
 
     try {
         // Extract doors from IFC with filters
-        const doors = await extractDoorsFromIFC(filePath, options);
+        const { allDoors, filteredDoors } = await extractDoorsFromIFC(filePath, options);
 
-        if (doors.length === 0) {
-            console.log('❌ No doors found in the IFC file');
+        // List types and storeys if requested
+        if (options.listTypes) {
+            console.log('\n📋 All door types in model:');
+            const types = new Set();
+            allDoors.forEach(door => {
+                if (door.typeName) types.add(door.typeName);
+            });
+            Array.from(types).sort().forEach(type => {
+                console.log(`  - ${type}`);
+            });
+        }
+
+        if (options.listStoreys) {
+            console.log('\n📋 All building storeys in model:');
+            const storeys = new Set();
+            allDoors.forEach(door => {
+                if (door.storeyName) storeys.add(door.storeyName);
+            });
+            Array.from(storeys).sort().forEach(storey => {
+                console.log(`  - ${storey}`);
+            });
+        }
+
+        // Show detailed door list
+        if (filteredDoors.length === 0) {
+            console.log('\n❌ No doors match the filter criteria');
             process.exit(1);
         }
 
-        // Show sample of doors
-        console.log('\n📋 Sample doors:');
-        doors.slice(0, 5).forEach((door, i) => {
-            console.log(`  ${i + 1}. ${door.globalId} - Type: ${door.typeName || 'N/A'} - Direction: ${door.openingDirection || 'N/A'}`);
-        });
-        if (doors.length > 5) {
-            console.log(`  ... and ${doors.length - 5} more\n`);
-        }
+        console.log(`\n📋 Filtered doors (${filteredDoors.length}):`);
+        console.log('-'.repeat(100));
+        console.log(
+            'GUID'.padEnd(30) +
+            'Type'.padEnd(25) +
+            'Direction'.padEnd(25) +
+            'Storey'.padEnd(20)
+        );
+        console.log('-'.repeat(100));
 
-        // Upload to Airtable
-        const result = await createDoorRecords(doors, modelSource);
+        filteredDoors.forEach((door, i) => {
+            console.log(
+                (door.globalId || 'N/A').padEnd(30) +
+                (door.typeName || 'N/A').padEnd(25) +
+                (door.openingDirection || 'N/A').padEnd(25) +
+                (door.storeyName || 'N/A').padEnd(20)
+            );
+        });
 
         console.log('\n' + '='.repeat(50));
-        console.log('\n🎉 Import complete!');
-        console.log(`   Base: ${AIRTABLE_BASE_ID}`);
-        console.log(`   Table: ${AIRTABLE_TABLE_NAME}`);
-        console.log(`   Doors imported: ${result.created}`);
-        console.log('\nYou can now use the door app to send images to each door!\n');
+        console.log(`\n✅ Analysis complete!`);
+        console.log(`   Total doors: ${allDoors.length}`);
+        console.log(`   Filtered doors: ${filteredDoors.length}`);
+
+        // Output GUIDs for easy copying
+        if (filteredDoors.length > 0 && filteredDoors.length <= 20) {
+            console.log('\n📋 Filtered door GUIDs (comma-separated):');
+            console.log(filteredDoors.map(d => d.globalId).join(','));
+        }
 
     } catch (error) {
         console.error('❌ Error:', error.message);
+        console.error(error.stack);
         process.exit(1);
     }
 }

@@ -12,6 +12,7 @@ export interface DoorContext {
     doorId: string
     openingDirection: string | null
     doorTypeName: string | null
+    storeyName: string | null // Building storey name
 }
 
 /**
@@ -228,6 +229,46 @@ function findNearbyDevices(
 }
 
 /**
+ * Get the building storey name for a door
+ */
+function getDoorStorey(model: LoadedIFCModel, doorExpressID: number): string | null {
+    try {
+        const api = model.api
+        const modelID = model.modelID
+
+        // Get all IFCRELCONTAINEDINSPATIALSTRUCTURE relationships
+        const relLines = api.GetLineIDsWithType(modelID, WebIFC.IFCRELCONTAINEDINSPATIALSTRUCTURE)
+
+        for (let i = 0; i < relLines.size(); i++) {
+            const relID = relLines.get(i)
+            const rel = api.GetLine(modelID, relID)
+
+            if (!rel.RelatedElements) continue
+
+            const relatedIds = Array.isArray(rel.RelatedElements) ? rel.RelatedElements : [rel.RelatedElements]
+
+            for (const related of relatedIds) {
+                if (related.value === doorExpressID) {
+                    // Found the spatial container relation
+                    const containerID = rel.RelatingStructure.value
+                    const container = api.GetLine(modelID, containerID)
+
+                    // Check if this is a building storey
+                    if (container.type === WebIFC.IFCBUILDINGSTOREY) {
+                        return container.Name?.value || container.LongName?.value || `Storey_${containerID}`
+                    }
+                }
+            }
+        }
+
+        return null
+    } catch (e) {
+        console.warn('Error getting door storey:', e)
+        return null
+    }
+}
+
+/**
  * Get the opening direction and type name of a door from its type
  */
 function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number): { direction: string | null, typeName: string | null } {
@@ -369,6 +410,9 @@ export function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCMo
         // Get opening direction and type name
         const { direction: openingDirection, typeName: doorTypeName } = getDoorTypeInfo(model, door.expressID)
 
+        // Get building storey
+        const storeyName = getDoorStorey(model, door.expressID)
+
         doorContexts.push({
             door,
             wall: null, // Legacy field
@@ -379,6 +423,7 @@ export function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCMo
             doorId,
             openingDirection,
             doorTypeName,
+            storeyName,
         })
     }
 
@@ -452,5 +497,77 @@ function collectMeshesFromElement(element: ElementInfo): THREE.Mesh[] {
     }
 
     return meshes
+}
+
+/**
+ * Filter options for door selection
+ */
+export interface DoorFilterOptions {
+    /** Filter by door type names (comma-separated or array) */
+    doorTypes?: string | string[]
+    /** Filter by building storey names (comma-separated or array) */
+    storeys?: string | string[]
+    /** Filter by specific door GUIDs (comma-separated or array) */
+    guids?: string | string[]
+}
+
+/**
+ * Apply filters to door contexts
+ * @param doors Array of door contexts to filter
+ * @param filters Filter options
+ * @returns Filtered array of door contexts
+ */
+export function filterDoors(doors: DoorContext[], filters: DoorFilterOptions): DoorContext[] {
+    if (!filters || Object.keys(filters).length === 0) {
+        return doors
+    }
+
+    let filtered = doors
+
+    // Filter by door types
+    if (filters.doorTypes) {
+        const types = Array.isArray(filters.doorTypes)
+            ? filters.doorTypes
+            : filters.doorTypes.split(',').map(t => t.trim())
+
+        if (types.length > 0) {
+            filtered = filtered.filter(door =>
+                door.doorTypeName && types.some(type =>
+                    door.doorTypeName?.toLowerCase().includes(type.toLowerCase())
+                )
+            )
+        }
+    }
+
+    // Filter by storeys
+    if (filters.storeys) {
+        const storeys = Array.isArray(filters.storeys)
+            ? filters.storeys
+            : filters.storeys.split(',').map(s => s.trim())
+
+        if (storeys.length > 0) {
+            filtered = filtered.filter(door =>
+                door.storeyName && storeys.some(storey =>
+                    door.storeyName?.toLowerCase().includes(storey.toLowerCase())
+                )
+            )
+        }
+    }
+
+    // Filter by GUIDs (exact match)
+    if (filters.guids) {
+        const guids = Array.isArray(filters.guids)
+            ? filters.guids
+            : filters.guids.split(',').map(g => g.trim())
+
+        if (guids.length > 0) {
+            filtered = filtered.filter(door =>
+                guids.includes(door.doorId) ||
+                guids.includes(door.door.globalId || '')
+            )
+        }
+    }
+
+    return filtered
 }
 
