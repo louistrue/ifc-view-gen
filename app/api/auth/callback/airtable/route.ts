@@ -8,11 +8,25 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get('code');
   const state = searchParams.get('state');
   const error = searchParams.get('error');
+  const errorDescription = searchParams.get('error_description');
+
+  // Log all callback parameters for debugging
+  console.log('OAuth Callback:', {
+    hasCode: !!code,
+    hasState: !!state,
+    error,
+    errorDescription,
+    allParams: Object.fromEntries(searchParams.entries()),
+  });
 
   // Check for OAuth errors
   if (error) {
+    const errorMessage = errorDescription
+      ? `${error}: ${errorDescription}`
+      : error;
+    console.error('OAuth Error from Airtable:', errorMessage);
     return NextResponse.redirect(
-      `${request.nextUrl.origin}/?error=${encodeURIComponent(error)}`
+      `${request.nextUrl.origin}/?error=${encodeURIComponent(errorMessage)}`
     );
   }
 
@@ -69,6 +83,13 @@ export async function GET(request: NextRequest) {
       body.append('client_id', clientId);
     }
 
+    console.log('Token Exchange Request:', {
+      tokenUrl,
+      redirectUri,
+      hasClientSecret: !!clientSecret,
+      bodyKeys: Array.from(body.keys()),
+    });
+
     const tokenResponse = await fetch(tokenUrl, {
       method: 'POST',
       headers,
@@ -76,10 +97,14 @@ export async function GET(request: NextRequest) {
     });
 
     if (!tokenResponse.ok) {
-      const errorData = await tokenResponse.json();
-      console.error('Token exchange failed:', errorData);
+      const errorData = await tokenResponse.json().catch(() => ({}));
+      console.error('Token exchange failed:', {
+        status: tokenResponse.status,
+        statusText: tokenResponse.statusText,
+        errorData,
+      });
       return NextResponse.redirect(
-        `${request.nextUrl.origin}/?error=token_exchange_failed`
+        `${request.nextUrl.origin}/?error=token_exchange_failed&details=${encodeURIComponent(JSON.stringify(errorData))}`
       );
     }
 
