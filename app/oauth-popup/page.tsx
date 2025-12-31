@@ -1,9 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 
-export default function OAuthPopup() {
+function OAuthPopupContent() {
   const searchParams = useSearchParams()
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading')
   const [message, setMessage] = useState('')
@@ -66,5 +66,33 @@ export default function OAuthPopup() {
         <p style={{ color: '#666', fontSize: '0.9rem' }}>You can close this window.</p>
       </div>
     </div>
+  )
+}
+
+export default function OAuthPopup() {
+  return (
+    <Suspense fallback={
+      <div style={{
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        margin: 0,
+        background: '#f8f9fa'
+      }}>
+        <div style={{
+          textAlign: 'center',
+          padding: '2rem',
+          background: 'white',
+          borderRadius: '8px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+        }}>
+          <h1 style={{ color: '#666' }}>Loading...</h1>
+        </div>
+      </div>
+    }>
+      <OAuthPopupContent />
+    </Suspense>
   )
 }
