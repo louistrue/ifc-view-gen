@@ -2,6 +2,8 @@
 
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
+import { filterDoors } from '@/lib/door-analyzer'
+import type { DoorFilterOptions } from '@/lib/door-analyzer'
 import JSZip from 'jszip'
 import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
@@ -27,6 +29,12 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
 
+  // Filter state
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([])
+  const [selectedStoreys, setSelectedStoreys] = useState<string[]>([])
+  const [guidFilter, setGuidFilter] = useState<string>('')
+  const [showFilters, setShowFilters] = useState(false)
+
   const [options, setOptions] = useState<SVGRenderOptions>({
     width: 1000,
     height: 1000,
@@ -43,20 +51,58 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     fontFamily: 'Arial',
   })
 
-  // Determine which doors to process based on mode
+  // Extract unique door types and storeys
+  const availableTypes = useMemo(() => {
+    const types = new Set<string>()
+    doorContexts.forEach(door => {
+      if (door.doorTypeName) types.add(door.doorTypeName)
+    })
+    return Array.from(types).sort()
+  }, [doorContexts])
+
+  const availableStoreys = useMemo(() => {
+    const storeys = new Set<string>()
+    doorContexts.forEach(door => {
+      if (door.storeyName) storeys.add(door.storeyName)
+    })
+    return Array.from(storeys).sort()
+  }, [doorContexts])
+
+  // Apply filters to door contexts
+  const filteredDoors = useMemo(() => {
+    const filters: DoorFilterOptions = {}
+
+    if (selectedTypes.length > 0) {
+      filters.doorTypes = selectedTypes
+    }
+
+    if (selectedStoreys.length > 0) {
+      filters.storeys = selectedStoreys
+    }
+
+    if (guidFilter.trim()) {
+      filters.guids = guidFilter.trim()
+    }
+
+    return filterDoors(doorContexts, filters)
+  }, [doorContexts, selectedTypes, selectedStoreys, guidFilter])
+
+  // Determine which doors to process based on mode and filters
   const doorsToProcess = useMemo(() => {
+    const doorsAfterFilter = filteredDoors
+
     if (batchMode === 'all') {
-      return doorContexts
+      return doorsAfterFilter
     }
     // In test mode, consistent random slice
-    if (doorContexts.length <= 10) {
-      return doorContexts
+    if (doorsAfterFilter.length <= 10) {
+      return doorsAfterFilter
     }
     // Use a seeded-like shuffle for consistency within same render cycle?
     // Actually standard shuffle is fine, but we should memoize heavily.
-    const shuffled = [...doorContexts].sort(() => 0.5 - Math.random()) // clearer sort
+    const shuffled = [...doorsAfterFilter].sort(() => 0.5 - Math.random()) // clearer sort
     return shuffled.slice(0, 10)
-  }, [doorContexts, batchMode])
+  }, [filteredDoors, batchMode])
 
   // Add global unhandled rejection handler to catch any missed promise rejections
   useEffect(() => {
@@ -285,6 +331,37 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     setPendingAction(null)
   }
 
+  // Filter helper functions
+  const toggleType = (type: string) => {
+    setSelectedTypes(prev =>
+      prev.includes(type)
+        ? prev.filter(t => t !== type)
+        : [...prev, type]
+    )
+  }
+
+  const toggleStorey = (storey: string) => {
+    setSelectedStoreys(prev =>
+      prev.includes(storey)
+        ? prev.filter(s => s !== storey)
+        : [...prev, storey]
+    )
+  }
+
+  const clearFilters = () => {
+    setSelectedTypes([])
+    setSelectedStoreys([])
+    setGuidFilter('')
+  }
+
+  const selectAllTypes = () => {
+    setSelectedTypes(availableTypes)
+  }
+
+  const selectAllStoreys = () => {
+    setSelectedStoreys(availableStoreys)
+  }
+
   const downloadSingleDoor = useCallback(
     async (context: DoorContext, view: 'front' | 'back' | 'plan') => {
       try {
@@ -335,6 +412,153 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           )}
         </div>
       </div>
+
+      {/* Filter Panel */}
+      {doorContexts.length > 0 && (
+        <div className="filter-panel">
+          <div className="filter-header">
+            <h3>
+              Filter Doors
+              {(selectedTypes.length > 0 || selectedStoreys.length > 0 || guidFilter.trim()) && (
+                <span className="filter-badge">
+                  {filteredDoors.length}/{doorContexts.length} doors
+                </span>
+              )}
+            </h3>
+            <div className="filter-actions">
+              <button
+                className="toggle-filters-btn"
+                onClick={() => setShowFilters(!showFilters)}
+                disabled={isProcessing}
+              >
+                {showFilters ? '▼ Hide Filters' : '▶ Show Filters'}
+              </button>
+              {(selectedTypes.length > 0 || selectedStoreys.length > 0 || guidFilter.trim()) && (
+                <button
+                  className="clear-filters-btn"
+                  onClick={clearFilters}
+                  disabled={isProcessing}
+                >
+                  Clear All
+                </button>
+              )}
+            </div>
+          </div>
+
+          {showFilters && (
+            <div className="filter-content">
+              {/* Door Types Filter */}
+              {availableTypes.length > 0 && (
+                <div className="filter-section">
+                  <div className="filter-section-header">
+                    <label className="filter-label">Door Types ({selectedTypes.length}/{availableTypes.length})</label>
+                    <div className="filter-section-actions">
+                      <button
+                        className="select-all-btn"
+                        onClick={selectAllTypes}
+                        disabled={isProcessing || selectedTypes.length === availableTypes.length}
+                      >
+                        Select All
+                      </button>
+                      <button
+                        className="clear-btn"
+                        onClick={() => setSelectedTypes([])}
+                        disabled={isProcessing || selectedTypes.length === 0}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <div className="checkbox-grid">
+                    {availableTypes.map(type => (
+                      <label key={type} className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={selectedTypes.includes(type)}
+                          onChange={() => toggleType(type)}
+                          disabled={isProcessing}
+                        />
+                        <span>{type}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Building Storeys Filter */}
+              {availableStoreys.length > 0 && (
+                <div className="filter-section">
+                  <div className="filter-section-header">
+                    <label className="filter-label">Building Storeys ({selectedStoreys.length}/{availableStoreys.length})</label>
+                    <div className="filter-section-actions">
+                      <button
+                        className="select-all-btn"
+                        onClick={selectAllStoreys}
+                        disabled={isProcessing || selectedStoreys.length === availableStoreys.length}
+                      >
+                        Select All
+                      </button>
+                      <button
+                        className="clear-btn"
+                        onClick={() => setSelectedStoreys([])}
+                        disabled={isProcessing || selectedStoreys.length === 0}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <div className="checkbox-grid">
+                    {availableStoreys.map(storey => (
+                      <label key={storey} className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={selectedStoreys.includes(storey)}
+                          onChange={() => toggleStorey(storey)}
+                          disabled={isProcessing}
+                        />
+                        <span>{storey}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* GUID Filter */}
+              <div className="filter-section">
+                <label className="filter-label">Filter by GUIDs (comma-separated)</label>
+                <input
+                  type="text"
+                  className="guid-input"
+                  placeholder="e.g., 2O2Fr$t4X7Zf8NOew3FLOH, 1S8LodzGX8dRt2NjBjEZHe"
+                  value={guidFilter}
+                  onChange={(e) => setGuidFilter(e.target.value)}
+                  disabled={isProcessing}
+                />
+                <small className="filter-help">
+                  Enter one or more door GUIDs separated by commas for precise filtering
+                </small>
+              </div>
+
+              {/* Filter Statistics */}
+              {(selectedTypes.length > 0 || selectedStoreys.length > 0 || guidFilter.trim()) && (
+                <div className="filter-stats">
+                  <strong>Filtering Results:</strong>
+                  <ul>
+                    <li>Total doors: {doorContexts.length}</li>
+                    <li>After filters: {filteredDoors.length}</li>
+                    {batchMode === 'test' && filteredDoors.length > 10 && (
+                      <li>Test mode will process: 10 random doors</li>
+                    )}
+                    {batchMode === 'all' && (
+                      <li>All mode will process: {filteredDoors.length} doors</li>
+                    )}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="style-controls">
         <h3>Style Options</h3>
@@ -510,7 +734,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           {doorsToProcess.slice(0, 50).map((context) => (
             <div key={context.doorId} className="door-item">
               <span className="door-info">
-                {context.doorId} - Wall: {context.wall ? 'Found' : 'Not found'}
+                <strong>{context.doorId}</strong>
+                {context.doorTypeName && <span className="door-type-tag">{context.doorTypeName}</span>}
+                {context.storeyName && <span className="door-storey-tag">{context.storeyName}</span>}
               </span>
               <div className="door-actions">
                 <button
@@ -650,6 +876,185 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           justify-content: space-between;
           align-items: center;
           margin-bottom: 2rem;
+        }
+        .filter-panel {
+          background: #f8f9fa;
+          border: 1px solid #dee2e6;
+          border-radius: 8px;
+          padding: 1rem;
+          margin-bottom: 1.5rem;
+        }
+        .filter-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 0.5rem;
+        }
+        .filter-header h3 {
+          margin: 0;
+          font-size: 1.1rem;
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+        }
+        .filter-badge {
+          background: #007bff;
+          color: white;
+          padding: 0.25rem 0.75rem;
+          border-radius: 12px;
+          font-size: 0.85rem;
+          font-weight: 600;
+        }
+        .filter-actions {
+          display: flex;
+          gap: 0.5rem;
+        }
+        .toggle-filters-btn {
+          background: #6c757d;
+          color: white;
+          border: none;
+          padding: 0.5rem 1rem;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 0.9rem;
+        }
+        .toggle-filters-btn:hover:not(:disabled) {
+          background: #5a6268;
+        }
+        .clear-filters-btn {
+          background: #dc3545;
+          color: white;
+          border: none;
+          padding: 0.5rem 1rem;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 0.9rem;
+        }
+        .clear-filters-btn:hover:not(:disabled) {
+          background: #c82333;
+        }
+        .filter-content {
+          margin-top: 1rem;
+          display: flex;
+          flex-direction: column;
+          gap: 1.5rem;
+        }
+        .filter-section {
+          border: 1px solid #dee2e6;
+          background: white;
+          padding: 1rem;
+          border-radius: 6px;
+        }
+        .filter-section-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 0.75rem;
+        }
+        .filter-label {
+          font-weight: 600;
+          color: #495057;
+          margin: 0;
+        }
+        .filter-section-actions {
+          display: flex;
+          gap: 0.5rem;
+        }
+        .select-all-btn, .clear-btn {
+          background: #e9ecef;
+          border: 1px solid #ced4da;
+          padding: 0.25rem 0.75rem;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 0.85rem;
+        }
+        .select-all-btn:hover:not(:disabled) {
+          background: #dee2e6;
+        }
+        .clear-btn:hover:not(:disabled) {
+          background: #dee2e6;
+        }
+        .select-all-btn:disabled, .clear-btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .checkbox-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+          gap: 0.5rem;
+        }
+        .checkbox-label {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          cursor: pointer;
+          padding: 0.25rem;
+        }
+        .checkbox-label input[type="checkbox"] {
+          cursor: pointer;
+        }
+        .checkbox-label span {
+          user-select: none;
+        }
+        .guid-input {
+          width: 100%;
+          padding: 0.5rem;
+          border: 1px solid #ced4da;
+          border-radius: 4px;
+          font-family: monospace;
+          font-size: 0.9rem;
+          margin-top: 0.5rem;
+        }
+        .guid-input:focus {
+          outline: none;
+          border-color: #007bff;
+          box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+        }
+        .filter-help {
+          color: #6c757d;
+          font-size: 0.85rem;
+          display: block;
+          margin-top: 0.25rem;
+        }
+        .filter-stats {
+          background: #e7f3ff;
+          border: 1px solid #b3d7ff;
+          padding: 0.75rem;
+          border-radius: 4px;
+          margin-top: 0.5rem;
+        }
+        .filter-stats strong {
+          color: #004085;
+        }
+        .filter-stats ul {
+          margin: 0.5rem 0 0 1.5rem;
+          padding: 0;
+          color: #004085;
+        }
+        .filter-stats li {
+          margin: 0.25rem 0;
+        }
+        .door-info {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          flex-wrap: wrap;
+        }
+        .door-type-tag {
+          background: #e7f3ff;
+          color: #004085;
+          padding: 0.15rem 0.5rem;
+          border-radius: 4px;
+          font-size: 0.85rem;
+          border: 1px solid #b3d7ff;
+        }
+        .door-storey-tag {
+          background: #fff3cd;
+          color: #856404;
+          padding: 0.15rem 0.5rem;
+          border-radius: 4px;
+          font-size: 0.85rem;
+          border: 1px solid #ffeaa7;
         }
       `}</style>
     </div>
