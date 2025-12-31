@@ -39,10 +39,19 @@ export async function GET(request: NextRequest) {
   // Verify state parameter for CSRF protection
   const cookieStore = await cookies();
   const storedState = cookieStore.get('oauth_state')?.value;
+  const codeVerifier = cookieStore.get('oauth_code_verifier')?.value;
 
   if (!storedState || storedState !== state) {
+    console.error('State mismatch:', { storedState, receivedState: state });
     return NextResponse.redirect(
       `${request.nextUrl.origin}/?error=invalid_state`
+    );
+  }
+
+  if (!codeVerifier) {
+    console.error('Code verifier not found in cookies');
+    return NextResponse.redirect(
+      `${request.nextUrl.origin}/?error=missing_code_verifier`
     );
   }
 
@@ -61,11 +70,12 @@ export async function GET(request: NextRequest) {
     const tokenUrl = 'https://airtable.com/oauth2/v1/token';
     const redirectUri = `${request.nextUrl.origin}/api/auth/callback/airtable`;
 
-    // Prepare the request body
+    // Prepare the request body with PKCE code_verifier
     const body = new URLSearchParams({
       grant_type: 'authorization_code',
       code,
       redirect_uri: redirectUri,
+      code_verifier: codeVerifier, // Required for PKCE
     });
 
     // Prepare headers
@@ -117,9 +127,12 @@ export async function GET(request: NextRequest) {
     session.isAuthenticated = true;
     await session.save();
 
-    // Clear the state cookie
+    console.log('OAuth flow completed successfully');
+
+    // Clear the state and code verifier cookies
     const response = NextResponse.redirect(`${request.nextUrl.origin}/?oauth=success`);
     response.cookies.set('oauth_state', '', { maxAge: 0 });
+    response.cookies.set('oauth_code_verifier', '', { maxAge: 0 });
 
     return response;
   } catch (error) {

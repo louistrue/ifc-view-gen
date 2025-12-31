@@ -15,7 +15,14 @@ This will show you:
 
 This error usually means one of the following:
 
-#### A. Redirect URI Mismatch
+#### A. Missing PKCE Parameters (FIXED)
+**Problem:** Airtable requires PKCE (Proof Key for Code Exchange) for OAuth.
+
+**Status:** ✅ This has been fixed in the latest version. The app now automatically includes `code_challenge` and `code_challenge_method` parameters.
+
+**If you still see this error:** Make sure you've deployed the latest version of the code.
+
+#### B. Redirect URI Mismatch
 **Problem:** The redirect URI in your Airtable OAuth app doesn't match exactly what the app is sending.
 
 **Solution:**
@@ -31,7 +38,7 @@ This error usually means one of the following:
 - Visit `/api/auth/debug` and copy the `redirectUri` value
 - Paste it exactly into Airtable's OAuth redirect URL field
 
-#### B. Missing Environment Variables
+#### C. Missing Environment Variables
 **Problem:** `AIRTABLE_CLIENT_ID` is not set in Vercel.
 
 **Solution:**
@@ -40,7 +47,7 @@ This error usually means one of the following:
 3. Add `AIRTABLE_CLIENT_ID` with the value from Airtable
 4. Redeploy your application
 
-#### C. Invalid Client ID
+#### D. Invalid Client ID
 **Problem:** The Client ID copied from Airtable is incorrect or has extra whitespace.
 
 **Solution:**
