@@ -96,20 +96,26 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
   useEffect(() => {
     checkAuthStatus()
 
-    // Check for OAuth success/error in URL
-    const params = new URLSearchParams(window.location.search)
-    const oauthStatus = params.get('oauth')
-    const oauthError = params.get('error')
+    // Listen for OAuth popup messages
+    const handleMessage = (event: MessageEvent) => {
+      // Verify origin for security
+      if (event.origin !== window.location.origin) return
 
-    if (oauthStatus === 'success') {
-      checkAuthStatus()
-      setShowAirtableConfig(true)
-      // Clean up URL
-      window.history.replaceState({}, '', window.location.pathname)
-    } else if (oauthError) {
-      setError(`OAuth error: ${oauthError}`)
-      // Clean up URL
-      window.history.replaceState({}, '', window.location.pathname)
+      if (event.data.type === 'airtable-oauth-success') {
+        console.log('OAuth success received from popup')
+        checkAuthStatus()
+        setShowAirtableConfig(true)
+        setError(null)
+      } else if (event.data.type === 'airtable-oauth-error') {
+        console.error('OAuth error received from popup:', event.data.error)
+        setError(`OAuth error: ${event.data.error}`)
+      }
+    }
+
+    window.addEventListener('message', handleMessage)
+
+    return () => {
+      window.removeEventListener('message', handleMessage)
     }
   }, [checkAuthStatus])
 
@@ -347,7 +353,22 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
   )
 
   const handleConnectAirtable = () => {
-    window.location.href = '/api/auth/airtable/authorize'
+    // Open OAuth in popup window
+    const width = 600
+    const height = 700
+    const left = window.screen.width / 2 - width / 2
+    const top = window.screen.height / 2 - height / 2
+
+    const popup = window.open(
+      '/api/auth/airtable/authorize?popup=true',
+      'airtable-oauth',
+      `width=${width},height=${height},left=${left},top=${top},toolbar=no,location=no,status=no,menubar=no,scrollbars=yes,resizable=yes`
+    )
+
+    // Check if popup was blocked
+    if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+      setError('Popup was blocked. Please allow popups for this site and try again.')
+    }
   }
 
   const handleDisconnectAirtable = async () => {
@@ -364,6 +385,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     }
   }
 
+  // Check if user needs to connect or configure Airtable
+  const needsAuth = !authStatus?.isAuthenticated
+  const needsConfig = authStatus?.isAuthenticated && !authStatus?.hasBaseId && !baseId
   const isAirtableReady = authStatus?.isAuthenticated && (authStatus?.hasBaseId || baseId)
 
   return (
@@ -389,63 +413,12 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               </button>
             </div>
           )}
-        </div>
-      </div>
-
-      <div className="airtable-connection">
-        <div className="connection-header">
-          <h3>Airtable Connection</h3>
           {authStatus?.isAuthenticated && (
-            <button onClick={handleDisconnectAirtable} className="disconnect-button" disabled={isProcessing}>
+            <button onClick={handleDisconnectAirtable} className="disconnect-button-small" disabled={isProcessing} title="Disconnect from Airtable">
               Disconnect
             </button>
           )}
         </div>
-
-        {!authStatus?.isAuthenticated ? (
-          <div className="connection-prompt">
-            <p>Connect to Airtable to upload door views directly to your database.</p>
-            <button onClick={handleConnectAirtable} className="connect-button">
-              Connect to Airtable
-            </button>
-            <p className="privacy-note">
-              Your credentials are never stored on our servers. Session expires in 8 hours.
-              See our <a href="/privacy-policy" target="_blank">Privacy Policy</a> and <a href="/terms-of-service" target="_blank">Terms of Service</a>.
-            </p>
-          </div>
-        ) : (
-          <div className="connection-config">
-            <div className="status-indicator">
-              <span className="status-dot connected"></span>
-              <span>Connected</span>
-            </div>
-            <div className="config-form">
-              <div className="form-group">
-                <label htmlFor="baseId">Base ID *</label>
-                <input
-                  id="baseId"
-                  type="text"
-                  value={baseId}
-                  onChange={(e) => setBaseId(e.target.value)}
-                  placeholder="appXXXXXXXXXXXXXX"
-                  disabled={isProcessing}
-                />
-                <small>Find this in your Airtable base URL</small>
-              </div>
-              <div className="form-group">
-                <label htmlFor="tableName">Table Name</label>
-                <input
-                  id="tableName"
-                  type="text"
-                  value={tableName}
-                  onChange={(e) => setTableName(e.target.value)}
-                  placeholder="Doors"
-                  disabled={isProcessing}
-                />
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
       <div className="style-controls">
@@ -586,18 +559,28 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             : `Generate ZIP (${doorsToProcess.length} Doors)`}
         </button>
 
-        {isAirtableReady && (
-          <button
-            onClick={() => initiateAction('upload')}
-            disabled={isProcessing || doorContexts.length === 0}
-            className="airtable-button"
-            style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', flex: 'none' }}
-          >
-            {isProcessing && pendingAction === 'upload'
-              ? `Uploading... ${currentIndex}/${doorsToProcess.length}`
-              : `Upload to Airtable (${doorsToProcess.length} Doors)`}
-          </button>
-        )}
+        <button
+          onClick={() => {
+            if (needsAuth) {
+              handleConnectAirtable()
+            } else if (needsConfig) {
+              setShowAirtableConfig(true)
+            } else {
+              initiateAction('upload')
+            }
+          }}
+          disabled={isProcessing || doorContexts.length === 0}
+          className="airtable-button"
+          style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', flex: 'none' }}
+        >
+          {isProcessing && pendingAction === 'upload'
+            ? `Uploading... ${currentIndex}/${doorsToProcess.length}`
+            : needsAuth
+            ? `🔒 Connect & Upload to Airtable (${doorsToProcess.length} Doors)`
+            : needsConfig
+            ? `⚙️ Configure & Upload to Airtable (${doorsToProcess.length} Doors)`
+            : `Upload to Airtable (${doorsToProcess.length} Doors)`}
+        </button>
 
         {isProcessing && (
           <div className="progress-bar">
@@ -646,18 +629,25 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
                 >
                   Plan
                 </button>
-                {isAirtableReady && (
-                  <button
-                    onClick={() => sendToAirtable(context)}
-                    disabled={isProcessing || airtableStatus[context.doorId] === 'sending'}
-                    className={`airtable-button ${airtableStatus[context.doorId] || 'idle'}`}
-                    title="Send all 3 views to Airtable"
-                  >
-                    {airtableStatus[context.doorId] === 'sending' ? '⏳' :
-                      airtableStatus[context.doorId] === 'success' ? '✓' :
-                        airtableStatus[context.doorId] === 'error' ? '✗' : '📤'}
-                  </button>
-                )}
+                <button
+                  onClick={() => {
+                    if (needsAuth) {
+                      handleConnectAirtable()
+                    } else if (needsConfig) {
+                      setShowAirtableConfig(true)
+                    } else {
+                      sendToAirtable(context)
+                    }
+                  }}
+                  disabled={isProcessing || airtableStatus[context.doorId] === 'sending'}
+                  className={`airtable-button ${airtableStatus[context.doorId] || 'idle'}`}
+                  title={needsAuth ? 'Connect to Airtable' : needsConfig ? 'Configure Airtable' : 'Send all 3 views to Airtable'}
+                >
+                  {airtableStatus[context.doorId] === 'sending' ? '⏳' :
+                    airtableStatus[context.doorId] === 'success' ? '✓' :
+                      airtableStatus[context.doorId] === 'error' ? '✗' :
+                      needsAuth ? '🔒' : '📤'}
+                </button>
               </div>
             </div>
           ))}
@@ -686,6 +676,58 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               </button>
               <button onClick={confirmAction} className="confirm-button">
                 Yes, Proceed
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAirtableConfig && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <h3>Configure Airtable</h3>
+            <p>Enter your Airtable base details to start uploading.</p>
+            <div className="config-form-modal">
+              <div className="form-group">
+                <label htmlFor="modal-baseId">Base ID *</label>
+                <input
+                  id="modal-baseId"
+                  type="text"
+                  value={baseId}
+                  onChange={(e) => setBaseId(e.target.value)}
+                  placeholder="appXXXXXXXXXXXXXX"
+                  autoFocus
+                />
+                <small>Find this in your Airtable base URL (e.g., airtable.com/<strong>appXXXX</strong>/...)</small>
+              </div>
+              <div className="form-group">
+                <label htmlFor="modal-tableName">Table Name</label>
+                <input
+                  id="modal-tableName"
+                  type="text"
+                  value={tableName}
+                  onChange={(e) => setTableName(e.target.value)}
+                  placeholder="Doors"
+                />
+                <small>The name of the table where doors will be stored</small>
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button onClick={() => setShowAirtableConfig(false)} className="cancel-button">
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (!baseId) {
+                    setError('Base ID is required')
+                    return
+                  }
+                  setShowAirtableConfig(false)
+                }}
+                className="confirm-button"
+                disabled={!baseId}
+              >
+                Save & Continue
               </button>
             </div>
           </div>
@@ -763,117 +805,46 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           align-items: center;
           margin-bottom: 2rem;
         }
-        .airtable-connection {
-          background: #f8f9fa;
-          padding: 1.5rem;
-          border-radius: 8px;
-          margin-bottom: 2rem;
-        }
-        .connection-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 1rem;
-        }
-        .connection-header h3 {
-          margin: 0;
-        }
-        .disconnect-button {
+        .disconnect-button-small {
           background: #dc3545;
           color: white;
           border: none;
-          padding: 0.5rem 1rem;
+          padding: 0.4rem 0.8rem;
           border-radius: 4px;
           cursor: pointer;
-          font-size: 0.9rem;
+          font-size: 0.85rem;
         }
-        .disconnect-button:hover:not(:disabled) {
+        .disconnect-button-small:hover:not(:disabled) {
           background: #c82333;
         }
-        .disconnect-button:disabled {
+        .disconnect-button-small:disabled {
           opacity: 0.5;
           cursor: not-allowed;
         }
-        .connection-prompt {
-          text-align: center;
-          padding: 1rem;
+        .config-form-modal {
+          margin: 1.5rem 0;
         }
-        .connection-prompt p {
+        .config-form-modal .form-group {
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
           margin-bottom: 1rem;
         }
-        .connect-button {
-          background: #28a745;
-          color: white;
-          border: none;
-          padding: 0.75rem 1.5rem;
-          border-radius: 4px;
-          cursor: pointer;
-          font-size: 1rem;
-          font-weight: 500;
-        }
-        .connect-button:hover {
-          background: #218838;
-        }
-        .privacy-note {
-          font-size: 0.85rem;
-          color: #666;
-          margin-top: 1rem;
-        }
-        .privacy-note a {
-          color: #007bff;
-          text-decoration: none;
-        }
-        .privacy-note a:hover {
-          text-decoration: underline;
-        }
-        .connection-config {
-          display: flex;
-          flex-direction: column;
-          gap: 1rem;
-        }
-        .status-indicator {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          font-weight: 500;
-        }
-        .status-dot {
-          width: 10px;
-          height: 10px;
-          border-radius: 50%;
-        }
-        .status-dot.connected {
-          background: #28a745;
-        }
-        .config-form {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 1rem;
-        }
-        .form-group {
-          display: flex;
-          flex-direction: column;
-          gap: 0.5rem;
-        }
-        .form-group label {
+        .config-form-modal .form-group label {
           font-weight: 500;
           font-size: 0.9rem;
         }
-        .form-group input {
-          padding: 0.5rem;
+        .config-form-modal .form-group input {
+          padding: 0.6rem;
           border: 1px solid #ccc;
           border-radius: 4px;
-          font-size: 0.9rem;
+          font-size: 0.95rem;
         }
-        .form-group input:focus {
+        .config-form-modal .form-group input:focus {
           outline: none;
           border-color: #007bff;
         }
-        .form-group input:disabled {
-          background: #e9ecef;
-          cursor: not-allowed;
-        }
-        .form-group small {
+        .config-form-modal .form-group small {
           font-size: 0.8rem;
           color: #666;
         }

@@ -19,40 +19,39 @@ export async function GET(request: NextRequest) {
     allParams: Object.fromEntries(searchParams.entries()),
   });
 
+  // Verify state parameter for CSRF protection
+  const cookieStore = await cookies();
+  const storedState = cookieStore.get('oauth_state')?.value;
+  const codeVerifier = cookieStore.get('oauth_code_verifier')?.value;
+  const isPopup = cookieStore.get('oauth_is_popup')?.value === 'true';
+
+  // Helper to create error redirect URL
+  const errorRedirect = (errorMsg: string) => {
+    const baseUrl = isPopup ? '/oauth-popup' : '/';
+    return `${request.nextUrl.origin}${baseUrl}?error=${encodeURIComponent(errorMsg)}`;
+  };
+
   // Check for OAuth errors
   if (error) {
     const errorMessage = errorDescription
       ? `${error}: ${errorDescription}`
       : error;
     console.error('OAuth Error from Airtable:', errorMessage);
-    return NextResponse.redirect(
-      `${request.nextUrl.origin}/?error=${encodeURIComponent(errorMessage)}`
-    );
+    return NextResponse.redirect(errorRedirect(errorMessage));
   }
 
   if (!code || !state) {
-    return NextResponse.redirect(
-      `${request.nextUrl.origin}/?error=missing_parameters`
-    );
+    return NextResponse.redirect(errorRedirect('missing_parameters'));
   }
-
-  // Verify state parameter for CSRF protection
-  const cookieStore = await cookies();
-  const storedState = cookieStore.get('oauth_state')?.value;
-  const codeVerifier = cookieStore.get('oauth_code_verifier')?.value;
 
   if (!storedState || storedState !== state) {
     console.error('State mismatch:', { storedState, receivedState: state });
-    return NextResponse.redirect(
-      `${request.nextUrl.origin}/?error=invalid_state`
-    );
+    return NextResponse.redirect(errorRedirect('invalid_state'));
   }
 
   if (!codeVerifier) {
     console.error('Code verifier not found in cookies');
-    return NextResponse.redirect(
-      `${request.nextUrl.origin}/?error=missing_code_verifier`
-    );
+    return NextResponse.redirect(errorRedirect('missing_code_verifier'));
   }
 
   // Exchange authorization code for access token
@@ -60,9 +59,7 @@ export async function GET(request: NextRequest) {
   const clientSecret = process.env.AIRTABLE_CLIENT_SECRET;
 
   if (!clientId) {
-    return NextResponse.redirect(
-      `${request.nextUrl.origin}/?error=oauth_not_configured`
-    );
+    return NextResponse.redirect(errorRedirect('oauth_not_configured'));
   }
 
   try {
@@ -113,9 +110,7 @@ export async function GET(request: NextRequest) {
         statusText: tokenResponse.statusText,
         errorData,
       });
-      return NextResponse.redirect(
-        `${request.nextUrl.origin}/?error=token_exchange_failed&details=${encodeURIComponent(JSON.stringify(errorData))}`
-      );
+      return NextResponse.redirect(errorRedirect('token_exchange_failed'));
     }
 
     const tokenData = await tokenResponse.json();
@@ -129,10 +124,18 @@ export async function GET(request: NextRequest) {
 
     console.log('OAuth flow completed successfully');
 
+    // Check if this is a popup flow (will have opener_popup cookie)
+    const isPopup = cookieStore.get('oauth_is_popup')?.value === 'true';
+
     // Clear the state and code verifier cookies
-    const response = NextResponse.redirect(`${request.nextUrl.origin}/?oauth=success`);
+    const redirectUrl = isPopup
+      ? `${request.nextUrl.origin}/oauth-popup?oauth=success`
+      : `${request.nextUrl.origin}/?oauth=success`;
+
+    const response = NextResponse.redirect(redirectUrl);
     response.cookies.set('oauth_state', '', { maxAge: 0 });
     response.cookies.set('oauth_code_verifier', '', { maxAge: 0 });
+    response.cookies.set('oauth_is_popup', '', { maxAge: 0 });
 
     return response;
   } catch (error) {

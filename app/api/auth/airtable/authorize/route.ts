@@ -24,6 +24,9 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  // Check if this is a popup flow
+  const isPopup = request.nextUrl.searchParams.get('popup') === 'true';
+
   // Generate a random state parameter for CSRF protection
   const state = crypto.randomBytes(16).toString('base64url');
 
@@ -40,6 +43,7 @@ export async function GET(request: NextRequest) {
     redirectUri,
     origin: request.nextUrl.origin,
     hasPKCE: true,
+    isPopup,
   });
 
   // Build the authorization URL according to Airtable OAuth spec with PKCE
@@ -74,6 +78,17 @@ export async function GET(request: NextRequest) {
     maxAge: 60 * 10, // 10 minutes
     path: '/',
   });
+
+  // Store popup flag if this is a popup flow
+  if (isPopup) {
+    response.cookies.set('oauth_is_popup', 'true', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 60 * 10, // 10 minutes
+      path: '/',
+    });
+  }
 
   return response;
 }
