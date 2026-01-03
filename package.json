@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "setup-wasm": "mkdir -p public/wasm/web-ifc && cp node_modules/web-ifc/*.wasm public/wasm/web-ifc/ 2>/dev/null && echo 'WASM files copied successfully' || echo 'Warning: Could not copy WASM files'",
-    "postinstall": "npm run setup-wasm"
+    "setup-fragments-worker": "mkdir -p public/fragments-worker && cp node_modules/@thatopen/fragments/dist/Worker/worker.mjs public/fragments-worker/ 2>/dev/null && echo 'Fragments worker copied successfully' || echo 'Warning: Could not copy fragments worker'",
+    "postinstall": "npm run setup-wasm && npm run setup-fragments-worker"
   },
   "dependencies": {
     "@thatopen/components": "^3.2.7",
