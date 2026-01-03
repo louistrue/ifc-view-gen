@@ -2,10 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
-import { loadIFCModelWithMetadata, closeIFCModel } from '@/lib/ifc-loader'
+import { loadIFCModelWithFragments, clearFragmentsCache, getFragmentsCacheStats } from '@/lib/fragments-loader'
 import { analyzeDoors } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
-import type { LoadedIFCModel } from '@/lib/ifc-types'
 import BatchProcessor from './BatchProcessor'
 
 export default function IFCViewer() {
@@ -17,10 +16,12 @@ export default function IFCViewer() {
   const modelGroupRef = useRef<THREE.Group | null>(null)
   const electricalModelGroupRef = useRef<THREE.Group | null>(null)
 
-  const loadedModelRef = useRef<LoadedIFCModel | null>(null)
-  const electricalModelRef = useRef<LoadedIFCModel | null>(null)
+  const loadedModelRef = useRef<any>(null)
+  const electricalModelRef = useRef<any>(null)
 
   const [isLoading, setIsLoading] = useState(false)
+  const [loadingProgress, setLoadingProgress] = useState(0)
+  const [loadingStage, setLoadingStage] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [doorContexts, setDoorContexts] = useState<DoorContext[]>([])
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
@@ -28,6 +29,10 @@ export default function IFCViewer() {
   // File names for display
   const [archFileName, setArchFileName] = useState<string>('')
   const [elecFileName, setElecFileName] = useState<string>('')
+
+  // Cache management
+  const [showCacheInfo, setShowCacheInfo] = useState(false)
+  const [cacheStats, setCacheStats] = useState<{ entries: number; totalSize: number; files: any[] } | null>(null)
 
   const mouseDownRef = useRef(false)
   const mousePositionRef = useRef({ x: 0, y: 0 })
@@ -166,13 +171,9 @@ export default function IFCViewer() {
     if (!file) return
 
     setIsLoading(true)
+    setLoadingProgress(0)
     setError(null)
     setShowBatchProcessor(false)
-    // Don't clear contexts immediately if loading secondary model, 
-    // but maybe we should purely refresh everything
-
-    // Actually simplicity: if Architectural model changes, reset everything.
-    // If Electrical model changes, re-analyze using existing Arch model.
 
     if (type === 'arch') {
       setDoorContexts([])
@@ -183,12 +184,6 @@ export default function IFCViewer() {
 
     try {
       if (type === 'arch') {
-        // Close previous model if exists
-        if (loadedModelRef.current) {
-          closeIFCModel(loadedModelRef.current.modelID)
-          loadedModelRef.current = null
-        }
-
         // Remove previous model from scene
         if (modelGroupRef.current && sceneRef.current) {
           sceneRef.current.remove(modelGroupRef.current)
@@ -205,8 +200,21 @@ export default function IFCViewer() {
           modelGroupRef.current = null
         }
 
-        // Load new model with metadata
-        const loadedModel = await loadIFCModelWithMetadata(file)
+        loadedModelRef.current = null
+
+        // Load model using fragments (10x faster!)
+        setLoadingStage('Loading with fragments...')
+        const loadedModel = await loadIFCModelWithFragments(file, (progress) => {
+          setLoadingProgress(progress)
+          if (progress < 30) {
+            setLoadingStage('Converting to fragments...')
+          } else if (progress < 80) {
+            setLoadingStage('Processing geometry...')
+          } else {
+            setLoadingStage('Finalizing...')
+          }
+        })
+
         loadedModelRef.current = loadedModel
 
         const group = loadedModel.group
@@ -223,18 +231,15 @@ export default function IFCViewer() {
 
         // Focus camera on the model geometry
         if (cameraRef.current && containerRef.current) {
-          // Recalculate bounding box after centering
           const centeredBox = new THREE.Box3().setFromObject(group)
           const size = centeredBox.getSize(new THREE.Vector3())
           const maxDim = Math.max(size.x, size.y, size.z)
 
-          // Calculate optimal camera distance to fit the model
           const fov = cameraRef.current.fov * (Math.PI / 180)
           const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2))
-          const distance = cameraZ * 1.5 // Add some padding
+          const distance = cameraZ * 1.5
 
-          // Position camera in a nice angle
-          const angle = Math.PI / 4 // 45 degrees
+          const angle = Math.PI / 4
           cameraRef.current.position.set(
             distance * Math.cos(angle),
             distance * Math.sin(angle),
@@ -245,17 +250,9 @@ export default function IFCViewer() {
         }
       } else {
         // Load Electrical Model
-        // Close previous electrical model if exists
-        if (electricalModelRef.current) {
-          closeIFCModel(electricalModelRef.current.modelID)
-          electricalModelRef.current = null
-        }
-
-        // Remove previous electrical model from scene
         if (electricalModelGroupRef.current && sceneRef.current) {
           sceneRef.current.remove(electricalModelGroupRef.current)
           electricalModelGroupRef.current.traverse((child) => {
-            // ... disposal logic ...
             if (child instanceof THREE.Mesh) {
               child.geometry.dispose()
               if (Array.isArray(child.material)) {
@@ -268,27 +265,19 @@ export default function IFCViewer() {
           electricalModelGroupRef.current = null
         }
 
-        const loadedElecModel = await loadIFCModelWithMetadata(file)
+        electricalModelRef.current = null
+
+        setLoadingStage('Loading electrical model with fragments...')
+        const loadedElecModel = await loadIFCModelWithFragments(file, (progress) => {
+          setLoadingProgress(progress)
+        })
         electricalModelRef.current = loadedElecModel
 
         const group = loadedElecModel.group
 
-        // Apply same centering as architectural model?
-        // Assumption: Both models have same origin (0,0,0) relative to each other.
-        // IF we centered the Arch model by subtracting 'center', we must subtract the SAME vector from Elec model.
-        // BUT: 'center' was calculated from Arch model bounding box.
-        // So we need to store the offset applied to Arch model.
-
         if (modelGroupRef.current) {
-          // We need to know what transformation we applied to Arch model.
-          // In the code above: group.position.sub(center)
-          // We can read the position from modelGroupRef.current
           const offset = modelGroupRef.current.position.clone()
           group.position.copy(offset)
-        } else {
-          // If no arch model loaded (unlikely flow), just center it? 
-          // Better to insist on Arch model first?
-          // For now, let's just add it.
         }
 
         if (sceneRef.current) {
@@ -299,6 +288,7 @@ export default function IFCViewer() {
 
       // Re-analyze doors if Arch model is loaded
       if (loadedModelRef.current) {
+        setLoadingStage('Analyzing doors...')
         console.log('Starting door analysis...')
         const contexts = analyzeDoors(loadedModelRef.current, electricalModelRef.current || undefined)
         console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
@@ -314,8 +304,29 @@ export default function IFCViewer() {
       console.error('Error loading IFC:', err)
     } finally {
       setIsLoading(false)
+      setLoadingProgress(0)
+      setLoadingStage('')
     }
   }
+
+  const handleClearCache = async () => {
+    if (window.confirm('Clear all cached fragments? Files will need to be converted again on next load.')) {
+      await clearFragmentsCache()
+      await loadCacheStats()
+      alert('Cache cleared successfully!')
+    }
+  }
+
+  const loadCacheStats = async () => {
+    const stats = await getFragmentsCacheStats()
+    setCacheStats(stats)
+  }
+
+  useEffect(() => {
+    if (showCacheInfo && !cacheStats) {
+      loadCacheStats()
+    }
+  }, [showCacheInfo, cacheStats])
 
   return (
     <div className="ifc-viewer-container">
@@ -348,7 +359,52 @@ export default function IFCViewer() {
               className="file-input"
             />
           </div>
+
+          <button
+            onClick={() => setShowCacheInfo(!showCacheInfo)}
+            className="cache-button"
+            title="Manage fragments cache"
+          >
+            ⚡ Cache
+          </button>
         </div>
+
+        {isLoading && (
+          <div className="loading-indicator">
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${loadingProgress}%` }} />
+            </div>
+            <div className="loading-text">
+              {loadingStage} ({Math.round(loadingProgress)}%)
+            </div>
+          </div>
+        )}
+
+        {showCacheInfo && (
+          <div className="cache-info">
+            <h3>Fragments Cache</h3>
+            <p>Fragments provide 10x faster loading! First load converts IFC to fragments, subsequent loads are instant.</p>
+            {cacheStats && (
+              <div className="cache-stats">
+                <div>Cached files: {cacheStats.entries}</div>
+                <div>Total size: {(cacheStats.totalSize / 1024 / 1024).toFixed(2)} MB</div>
+                {cacheStats.files.length > 0 && (
+                  <div className="cached-files">
+                    {cacheStats.files.map((file, idx) => (
+                      <div key={idx} className="cached-file">
+                        <span>{file.fileName}</span>
+                        <span className="file-size">{(file.size / 1024 / 1024).toFixed(2)} MB</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button onClick={handleClearCache} className="clear-cache-button">
+                  Clear Cache
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {error && <div className="error-message">{error}</div>}
         {doorContexts.length > 0 && (
@@ -377,6 +433,7 @@ export default function IFCViewer() {
             display: flex;
             gap: 1rem;
             margin-bottom: 0.5rem;
+            align-items: flex-start;
         }
         .input-group {
             display: flex;
@@ -387,6 +444,102 @@ export default function IFCViewer() {
         }
         .file-input-label.secondary:hover {
             background-color: #666;
+        }
+        .cache-button {
+            padding: 0.5rem 1rem;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background-color 0.2s;
+        }
+        .cache-button:hover {
+            background-color: #45a049;
+        }
+        .loading-indicator {
+            margin: 1rem 0;
+            padding: 1rem;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #ddd;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 0.5rem;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #45a049);
+            transition: width 0.3s ease;
+        }
+        .loading-text {
+            text-align: center;
+            font-size: 14px;
+            color: #333;
+            font-weight: 500;
+        }
+        .cache-info {
+            margin: 1rem 0;
+            padding: 1rem;
+            background-color: #e8f5e9;
+            border-radius: 4px;
+            border-left: 4px solid #4CAF50;
+        }
+        .cache-info h3 {
+            margin: 0 0 0.5rem 0;
+            color: #2e7d32;
+        }
+        .cache-info p {
+            margin: 0 0 1rem 0;
+            color: #555;
+          font-size: 14px;
+        }
+        .cache-stats {
+            margin-top: 1rem;
+        }
+        .cache-stats > div {
+            margin-bottom: 0.5rem;
+            font-size: 14px;
+        }
+        .cached-files {
+            margin: 1rem 0;
+            padding: 0.5rem;
+            background-color: white;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .cached-file {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem;
+            border-bottom: 1px solid #eee;
+        }
+        .cached-file:last-child {
+            border-bottom: none;
+        }
+        .file-size {
+            color: #666;
+            font-size: 12px;
+        }
+        .clear-cache-button {
+            padding: 0.5rem 1rem;
+            background-color: #f44336;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.2s;
+        }
+        .clear-cache-button:hover {
+            background-color: #da190b;
         }
       `}</style>
     </div>
