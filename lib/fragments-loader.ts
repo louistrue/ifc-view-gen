@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { IfcImporter, FragmentsModels, FragmentsModel, LodMode } from '@thatopen/fragments';
 import type { ElementInfo, LoadedIFCModel } from './ifc-types';
+import { extractDoorTypes } from './ifc-loader';
 
 // IndexedDB configuration for fragment binary caching
 const DB_NAME = 'Fragments_Binary_Cache';
@@ -186,8 +187,9 @@ const DOOR_SVG_CATEGORIES = new Set([
  * 
  * @param fragmentsModel - The loaded fragments model
  * @param filterCategories - If true, only extract door-related elements (faster)
+ * @param originalFile - The original IFC file for type extraction via web-ifc
  */
-async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories: boolean = true): Promise<ElementInfo[]> {
+async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories: boolean = true, originalFile?: File): Promise<ElementInfo[]> {
   const elements: ElementInfo[] = [];
 
   try {
@@ -198,8 +200,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
       fragmentsModel.getItemsIdsWithGeometry(),
       fragmentsModel.getItemsWithGeometryCategories(),
     ]);
-    console.log(`Found ${categories.length} IFC categories`);
-    console.log(`Found ${items.length} items with geometry`);
 
     if (items.length === 0) {
       console.warn('No items with geometry found in fragments model');
@@ -215,7 +215,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
           filteredIndices.push(i);
         }
       }
-      console.log(`Filtered to ${filteredIndices.length} door-related elements (from ${items.length})`);
     } else {
       filteredIndices = Array.from({ length: items.length }, (_, i) => i);
     }
@@ -223,33 +222,41 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
     // Get only filtered localIds
     const filteredLocalIds = filteredIndices.map(i => localIdsWithGeometry[i]);
 
-    // Only fetch detailed attributes for doors (saves time for walls/windows)
-    const doorLocalIds = filteredLocalIds.filter((_, idx) => {
-      const cat = itemCategories[filteredIndices[idx]]?.toUpperCase() || '';
-      return cat === 'IFCDOOR';
-    });
-
-    // Fetch data for filtered items in parallel
-    // Note: Only fetching detailed itemsData for doors since walls/windows don't need attributes
-    const [doorItemsData, guids, worldBoxes, fragmentElements] = await Promise.all([
-      doorLocalIds.length > 0
-        ? fragmentsModel.getItemsData(doorLocalIds, {
-          attributesDefault: true,
-          relationsDefault: { attributes: false, relations: false },
-        })
-        : Promise.resolve([]),
+    // Fetch basic data for filtered items in parallel
+    const [guids, worldBoxes, fragmentElements] = await Promise.all([
       fragmentsModel.getGuidsByLocalIds(filteredLocalIds),
       fragmentsModel.getBoxes(filteredLocalIds),
       (fragmentsModel as any)._getElements(filteredLocalIds),
     ]);
 
-    // Create map for door data lookup
-    const doorDataMap = new Map<number, any>();
-    doorLocalIds.forEach((id, idx) => {
-      doorDataMap.set(id, doorItemsData[idx]);
-    });
-    console.log(`Got ${worldBoxes.length} world-space bounding boxes`);
-    console.log(`Got ${fragmentElements.length} Element objects`);
+    // Extract IfcDoorType names using IsTypedBy relation on door elements
+    const productTypeMap = new Map<number, string>();
+
+    try {
+      // Find door indices using itemCategories
+      const doorIndices: number[] = [];
+      for (let i = 0; i < filteredLocalIds.length; i++) {
+        const originalIndex = filteredIndices[i];
+        const category = (itemCategories[originalIndex] || '').toUpperCase();
+        if (category === 'IFCDOOR') {
+          doorIndices.push(i);
+        }
+      }
+
+      // Use web-ifc to extract door types (Fragments doesn't expose IFCRELDEFINESBYTYPE properly)
+      if (originalFile) {
+        const webIfcTypeMap = await extractDoorTypes(originalFile);
+
+        // Merge into productTypeMap (web-ifc uses expressID, same as localId)
+        for (const [expressId, typeName] of webIfcTypeMap) {
+          productTypeMap.set(expressId, typeName);
+        }
+      } else {
+      }
+    } catch (err) {
+      console.warn('Failed to extract door type names:', err);
+      console.error(err);
+    }
 
     // Create arrays for direct index-based access (faster than maps)
     // fragmentElements are already in the same order as filteredLocalIds
@@ -277,24 +284,11 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             const globalId = guids[dataIndex] || undefined;
             const category = itemCategories[originalIndex] || 'Unknown';
 
-            // Only get detailed data for doors
-            const itemData = doorDataMap.get(localId);
+            // IFC class name (e.g., "IFCDOOR")
+            const typeName = category;
 
-            // Extract type name from category or itemData (for doors)
-            let typeName = category;
-            if ((!typeName || typeName === 'Unknown') && itemData) {
-              if (typeof itemData === 'object') {
-                for (const [key, value] of Object.entries(itemData)) {
-                  if (key.toLowerCase().includes('type') && typeof value === 'object' && value !== null) {
-                    const attrValue = (value as any).value;
-                    if (typeof attrValue === 'string' && attrValue.length > 0) {
-                      typeName = attrValue;
-                      break;
-                    }
-                  }
-                }
-              }
-            }
+            // Product type name from IfcRelDefinesByType (e.g., "Door Type A")
+            const productTypeName = productTypeMap.get(localId);
 
             // Get IFC type code
             const ifcType = getIfcTypeCode(typeName);
@@ -315,15 +309,50 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             try {
               meshGroup = await element.getMeshes();
             } catch (e) {
-              // Ignore errors
+              console.warn(`getMeshes failed for localId ${localId}:`, e);
             }
 
-            if (!meshGroup) return null;
+            if (!meshGroup) {
+              console.warn(`No mesh group for localId ${localId}`);
+              return null;
+            }
 
             // Extract meshes from the group
             const meshes = extractMeshesFromGroup(meshGroup);
 
-            if (meshes.length === 0) return null;
+            if (meshes.length === 0) {
+              console.warn(`No meshes extracted from group for localId ${localId}`);
+              return null;
+            }
+
+            // Verify mesh has valid geometry and debug geometry structure
+            let hasValidGeometry = false;
+            for (const mesh of meshes) {
+              const geo = mesh.geometry;
+              const posAttr = geo?.attributes?.position;
+
+              // Check for interleaved buffer attributes (Fragments optimization)
+              if (posAttr && 'isInterleavedBufferAttribute' in posAttr) {
+                // Interleaved buffer - need to de-interleave for standard operations
+
+                // Create standard BufferAttribute from interleaved data
+                const count = posAttr.count;
+                const newPositions = new Float32Array(count * 3);
+                for (let v = 0; v < count; v++) {
+                  newPositions[v * 3] = posAttr.getX(v);
+                  newPositions[v * 3 + 1] = posAttr.getY(v);
+                  newPositions[v * 3 + 2] = posAttr.getZ(v);
+                }
+                geo.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
+                hasValidGeometry = true;
+              } else if (posAttr?.count > 0) {
+                hasValidGeometry = true;
+              }
+            }
+
+            if (!hasValidGeometry) {
+              console.warn(`[Fragments] No valid geometry for localId ${localId}`);
+            }
 
             // Apply world transforms to meshes - CRITICAL for correct SVG generation!
             // We MUST bake the transform into the geometry vertices, not just set mesh.matrix,
@@ -361,6 +390,7 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
               expressID: localId,
               ifcType,
               typeName,
+              productTypeName,
               mesh: primaryMesh,
               meshes: meshes.length > 0 ? meshes : undefined,
               boundingBox,
@@ -389,13 +419,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
       });
     }
 
-    console.log(`✓ Extracted ${elements.length} elements from fragments model`);
-
-    // Log some statistics
-    const doorCount = elements.filter(e => e.typeName.toLowerCase().includes('door')).length;
-    const wallCount = elements.filter(e => e.typeName.toLowerCase().includes('wall')).length;
-    const windowCount = elements.filter(e => e.typeName.toLowerCase().includes('window')).length;
-    console.log(`  - Doors: ${doorCount}, Walls: ${wallCount}, Windows: ${windowCount}`);
 
   } catch (error) {
     console.error('Failed to extract metadata from fragments:', error);
@@ -417,7 +440,6 @@ export async function loadIFCModelWithFragments(
   file: File,
   onProgress?: (progress: LoadingProgress) => void
 ): Promise<LoadedFragmentsModel> {
-  console.log('Loading IFC model with Fragments...');
 
   // Stage 1: Initialize
   onProgress?.({ percent: 0, stage: 'Initializing...' });
@@ -431,7 +453,6 @@ export async function loadIFCModelWithFragments(
 
   if (cached) {
     // Cached path - faster
-    console.log('✓ Loading from cached Fragments binary (ultra-fast!)');
     onProgress?.({ percent: 10, stage: 'Loading from cache...' });
 
     // Simulate a brief delay to show the stage (cache read is too fast)
@@ -441,7 +462,6 @@ export async function loadIFCModelWithFragments(
     onProgress?.({ percent: 30, stage: 'Cache loaded' });
   } else {
     // Fresh conversion path
-    console.log('Converting IFC to Fragments binary (first-time conversion)...');
     onProgress?.({ percent: 10, stage: 'Reading IFC file...' });
 
     // Initialize the IFC importer
@@ -482,7 +502,6 @@ export async function loadIFCModelWithFragments(
       fragmentBytes,
     });
 
-    console.log('✓ Fragments binary cached for future use');
     onProgress?.({ percent: 70, stage: 'Cached for next time' });
   }
 
@@ -504,7 +523,8 @@ export async function loadIFCModelWithFragments(
   // Extract metadata from the loaded fragments model
   // This creates properly transformed meshes for SVG generation ONLY
   // NOTE: We do NOT add these meshes to the 3D scene - we use fragmentsModel.object instead!
-  const elements = await extractMetadata(fragmentsModel);
+  // Pass the original file for web-ifc type extraction
+  const elements = await extractMetadata(fragmentsModel, true, file);
 
   onProgress?.({ percent: 95, stage: 'Finalizing...' });
 
@@ -527,9 +547,6 @@ export async function loadIFCModelWithFragments(
   manager.settings.graphicsQuality = 0.8; // High quality (0-1 scale)
   manager.settings.forceUpdateRate = 200; // Force update every 200ms if needed
 
-  console.log(`✓ Loaded ${elements.length} elements using Fragments format`);
-  console.log(`✓ Using Fragments optimized rendering (LOD, culling, instancing enabled)`);
-  console.log(`✓ Extracted meshes available for SVG generation: ${elements.length} elements`);
   onProgress?.({ percent: 100, stage: 'Complete!' });
 
   return {
@@ -551,7 +568,6 @@ export async function clearFragmentsCache(): Promise<void> {
       const store = transaction.objectStore(STORE_NAME);
       const request = store.clear();
       request.onsuccess = () => {
-        console.log('Fragments cache cleared');
         resolve();
       };
       request.onerror = () => reject(request.error);

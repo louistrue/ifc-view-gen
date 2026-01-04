@@ -1,6 +1,6 @@
 /**
  * Interactive section plane tool
- * Supports drawing section lines and clicking on faces
+ * Supports drawing section lines
  */
 
 import * as THREE from 'three'
@@ -118,19 +118,6 @@ export class SectionPlane {
         this.plane.setFromNormalAndCoplanarPoint(normal, planePoint)
 
         // Update helper visualization
-        this.updateHelper()
-    }
-
-    /**
-     * Create section from a face click
-     * @param point Click point in world space
-     * @param normal Face normal
-     */
-    setFromFace(point: THREE.Vector3, normal: THREE.Vector3): void {
-        // Set plane from face normal and point
-        this.plane.setFromNormalAndCoplanarPoint(normal.clone().negate(), point)
-
-        // Update helper
         this.updateHelper()
     }
 
@@ -355,66 +342,4 @@ export class SectionPlane {
     }
 }
 
-/**
- * Raycast to find face normal at click point
- */
-export function getFaceAtPoint(
-    screenPoint: { x: number; y: number },
-    camera: THREE.PerspectiveCamera,
-    scene: THREE.Scene,
-    containerWidth: number,
-    containerHeight: number,
-    modelBounds?: THREE.Box3
-): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
-    // Convert screen coords to NDC
-    const ndcX = (screenPoint.x / containerWidth) * 2 - 1
-    const ndcY = -((screenPoint.y / containerHeight) * 2 - 1)
-
-    // Get view direction for the section normal
-    const viewDir = new THREE.Vector3()
-    camera.getWorldDirection(viewDir)
-
-    // Use model bounds or compute from scene
-    let bounds = modelBounds
-    if (!bounds) {
-        bounds = new THREE.Box3()
-        scene.traverse((obj) => {
-            if (obj instanceof THREE.Mesh && obj.geometry) {
-                const meshBounds = new THREE.Box3().setFromObject(obj)
-                if (!meshBounds.isEmpty()) {
-                    bounds!.union(meshBounds)
-                }
-            }
-        })
-    }
-
-    // Project click point to a plane at model center
-    // (Avoid raycasting because Fragments geometry doesn't support it)
-    const boundsCenter = bounds.isEmpty()
-        ? new THREE.Vector3(0, 0, 0)
-        : bounds.getCenter(new THREE.Vector3())
-
-    const targetPlane = new THREE.Plane()
-    targetPlane.setFromNormalAndCoplanarPoint(viewDir.clone().negate(), boundsCenter)
-
-    // Unproject near and far points to create ray
-    const nearPoint = new THREE.Vector3(ndcX, ndcY, 0).unproject(camera)
-    const farPoint = new THREE.Vector3(ndcX, ndcY, 1).unproject(camera)
-
-    const ray = new THREE.Ray()
-    ray.origin.copy(nearPoint)
-    ray.direction.copy(farPoint).sub(nearPoint).normalize()
-
-    const clickPoint = new THREE.Vector3()
-    const intersected = ray.intersectPlane(targetPlane, clickPoint)
-
-    if (intersected) {
-        return {
-            point: clickPoint,
-            normal: viewDir.clone()
-        }
-    }
-
-    return null
-}
 

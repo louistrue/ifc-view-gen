@@ -65,7 +65,6 @@ export async function extractSpatialStructure(
         }
 
         // Method 3: Fallback to category-based grouping
-        console.log('Using category-based fallback for spatial structure')
         return buildFromCategories(elements, categoryMap)
 
     } catch (error) {
@@ -291,15 +290,6 @@ async function tryBuildFromSpatialCategories(
             }
         }
 
-        console.log(`✓ Built spatial structure from categories`)
-        console.log(`  Storeys: ${storeys.length}`)
-        console.log(`  Elements mapped to storeys: ${elementToStorey.size}`)
-        console.log(`  Unassigned elements: ${unassignedElements.length}`)
-
-        // Log per-storey counts
-        for (const storey of storeys) {
-            console.log(`    ${storey.name}: ${storey.allElementIds.length} model elements (${storey.elementIds.length} tracked)`)
-        }
 
         return root
     } catch (error) {
@@ -459,9 +449,6 @@ async function tryBuildFromSpatialTree(
         }
         assignElements(root)
 
-        console.log(`✓ Extracted spatial hierarchy using Fragments API`)
-        console.log(`  Root: ${root.type} (${root.name})`)
-        console.log(`  Structure: ${countNodes(root)} nodes`)
 
         return root
     } catch (error) {
@@ -530,9 +517,6 @@ function buildFromCategories(
         isolated: false,
     }
 
-    console.log(`✓ Built category-based structure`)
-    console.log(`  Categories: ${categoryNodes.length}`)
-    console.log(`  Total elements: ${elements.length}`)
 
     return root
 }

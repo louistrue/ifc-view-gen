@@ -2,14 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
-import { loadIFCModelWithFragments, clearFragmentsCache, getFragmentsCacheStats } from '@/lib/fragments-loader'
-import { analyzeDoors } from '@/lib/door-analyzer'
+import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
+import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
-import BatchProcessor from './BatchProcessor'
+import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
-import { SectionBox } from '@/lib/section-box'
 import { SectionPlane } from '@/lib/section-plane'
 import ViewerToolbar, { type SectionMode } from './ViewerToolbar'
 import ZoomWindowOverlay from './ZoomWindowOverlay'
@@ -17,6 +16,7 @@ import SectionDrawOverlay from './SectionDrawOverlay'
 import ViewPresets from './ViewPresets'
 import SpatialHierarchyPanel from './SpatialHierarchyPanel'
 import TypeFilterPanel from './TypeFilterPanel'
+import IFCClassFilterPanel from './IFCClassFilterPanel'
 
 export default function IFCViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -29,6 +29,8 @@ export default function IFCViewer() {
 
   const loadedModelRef = useRef<any>(null)
   const electricalModelRef = useRef<any>(null)
+  const archFileRef = useRef<File | null>(null) // Store arch file for detailed geometry extraction
+  const modelCenterOffsetRef = useRef<THREE.Vector3>(new THREE.Vector3()) // Store centering offset
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingProgress, setLoadingProgress] = useState(0)
@@ -41,14 +43,10 @@ export default function IFCViewer() {
   const [archFileName, setArchFileName] = useState<string>('')
   const [elecFileName, setElecFileName] = useState<string>('')
 
-  // Cache management
-  const [showCacheInfo, setShowCacheInfo] = useState(false)
-  const [cacheStats, setCacheStats] = useState<{ entries: number; totalSize: number; files: any[] } | null>(null)
 
   // Navigation and performance systems
   const navigationManagerRef = useRef<NavigationManager | null>(null)
   const visibilityManagerRef = useRef<ElementVisibilityManager | null>(null)
-  const sectionBoxRef = useRef<SectionBox | null>(null)
   const sectionPlaneRef = useRef<SectionPlane | null>(null)
   const batchProcessorVisibleRef = useRef(false)
   const fragmentsManagerRef = useRef<any>(null) // Fragments manager for update() in render loop
@@ -57,17 +55,20 @@ export default function IFCViewer() {
 
   // Spatial structure
   const [spatialStructure, setSpatialStructure] = useState<SpatialNode | null>(null)
+  const spatialStructureRef = useRef<SpatialNode | null>(null) // For immediate access in async code
 
   // UI state
   const [showSpatialPanel, setShowSpatialPanel] = useState(false)
   const [showTypeFilter, setShowTypeFilter] = useState(false)
-  const [navigationMode, setNavigationMode] = useState<'orbit' | 'walk'>('orbit')
+  const [showIFCClassFilter, setShowIFCClassFilter] = useState(false)
   const [zoomWindowActive, setZoomWindowActive] = useState(false)
   const [sectionMode, setSectionMode] = useState<SectionMode>('off')
   const [isSectionActive, setIsSectionActive] = useState(false) // True when any section is enabled
   const [modelLoaded, setModelLoaded] = useState(false)
   // Persist active class filters across panel open/close
   const [activeClassFilters, setActiveClassFilters] = useState<Set<string> | null>(null)
+  // Persist active IFC class filters across panel open/close
+  const [activeIFCClassFilters, setActiveIFCClassFilters] = useState<Set<string> | null>(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -165,10 +166,6 @@ export default function IFCViewer() {
     // Initialize navigation manager
     const navManager = new NavigationManager(camera, scene, renderer)
     navManager.setNeedsRenderCallback(markNeedsRender)
-    navManager.onModeChange((mode) => {
-      setNavigationMode(mode)
-      needsRender = true
-    })
     navigationManagerRef.current = navManager
 
     // Handle window resize
@@ -198,15 +195,6 @@ export default function IFCViewer() {
 
     // Keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Tab to switch navigation mode
-      if (e.key === 'Tab' && !e.shiftKey) {
-        e.preventDefault()
-        if (navigationManagerRef.current) {
-          const newMode = navigationMode === 'orbit' ? 'walk' : 'orbit'
-          navigationManagerRef.current.setMode(newMode)
-        }
-      }
-
       // View presets (1-7)
       if (e.key >= '1' && e.key <= '7' && navigationManagerRef.current) {
         const presets: Array<'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso'> = [
@@ -265,16 +253,13 @@ export default function IFCViewer() {
     if (sectionPlaneRef.current) {
       sectionPlaneRef.current.disable()
     }
-    // Clear section box
-    if (sectionBoxRef.current) {
-      sectionBoxRef.current.disable()
-    }
     // Reset visibility manager
     if (visibilityManagerRef.current) {
       visibilityManagerRef.current.resetAllVisibility()
     }
     // Reset class filters
     setActiveClassFilters(null)
+    setActiveIFCClassFilters(null)
     // Reset section states
     setSectionMode('off')
     setIsSectionActive(false)
@@ -292,7 +277,6 @@ export default function IFCViewer() {
 
     // Prevent double-loading from React StrictMode
     if (isLoadingRef.current) {
-      console.log('⚠️ Load already in progress, skipping duplicate call')
       return
     }
     isLoadingRef.current = true
@@ -338,6 +322,7 @@ export default function IFCViewer() {
 
         loadedModelRef.current = loadedModel
         setModelLoaded(true)
+        archFileRef.current = file // Store file for detailed geometry extraction
 
         const group = loadedModel.group
 
@@ -345,6 +330,34 @@ export default function IFCViewer() {
         const box = new THREE.Box3().setFromObject(group)
         const center = box.getCenter(new THREE.Vector3())
         group.position.sub(center)
+        modelCenterOffsetRef.current = center.clone() // Store for geometry offset
+
+        // CRITICAL: Apply centering offset to extracted elements' bounding boxes and meshes
+        // The extracted meshes have world-space geometry, but we've now shifted the scene.
+        // We MUST CLONE geometry before translating to avoid modifying shared/instanced geometry!
+        for (const element of loadedModel.elements) {
+          // Offset bounding box
+          if (element.boundingBox) {
+            element.boundingBox.min.sub(center)
+            element.boundingBox.max.sub(center)
+          }
+          // Offset mesh geometry - CLONE first to avoid shared geometry issues!
+          if (element.meshes) {
+            for (let i = 0; i < element.meshes.length; i++) {
+              const mesh = element.meshes[i]
+              if (mesh.geometry) {
+                // Clone geometry to avoid modifying shared instances
+                mesh.geometry = mesh.geometry.clone()
+                mesh.geometry.translate(-center.x, -center.y, -center.z)
+              }
+            }
+          }
+          if (element.mesh?.geometry) {
+            // Clone geometry to avoid modifying shared instances
+            element.mesh.geometry = element.mesh.geometry.clone()
+            element.mesh.geometry.translate(-center.x, -center.y, -center.z)
+          }
+        }
 
         if (sceneRef.current) {
           sceneRef.current.add(group)
@@ -357,7 +370,6 @@ export default function IFCViewer() {
           fragmentsManagerRef.current = loadedModel.fragmentsManager
           // Trigger initial update after camera is set
           await loadedModel.fragmentsManager.update(true)
-          console.log('✓ Enabled Fragments camera-based optimizations (LOD, culling)')
         }
 
         // Initialize visibility manager
@@ -367,9 +379,12 @@ export default function IFCViewer() {
         )
         visibilityManagerRef.current = visibilityManager
 
-        // Connect visibility manager to Fragments and render system
+        // Connect visibility manager to Fragments, render system, and scene (for highlights)
         if (loadedModel.fragmentsManager) {
           visibilityManager.setFragmentsManager(loadedModel.fragmentsManager)
+        }
+        if (sceneRef.current) {
+          visibilityManager.setScene(sceneRef.current)
         }
         visibilityManager.setRenderCallback(() => triggerRenderRef.current())
 
@@ -379,18 +394,11 @@ export default function IFCViewer() {
           loadedModel.elements
         )
         setSpatialStructure(spatialRoot)
+        spatialStructureRef.current = spatialRoot // Store in ref for immediate access
 
-        // Initialize section box with renderer for global clipping
+        // Initialize section plane (for line drawing)
         const modelBounds = new THREE.Box3().setFromObject(group)
         if (sceneRef.current && rendererRef.current) {
-          const sectionBox = new SectionBox(
-            sceneRef.current,
-            { min: modelBounds.min, max: modelBounds.max },
-            rendererRef.current
-          )
-          sectionBoxRef.current = sectionBox
-
-          // Initialize section plane (for line/face drawing)
           const sectionPlane = new SectionPlane(
             sceneRef.current,
             modelBounds,
@@ -487,9 +495,36 @@ export default function IFCViewer() {
       // Re-analyze doors if Arch model is loaded
       if (loadedModelRef.current) {
         setLoadingStage('Analyzing doors...')
-        console.log('Starting door analysis...')
-        const contexts = await analyzeDoors(loadedModelRef.current, electricalModelRef.current || undefined)
-        console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
+
+        // Extract OperationTypes from web-ifc for swing arc rendering
+        let operationTypeMap: Map<number, string> | undefined
+        if (archFileRef.current) {
+          try {
+            const { extractDoorOperationTypes } = await import('@/lib/ifc-loader')
+            operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
+          } catch (err) {
+            console.warn('Failed to extract OperationTypes, swing arcs will not be shown:', err)
+          }
+        }
+
+        // Pass spatial structure to extract storey names for doors
+        const contexts = await analyzeDoors(
+          loadedModelRef.current,
+          electricalModelRef.current || undefined,
+          spatialStructureRef.current,  // Use ref for immediate access
+          operationTypeMap  // Pass OperationType map for swing arc rendering
+        )
+
+        // Load detailed geometry from web-ifc for high-quality SVG generation
+        if (archFileRef.current && contexts.length > 0) {
+          setLoadingStage('Extracting detailed geometry...')
+          try {
+            await loadDetailedGeometry(contexts, archFileRef.current, modelCenterOffsetRef.current)
+          } catch (err) {
+            console.warn('Failed to load detailed geometry, SVG will use simplified rendering:', err)
+          }
+        }
+
         setDoorContexts(contexts)
 
         if (loadedModelRef.current.elements.length > 0) {
@@ -520,24 +555,6 @@ export default function IFCViewer() {
     }
   }
 
-  const handleClearCache = async () => {
-    if (window.confirm('Clear all cached fragments? Files will need to be converted again on next load.')) {
-      await clearFragmentsCache()
-      await loadCacheStats()
-      alert('Cache cleared successfully!')
-    }
-  }
-
-  const loadCacheStats = async () => {
-    const stats = await getFragmentsCacheStats()
-    setCacheStats(stats)
-  }
-
-  useEffect(() => {
-    if (showCacheInfo && !cacheStats) {
-      loadCacheStats()
-    }
-  }, [showCacheInfo, cacheStats])
 
   // Update renderer when model loads
   useEffect(() => {
@@ -620,41 +637,7 @@ export default function IFCViewer() {
                 className="file-input"
               />
             </div>
-
-            <button
-              onClick={() => setShowCacheInfo(!showCacheInfo)}
-              className="cache-button"
-              title="Manage fragments cache"
-            >
-              Cache
-            </button>
           </div>
-
-          {showCacheInfo && (
-            <div className="cache-info">
-              <h3>Fragments Cache</h3>
-              <p>Fragments provide 10x faster loading! First load converts IFC to fragments, subsequent loads are instant.</p>
-              {cacheStats && (
-                <div className="cache-stats">
-                  <div>Cached files: {cacheStats.entries}</div>
-                  <div>Total size: {(cacheStats.totalSize / 1024 / 1024).toFixed(2)} MB</div>
-                  {cacheStats.files.length > 0 && (
-                    <div className="cached-files">
-                      {cacheStats.files.map((file, idx) => (
-                        <div key={idx} className="cached-file">
-                          <span>{file.fileName}</span>
-                          <span className="file-size">{(file.size / 1024 / 1024).toFixed(2)} MB</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <button onClick={handleClearCache} className="clear-cache-button">
-                    Clear Cache
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
 
           {error && <div className="error-message">{error}</div>}
           {doorContexts.length > 0 && (
@@ -684,10 +667,10 @@ export default function IFCViewer() {
           containerRef={containerRef}
         />
 
-        {/* Section Draw Overlay - for line/face section modes */}
+        {/* Section Draw Overlay - for line section mode */}
         <SectionDrawOverlay
-          active={sectionMode === 'line' || sectionMode === 'face'}
-          mode={sectionMode === 'line' ? 'line' : 'face'}
+          active={sectionMode === 'line'}
+          mode="line"
           onComplete={() => setSectionMode('off')}
           onSectionEnabled={() => {
             setIsSectionActive(true)
@@ -697,6 +680,7 @@ export default function IFCViewer() {
           camera={cameraRef.current}
           scene={sceneRef.current}
           containerRef={containerRef}
+          triggerRender={triggerRenderRef.current}
         />
 
         {/* Landing UI overlay when no model loaded */}
@@ -907,11 +891,12 @@ export default function IFCViewer() {
 
         {showBatchProcessor && doorContexts.length > 0 && (
           <div className="batch-panel">
-            <BatchProcessor
+            <DoorPanel
               doorContexts={doorContexts}
+              visibilityManager={visibilityManagerRef.current}
+              navigationManager={navigationManagerRef.current}
               onComplete={() => {
-                // Optional: hide batch processor after completion
-                // setShowBatchProcessor(false)
+                // Optional callback when export completes
               }}
             />
           </div>
@@ -934,20 +919,6 @@ export default function IFCViewer() {
         }
         .file-input-label.secondary:hover {
             background-color: #666;
-        }
-        .cache-button {
-            padding: 0.5rem 1rem;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: bold;
-            transition: background-color 0.2s;
-        }
-        .cache-button:hover {
-            background-color: #45a049;
         }
         .loading-indicator {
             margin: 1rem 0;
@@ -973,63 +944,6 @@ export default function IFCViewer() {
             font-size: 14px;
             color: #333;
             font-weight: 500;
-        }
-        .cache-info {
-            margin: 1rem 0;
-            padding: 1rem;
-            background-color: #e8f5e9;
-            border-radius: 4px;
-            border-left: 4px solid #4CAF50;
-        }
-        .cache-info h3 {
-            margin: 0 0 0.5rem 0;
-            color: #2e7d32;
-        }
-        .cache-info p {
-            margin: 0 0 1rem 0;
-            color: #555;
-          font-size: 14px;
-        }
-        .cache-stats {
-            margin-top: 1rem;
-        }
-        .cache-stats > div {
-            margin-bottom: 0.5rem;
-            font-size: 14px;
-        }
-        .cached-files {
-            margin: 1rem 0;
-            padding: 0.5rem;
-            background-color: white;
-            border-radius: 4px;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        .cached-file {
-            display: flex;
-            justify-content: space-between;
-            padding: 0.5rem;
-            border-bottom: 1px solid #eee;
-        }
-        .cached-file:last-child {
-            border-bottom: none;
-        }
-        .file-size {
-            color: #666;
-            font-size: 12px;
-        }
-        .clear-cache-button {
-            padding: 0.5rem 1rem;
-            background-color: #f44336;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.2s;
-        }
-        .clear-cache-button:hover {
-            background-color: #da190b;
         }
         .spatial-node {
             margin: 2px 0;
@@ -1115,36 +1029,14 @@ export default function IFCViewer() {
           {/* Viewer Toolbar */}
           <ViewerToolbar
             navigationManager={navigationManagerRef.current}
-            sectionBox={sectionBoxRef.current}
-            onNavigationModeChange={setNavigationMode}
-            onSectionBoxToggle={(enabled) => {
-              if (sectionBoxRef.current) {
-                if (enabled) {
-                  sectionBoxRef.current.enable()
-                  setIsSectionActive(true)
-                } else {
-                  sectionBoxRef.current.disable()
-                  setIsSectionActive(false)
-                }
-                triggerRenderRef.current() // Force render
-              }
-            }}
             onSectionModeChange={(mode) => {
               // Clear previous section when changing modes
               if (sectionPlaneRef.current) {
                 sectionPlaneRef.current.disable()
               }
-              if (sectionBoxRef.current && mode !== 'box') {
-                sectionBoxRef.current.disable()
-              }
               // If turning off, clear section active state
               if (mode === 'off') {
                 setIsSectionActive(false)
-              }
-              // If selecting box mode, enable section box
-              if (mode === 'box' && sectionBoxRef.current) {
-                sectionBoxRef.current.enable()
-                setIsSectionActive(true)
               }
               setSectionMode(mode)
               triggerRenderRef.current() // Force render to show changes
@@ -1153,10 +1045,12 @@ export default function IFCViewer() {
             isSectionActive={isSectionActive}
             onSpatialPanelToggle={() => setShowSpatialPanel(!showSpatialPanel)}
             onTypeFilterToggle={() => setShowTypeFilter(!showTypeFilter)}
+            onIFCClassFilterToggle={() => setShowIFCClassFilter(!showIFCClassFilter)}
             onZoomWindowToggle={() => setZoomWindowActive(!zoomWindowActive)}
             onResetView={handleResetView}
             showSpatialPanel={showSpatialPanel}
             showTypeFilter={showTypeFilter}
+            showIFCClassFilter={showIFCClassFilter}
             zoomWindowActive={zoomWindowActive}
           />
 
@@ -1174,14 +1068,37 @@ export default function IFCViewer() {
             />
           )}
 
-          {/* IFC Class Filter Panel */}
+          {/* Type Filter Panel */}
           {showTypeFilter && loadedModelRef.current && (
             <TypeFilterPanel
               visibilityManager={visibilityManagerRef.current}
               elements={loadedModelRef.current.elements}
               activeFilters={activeClassFilters}
-              onFiltersChange={setActiveClassFilters}
+              onFiltersChange={(filters) => {
+                setActiveClassFilters(filters)
+                // Clear IFC class filters when type filters are applied (mutually exclusive)
+                if (filters !== null) {
+                  setActiveIFCClassFilters(null)
+                }
+              }}
               onClose={() => setShowTypeFilter(false)}
+            />
+          )}
+
+          {/* IFC Class Filter Panel */}
+          {showIFCClassFilter && loadedModelRef.current && (
+            <IFCClassFilterPanel
+              visibilityManager={visibilityManagerRef.current}
+              elements={loadedModelRef.current.elements}
+              activeFilters={activeIFCClassFilters}
+              onFiltersChange={(filters) => {
+                setActiveIFCClassFilters(filters)
+                // Clear type filters when IFC class filters are applied (mutually exclusive)
+                if (filters !== null) {
+                  setActiveClassFilters(null)
+                }
+              }}
+              onClose={() => setShowIFCClassFilter(false)}
             />
           )}
         </div>

@@ -2,9 +2,9 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
-import { SectionPlane, getFaceAtPoint } from '@/lib/section-plane'
+import { SectionPlane } from '@/lib/section-plane'
 
-type SectionMode = 'line' | 'face'
+type SectionMode = 'line'
 
 interface SectionDrawOverlayProps {
     active: boolean
@@ -15,6 +15,7 @@ interface SectionDrawOverlayProps {
     camera: THREE.PerspectiveCamera | null
     scene: THREE.Scene | null
     containerRef: React.RefObject<HTMLDivElement>  // Canvas container for dimension matching
+    triggerRender?: () => void  // Callback to trigger scene render
 }
 
 export default function SectionDrawOverlay({
@@ -26,11 +27,12 @@ export default function SectionDrawOverlay({
     camera,
     scene,
     containerRef,
+    triggerRender,
 }: SectionDrawOverlayProps) {
     const [isDrawing, setIsDrawing] = useState(false)
     const [startPoint, setStartPoint] = useState({ x: 0, y: 0 })
     const [currentPoint, setCurrentPoint] = useState({ x: 0, y: 0 })
-    const [hoverPoint, setHoverPoint] = useState<{ x: number; y: number } | null>(null)
+    const [shiftHeld, setShiftHeld] = useState(false)
     const overlayRef = useRef<HTMLDivElement>(null)
 
     const getRelativeCoords = useCallback((e: React.MouseEvent) => {
@@ -43,65 +45,61 @@ export default function SectionDrawOverlay({
         }
     }, [containerRef])
 
+    // Constrain point to horizontal or vertical when Shift is held
+    const getConstrainedPoint = useCallback((start: { x: number; y: number }, current: { x: number; y: number }, shift: boolean) => {
+        if (!shift) return current
+        
+        const dx = current.x - start.x
+        const dy = current.y - start.y
+        
+        // Snap to nearest horizontal or vertical
+        if (Math.abs(dx) > Math.abs(dy)) {
+            // Horizontal constraint
+            return { x: current.x, y: start.y }
+        } else {
+            // Vertical constraint
+            return { x: start.x, y: current.y }
+        }
+    }, [])
+
     const handleMouseDown = (e: React.MouseEvent) => {
         e.preventDefault()
         e.stopPropagation()
 
         const coords = getRelativeCoords(e)
 
-        if (mode === 'line') {
-            // Start drawing a line
-            setStartPoint(coords)
-            setCurrentPoint(coords)
-            setIsDrawing(true)
-        } else if (mode === 'face') {
-            // Click on face to create section
-            if (sectionPlane && camera && scene && overlayRef.current) {
-                // Use canvas container dimensions to match camera projection
-                const width = containerRef.current?.clientWidth || overlayRef.current.clientWidth
-                const height = containerRef.current?.clientHeight || overlayRef.current.clientHeight
-
-                const faceData = getFaceAtPoint(
-                    coords,
-                    camera,
-                    scene,
-                    width,
-                    height
-                )
-
-                if (faceData) {
-                    sectionPlane.setFromFace(faceData.point, faceData.normal)
-                    sectionPlane.enable()
-                    onSectionEnabled()
-                    onComplete()
-                }
-            }
-        }
+        // Start drawing a line
+        setStartPoint(coords)
+        setCurrentPoint(coords)
+        setIsDrawing(true)
     }
 
     const handleMouseMove = (e: React.MouseEvent) => {
         const coords = getRelativeCoords(e)
-        setHoverPoint(coords)
 
-        if (isDrawing && mode === 'line') {
+        if (isDrawing) {
             e.preventDefault()
             e.stopPropagation()
-            setCurrentPoint(coords)
+            // Apply constraint if Shift is held
+            const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld)
+            setCurrentPoint(constrainedCoords)
         }
     }
 
     const handleMouseUp = (e: React.MouseEvent) => {
-        if (!isDrawing || mode !== 'line') return
+        if (!isDrawing) return
         e.preventDefault()
         e.stopPropagation()
 
         const coords = getRelativeCoords(e)
-        setCurrentPoint(coords)
+        // Apply constraint if Shift is held
+        const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld)
+        setCurrentPoint(constrainedCoords)
         setIsDrawing(false)
 
-        // Calculate line length
-        const dx = coords.x - startPoint.x
-        const dy = coords.y - startPoint.y
+        // Calculate line length using constrained coordinates
+        const dx = constrainedCoords.x - startPoint.x
+        const dy = constrainedCoords.y - startPoint.y
         const length = Math.sqrt(dx * dx + dy * dy)
 
         // Only create section if line is long enough
@@ -115,8 +113,8 @@ export default function SectionDrawOverlay({
                 y: -((startPoint.y / height) * 2 - 1)
             }
             const endNDC = {
-                x: (coords.x / width) * 2 - 1,
-                y: -((coords.y / height) * 2 - 1)
+                x: (constrainedCoords.x / width) * 2 - 1,
+                y: -((constrainedCoords.y / height) * 2 - 1)
             }
 
             sectionPlane.setFromScreenLine(startNDC, endNDC, camera)
@@ -127,14 +125,21 @@ export default function SectionDrawOverlay({
         onComplete()
     }
 
-    // ESC to cancel
+    // ESC to cancel, Shift for constraint
     useEffect(() => {
         if (!active) return
 
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Escape') {
                 setIsDrawing(false)
+                if (triggerRender) {
+                    triggerRender()
+                }
                 onComplete()
+            }
+            // Shift key for horizontal/vertical constraint
+            if (e.key === 'Shift') {
+                setShiftHeld(true)
             }
             // F to flip section
             if ((e.key === 'f' || e.key === 'F') && sectionPlane?.isEnabled()) {
@@ -142,9 +147,26 @@ export default function SectionDrawOverlay({
             }
         }
 
+        const handleKeyUp = (e: KeyboardEvent) => {
+            if (e.key === 'Shift') {
+                setShiftHeld(false)
+            }
+        }
+
         document.addEventListener('keydown', handleKeyDown)
-        return () => document.removeEventListener('keydown', handleKeyDown)
-    }, [active, onComplete, sectionPlane])
+        document.addEventListener('keyup', handleKeyUp)
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown)
+            document.removeEventListener('keyup', handleKeyUp)
+        }
+    }, [active, onComplete, sectionPlane, triggerRender])
+
+    // Reset shift state when overlay becomes inactive
+    useEffect(() => {
+        if (!active) {
+            setShiftHeld(false)
+        }
+    }, [active])
 
     if (!active) return null
 
@@ -163,7 +185,9 @@ export default function SectionDrawOverlay({
                 if (isDrawing) {
                     setIsDrawing(false)
                 }
-                setHoverPoint(null)
+                if (triggerRender) {
+                    triggerRender()
+                }
             }}
             style={{
                 position: 'absolute',
@@ -171,7 +195,7 @@ export default function SectionDrawOverlay({
                 left: 0,
                 right: 0,
                 bottom: 0,
-                cursor: mode === 'line' ? 'crosshair' : 'pointer',
+                cursor: 'crosshair',
                 zIndex: 1001,
                 backgroundColor: 'rgba(0, 0, 0, 0.05)',
             }}
@@ -197,28 +221,20 @@ export default function SectionDrawOverlay({
                 }}
             >
                 <div style={{ fontWeight: 600, marginBottom: '8px', fontSize: '14px' }}>
-                    {mode === 'line' ? 'Draw Section Line' : 'Click Face for Section'}
+                    Draw Section Line
                 </div>
                 <div style={{ color: '#888', fontSize: '12px', lineHeight: 1.5 }}>
-                    {mode === 'line' ? (
-                        <>
-                            Draw a line to create a section plane<br />
-                            The model will be cut perpendicular to your line
-                        </>
-                    ) : (
-                        <>
-                            Click on any face to create a section<br />
-                            The section will align to the face plane
-                        </>
-                    )}
+                    Draw a line to create a section plane<br />
+                    The model will be cut perpendicular to your line
                 </div>
                 <div style={{ marginTop: '12px', color: '#666', fontSize: '11px' }}>
+                    Shift — Hold for horizontal/vertical constraint<br />
                     ESC to cancel • F to flip section
                 </div>
             </div>
 
             {/* Section line being drawn */}
-            {isDrawing && mode === 'line' && (
+            {isDrawing && (
                 <>
                     {/* Main line */}
                     <svg
@@ -282,23 +298,6 @@ export default function SectionDrawOverlay({
                         CUT
                     </div>
                 </>
-            )}
-
-            {/* Face mode hover indicator */}
-            {mode === 'face' && hoverPoint && !isDrawing && (
-                <div
-                    style={{
-                        position: 'absolute',
-                        left: hoverPoint.x - 15,
-                        top: hoverPoint.y - 15,
-                        width: 30,
-                        height: 30,
-                        border: '2px solid #4ecdc4',
-                        borderRadius: '50%',
-                        pointerEvents: 'none',
-                        backgroundColor: 'rgba(78, 205, 196, 0.15)',
-                    }}
-                />
             )}
         </div>
     )

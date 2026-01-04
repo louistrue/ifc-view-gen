@@ -12,6 +12,72 @@ export interface DoorContext {
     doorId: string
     openingDirection: string | null
     doorTypeName: string | null
+    storeyName: string | null  // Building storey name from spatial structure
+
+    // Detailed geometry from web-ifc (for high-quality SVG rendering)
+    detailedGeometry?: {
+        doorMeshes: THREE.Mesh[]
+        wallMeshes: THREE.Mesh[]
+        deviceMeshes: THREE.Mesh[]
+    }
+}
+
+/**
+ * Filter options for door filtering
+ */
+export interface DoorFilterOptions {
+    /** Filter by door type names (comma-separated or array) */
+    doorTypes?: string | string[]
+    /** Filter by building storey names (comma-separated or array) */
+    storeys?: string | string[]
+    /** Filter by specific door GUIDs (comma-separated or array) */
+    guids?: string | string[]
+}
+
+/**
+ * Filter doors based on filter options
+ * Uses AND logic between filter types, OR logic within each type
+ */
+export function filterDoors(doors: DoorContext[], options: DoorFilterOptions): DoorContext[] {
+    if (!options || Object.keys(options).length === 0) {
+        return doors
+    }
+
+    // Parse filter values
+    const parseFilter = (value: string | string[] | undefined): string[] => {
+        if (!value) return []
+        if (Array.isArray(value)) return value.map(v => v.toLowerCase().trim())
+        return value.split(',').map(v => v.toLowerCase().trim()).filter(Boolean)
+    }
+
+    const doorTypes = parseFilter(options.doorTypes)
+    const storeys = parseFilter(options.storeys)
+    const guids = parseFilter(options.guids)
+
+    return doors.filter(door => {
+        // Door type filter (partial match, case-insensitive)
+        if (doorTypes.length > 0) {
+            const doorType = (door.doorTypeName || '').toLowerCase()
+            const matchesType = doorTypes.some(t => doorType.includes(t))
+            if (!matchesType) return false
+        }
+
+        // Storey filter (partial match, case-insensitive)
+        if (storeys.length > 0) {
+            const storey = (door.storeyName || '').toLowerCase()
+            const matchesStorey = storeys.some(s => storey.includes(s))
+            if (!matchesStorey) return false
+        }
+
+        // GUID filter (exact match)
+        if (guids.length > 0) {
+            const guid = door.doorId.toLowerCase()
+            const matchesGuid = guids.some(g => g === guid)
+            if (!matchesGuid) return false
+        }
+
+        return true
+    })
 }
 
 /**
@@ -231,21 +297,85 @@ function findNearbyDevices(
 /**
  * Get the opening direction and type name of a door from its type
  * Works with both web-ifc models and fragments models
+ * @param operationTypeMap - Optional map of door expressID -> OperationType (from web-ifc extraction)
  */
-async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doorElement?: ElementInfo): Promise<{ direction: string | null, typeName: string | null }> {
+async function getDoorTypeInfo(
+    model: LoadedIFCModel,
+    doorExpressID: number,
+    doorElement?: ElementInfo,
+    operationTypeMap?: Map<number, string>
+): Promise<{ direction: string | null, typeName: string | null }> {
     const result = { direction: null as string | null, typeName: null as string | null }
+
+    // Check if we have OperationType from web-ifc extraction (preferred method)
+    if (operationTypeMap && operationTypeMap.has(doorExpressID)) {
+        result.direction = operationTypeMap.get(doorExpressID) || null
+    }
 
     // Check if this is a fragments model (has fragmentsModel property)
     const fragmentsModel = (model as any).fragmentsModel;
 
     if (fragmentsModel) {
         // Fragments model path - use already-extracted data (fast, no API calls)
-        // The typeName was already extracted during model loading
-        if (doorElement?.typeName) {
+        // Use productTypeName (from IfcDoorType via IfcRelDefinesByType) - the real type name
+        // Fall back to typeName (IFC class name) if productTypeName not available
+        if (doorElement?.productTypeName) {
+            result.typeName = doorElement.productTypeName;
+        } else if (doorElement?.typeName) {
             result.typeName = doorElement.typeName;
         }
-        // Note: Opening direction would require additional API calls to get OperationType
-        // For performance, we skip this for fragments models (can be added later if needed)
+
+        // Extract OperationType for swing arc rendering (only if not already set from web-ifc map)
+        // We need to query the door element data to get OperationType
+        if (!result.direction) {
+            try {
+                const doorData = await fragmentsModel.getItemsData([doorExpressID], {
+                    attributesDefault: true,
+                    relations: {
+                        IsTypedBy: { attributes: true, relations: { RelatingType: { attributes: true, relations: false } } },
+                    },
+                    relationsDefault: { attributes: false, relations: false },
+                });
+
+                if (doorData && doorData.length > 0) {
+                    const data = doorData[0] as any;
+
+                    // Check instance OperationType first
+                    // OperationType might be stored as {value: "SINGLE_SWING_LEFT"} or just a string
+                    let operationType = null;
+                    if (data.OperationType) {
+                        operationType = typeof data.OperationType === 'object' ? data.OperationType.value : data.OperationType;
+                    }
+
+                    if (operationType && operationType !== 'NOTDEFINED' && operationType !== '') {
+                        result.direction = operationType;
+                    }
+
+                    // Check type OperationType if not found on instance
+                    if (!result.direction && data.IsTypedBy && Array.isArray(data.IsTypedBy)) {
+                        for (const rel of data.IsTypedBy) {
+                            const relatingType = rel?.RelatingType;
+                            if (relatingType) {
+                                let typeOperationType = null;
+                                if (relatingType.OperationType) {
+                                    typeOperationType = typeof relatingType.OperationType === 'object'
+                                        ? relatingType.OperationType.value
+                                        : relatingType.OperationType;
+                                }
+
+                                if (typeOperationType && typeOperationType !== 'NOTDEFINED' && typeOperationType !== '') {
+                                    result.direction = typeOperationType;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                }
+            } catch (e) {
+                console.warn(`Failed to extract OperationType for door ${doorExpressID}:`, e);
+            }
+        }
     } else {
         // Web-ifc model path (original implementation)
         try {
@@ -308,9 +438,59 @@ async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doo
 }
 
 /**
- * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name)
+ * Storey map type for quick lookup
  */
-export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCModel): Promise<DoorContext[]> {
+type StoreyMap = Map<number, string>
+
+/**
+ * Build a map of element ID -> storey name from spatial structure
+ */
+function buildStoreyMap(spatialNode: any, map: StoreyMap = new Map(), currentStorey: string | null = null): StoreyMap {
+    if (!spatialNode) return map
+
+    // If this is a storey node, track it
+    let storeyName = currentStorey
+    if (spatialNode.type === 'IfcBuildingStorey') {
+        storeyName = spatialNode.name || `Storey ${spatialNode.id}`
+    }
+
+    // Map all elements in this node to the current storey
+    if (storeyName && spatialNode.elementIds) {
+        for (const elementId of spatialNode.elementIds) {
+            map.set(elementId, storeyName)
+        }
+    }
+    if (storeyName && spatialNode.allElementIds) {
+        for (const elementId of spatialNode.allElementIds) {
+            if (!map.has(elementId)) {
+                map.set(elementId, storeyName)
+            }
+        }
+    }
+
+    // Recurse into children
+    if (spatialNode.children) {
+        for (const child of spatialNode.children) {
+            buildStoreyMap(child, map, storeyName)
+        }
+    }
+
+    return map
+}
+
+/**
+ * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name, storey)
+ * @param operationTypeMap - Optional map of door expressID -> OperationType (from web-ifc extraction)
+ */
+export async function analyzeDoors(
+    model: LoadedIFCModel,
+    secondaryModel?: LoadedIFCModel,
+    spatialStructure?: any,
+    operationTypeMap?: Map<number, string>
+): Promise<DoorContext[]> {
+    // Build storey map from spatial structure for quick lookup
+    const storeyMap = buildStoreyMap(spatialStructure)
+
     // Separate elements by type
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
@@ -335,11 +515,8 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
 
     // Process secondary model if provided
     if (secondaryModel) {
-        console.log(`Processing secondary model elements: ${secondaryModel.elements.length}`)
         processElements(secondaryModel.elements)
     }
-
-    console.log(`Found ${doors.length} doors, ${walls.length} walls, ${devices.length} electrical devices`)
 
     // Analyze each door
     const doorContexts: DoorContext[] = []
@@ -350,12 +527,15 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
         const isPrimaryDoor = model.elements.includes(door)
         if (!isPrimaryDoor) continue
 
-        // CRITICAL: Ensure door bounding box and center are derived from WORLD coordinates
-        // The loader might give local boxes or stale ones.
-        if (door.mesh) {
-            door.mesh.updateMatrixWorld(true)
-            const worldBox = new THREE.Box3().setFromObject(door.mesh)
-            door.boundingBox = worldBox
+        // NOTE: Do NOT recompute boundingBox here!
+        // The bounding box from fragments-loader.ts is correct (world-space from Fragments API)
+        // and has been adjusted for model centering in IFCViewer.tsx.
+        // Recomputing from mesh.setFromObject would give wrong results because
+        // element meshes are separate from the main Fragments group.
+
+        if (!door.boundingBox) {
+            console.warn(`Door ${door.expressID} has no bounding box, skipping`)
+            continue
         }
 
         // Default normal from door
@@ -392,7 +572,10 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
         const doorId = door.globalId || String(door.expressID)
 
         // Get opening direction and type name
-        const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door)
+        const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door, operationTypeMap)
+
+        // Get storey name from spatial structure
+        const storeyName = storeyMap.get(door.expressID) || null
 
         doorContexts.push({
             door,
@@ -404,6 +587,7 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
             doorId,
             openingDirection,
             doorTypeName,
+            storeyName,
         })
     }
 
@@ -412,27 +596,28 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
 
 /**
  * Get all meshes for a door context
- * Only returns the door mesh - wall geometry is typically too large to be useful
+ * Prefers detailed geometry from web-ifc if available, falls back to Fragments geometry
  */
 export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
-    const meshes: THREE.Mesh[] = []
+    // Use detailed geometry if available (from web-ifc, high quality)
+    if (context.detailedGeometry) {
+        const { doorMeshes, wallMeshes, deviceMeshes } = context.detailedGeometry
+        const totalVerts = [...doorMeshes, ...deviceMeshes].reduce(
+            (sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0
+        )
 
-    // Only collect door meshes - wall geometry is usually the entire wall, not useful
+        // Return door meshes + device meshes (not wall - too large for SVG)
+        return [...doorMeshes, ...deviceMeshes]
+    }
+
+    // Fallback to Fragments geometry (simplified)
+    const meshes: THREE.Mesh[] = []
     const doorMeshes = collectMeshesFromElement(context.door)
-    console.log(`  Door meshes: ${doorMeshes.length}`)
+
     meshes.push(...doorMeshes)
 
-    // Add host wall meshes if available
-    // if (context.hostWall) {
-    //     const wallMeshes = collectMeshesFromElement(context.hostWall)
-    //     console.log(`  Wall meshes: ${wallMeshes.length}`)
-    //     meshes.push(...wallMeshes)
-    // }
-
-    // Add nearby device meshes
     for (const device of context.nearbyDevices) {
         const deviceMeshes = collectMeshesFromElement(device)
-        console.log(`  Device meshes (${device.typeName}): ${deviceMeshes.length}`)
         meshes.push(...deviceMeshes)
     }
 
@@ -477,5 +662,73 @@ function collectMeshesFromElement(element: ElementInfo): THREE.Mesh[] {
     }
 
     return meshes
+}
+
+/**
+ * Load detailed geometry for door contexts from the IFC file using web-ifc
+ * This provides high-quality 1:1 geometry for SVG generation
+ * 
+ * @param doorContexts - Array of door contexts to populate with geometry
+ * @param file - The original IFC file
+ * @param modelCenterOffset - The centering offset applied to the model (to align geometry)
+ */
+export async function loadDetailedGeometry(
+    doorContexts: DoorContext[],
+    file: File,
+    modelCenterOffset: THREE.Vector3
+): Promise<void> {
+    // Dynamically import to avoid circular dependencies
+    const { extractDetailedGeometry } = await import('./ifc-loader')
+
+    // Collect all unique expressIDs we need geometry for
+    const doorIDs = new Set<number>()
+    const wallIDs = new Set<number>()
+    const deviceIDs = new Set<number>()
+
+    for (const context of doorContexts) {
+        doorIDs.add(context.door.expressID)
+        if (context.hostWall) {
+            wallIDs.add(context.hostWall.expressID)
+        }
+        for (const device of context.nearbyDevices) {
+            deviceIDs.add(device.expressID)
+        }
+    }
+
+
+    // Extract all geometry in one pass
+    const allIDs = [...doorIDs, ...wallIDs, ...deviceIDs]
+    const geometryMap = await extractDetailedGeometry(file, allIDs)
+
+    // Apply centering offset to all extracted meshes
+    let meshCount = 0
+    for (const meshes of geometryMap.values()) {
+        for (const mesh of meshes) {
+            if (mesh.geometry) {
+                mesh.geometry.translate(-modelCenterOffset.x, -modelCenterOffset.y, -modelCenterOffset.z)
+                meshCount++
+            }
+        }
+    }
+
+    // Populate each door context with its geometry
+    for (const context of doorContexts) {
+        const doorMeshes = geometryMap.get(context.door.expressID) || []
+        const wallMeshes = context.hostWall
+            ? (geometryMap.get(context.hostWall.expressID) || [])
+            : []
+        const deviceMeshes: THREE.Mesh[] = []
+        for (const device of context.nearbyDevices) {
+            const meshes = geometryMap.get(device.expressID) || []
+            deviceMeshes.push(...meshes)
+        }
+
+        context.detailedGeometry = {
+            doorMeshes,
+            wallMeshes,
+            deviceMeshes,
+        }
+    }
+
 }
 

@@ -1,4 +1,4 @@
-import { IfcAPI, IFCDOOR, IFCWALL, IFCWALLSTANDARDCASE } from 'web-ifc'
+import { IfcAPI, IFCDOOR, IFCWALL, IFCWALLSTANDARDCASE, IFCRELDEFINESBYTYPE, IFCDOORTYPE } from 'web-ifc'
 import * as WebIFC from 'web-ifc'
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
@@ -63,6 +63,147 @@ async function initializeIFCAPI(): Promise<IfcAPI> {
 
     await initPromise
     return ifcAPI!
+}
+
+/**
+ * Extract door type names from IFC file using IfcRelDefinesByType relations
+ * Returns a map of door expressID -> type name
+ */
+export async function extractDoorTypes(file: File): Promise<Map<number, string>> {
+    const api = await initializeIFCAPI()
+    const productTypeMap = new Map<number, string>()
+
+    // Read file as ArrayBuffer
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    // Open the IFC model
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for type extraction')
+        return productTypeMap
+    }
+
+    try {
+        // Get all IfcRelDefinesByType entities
+        const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+
+        for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
+            const relId = relDefinesByTypeIds.get(i)
+            const rel = api.GetLine(modelID, relId)
+
+            if (!rel) continue
+
+            // Get RelatingType (the type object)
+            const relatingTypeRef = rel.RelatingType
+            if (!relatingTypeRef?.value) continue
+
+            // Get the type entity to extract its name
+            const typeEntity = api.GetLine(modelID, relatingTypeRef.value)
+            if (!typeEntity?.Name?.value) continue
+
+            const typeName = typeEntity.Name.value
+
+            // Check if this is a door type (IfcDoorType or IfcDoorStyle)
+            const typeCategory = typeEntity.type
+            const isDoorType = typeCategory === IFCDOORTYPE ||
+                typeCategory === (WebIFC as any).IFCDOORSTYLE
+
+            // Get RelatedObjects (the door occurrences)
+            const relatedObjects = rel.RelatedObjects
+            if (!Array.isArray(relatedObjects)) continue
+
+            for (const objRef of relatedObjects) {
+                const objId = objRef?.value
+                if (typeof objId === 'number') {
+                    // Check if the related object is a door
+                    const obj = api.GetLine(modelID, objId)
+                    if (obj?.type === IFCDOOR) {
+                        productTypeMap.set(objId, typeName)
+                    }
+                }
+            }
+        }
+
+
+        return productTypeMap
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+/**
+ * Extract door OperationType from IFC file using web-ifc
+ * Returns a map of door expressID -> OperationType value
+ */
+export async function extractDoorOperationTypes(file: File): Promise<Map<number, string>> {
+    const api = await initializeIFCAPI()
+    const operationTypeMap = new Map<number, string>()
+
+    // Read file as ArrayBuffer
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    // Open the IFC model
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for OperationType extraction')
+        return operationTypeMap
+    }
+
+    try {
+        // Get all door instances
+        const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
+
+        for (let i = 0; i < doorIds.size(); i++) {
+            const doorId = doorIds.get(i)
+            const door = api.GetLine(modelID, doorId)
+
+            if (!door) continue
+
+            // Check instance OperationType first
+            let operationType: string | null = null
+            if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
+                operationType = door.OperationType.value
+            }
+
+            // If not found on instance, check type via IfcRelDefinesByType
+            if (!operationType) {
+                const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+
+                for (let j = 0; j < relDefinesByTypeIds.size(); j++) {
+                    const relId = relDefinesByTypeIds.get(j)
+                    const rel = api.GetLine(modelID, relId)
+
+                    if (!rel || !rel.RelatedObjects) continue
+
+                    const relatedObjects = Array.isArray(rel.RelatedObjects) ? rel.RelatedObjects : [rel.RelatedObjects]
+                    const isRelated = relatedObjects.some((obj: any) => obj?.value === doorId)
+
+                    if (isRelated) {
+                        // Found the type relation for this door
+                        const typeId = rel.RelatingType?.value
+                        if (typeId) {
+                            const typeEntity = api.GetLine(modelID, typeId)
+                            if (typeEntity?.OperationType && typeEntity.OperationType.value && typeEntity.OperationType.value !== 'NOTDEFINED') {
+                                operationType = typeEntity.OperationType.value
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (operationType) {
+                operationTypeMap.set(doorId, operationType)
+            }
+        }
+
+
+        return operationTypeMap
+    } finally {
+        api.CloseModel(modelID)
+    }
 }
 
 /**
@@ -347,14 +488,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                     }
                 }
 
-                // Log for first 5 doors to debug - show what we found
-                if (typeName.toLowerCase().includes('door') && expressID < 200000) {
-                    const props = elementProps as any
-                    console.log(`Door ExpressID ${expressID}:`)
-                    console.log(`  GlobalId.value: "${props.GlobalId?.value || 'undefined'}"`)
-                    console.log(`  GlobalId type: ${typeof props.GlobalId}`)
-                    console.log(`  GlobalId extracted: "${globalId || 'NOT FOUND'}"`)
-                }
 
                 // Empty string is not valid, treat as undefined
                 if (globalId === '') {
@@ -365,10 +498,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 console.warn(`Failed to extract GlobalId for ExpressID ${expressID}:`, e)
             }
 
-            // Log for debugging
-            if (expressID % 100 === 0 || typeName.toLowerCase().includes('door') || typeName.toLowerCase().includes('wall')) {
-                console.log(`ExpressID ${expressID}: type=${ifcType}, typeName=${typeName}, globalId=${globalId || 'N/A'}`)
-            }
 
             // Calculate bounding box for all meshes of this element
             let bbox: THREE.Box3 | undefined = undefined
@@ -419,10 +548,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 mesh.userData.elementInfo = elementInfo
             })
 
-            // Debug logging
-            if (typeName.toLowerCase().includes('door') || typeName.toLowerCase().includes('wall')) {
-                console.log(`Found ${typeName} with ExpressID ${expressID}`)
-            }
         } catch (error) {
             console.warn(`Failed to get properties for ExpressID ${expressID}:`, error)
 
@@ -474,14 +599,12 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
             for (const typeCode of doorTypeCodes) {
                 try {
                     const doorIDs = api.GetLineIDsWithType(modelID, typeCode)
-                    console.log(`Found ${doorIDs.size()} doors using type code ${typeCode}`)
                     // Mark these as doors in our elements array
                     for (let i = 0; i < doorIDs.size(); i++) {
                         const doorID = doorIDs.get(i)
                         const element = elements.find(e => e.expressID === doorID)
                         if (element && !element.typeName.toLowerCase().includes('door')) {
                             element.typeName = 'IFCDOOR'
-                            console.log(`Updated element ${doorID} to IFCDOOR`)
                         }
                     }
                 } catch (e) {
@@ -493,7 +616,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
         console.warn('Could not use GetLineIDsWithType:', error)
     }
 
-    console.log(`Loaded ${elements.length} elements total`)
 
     return {
         group,
@@ -510,5 +632,165 @@ export function closeIFCModel(modelID: number): void {
     if (ifcAPI) {
         ifcAPI.CloseModel(modelID)
     }
+}
+
+/**
+ * Extract detailed geometry for specific elements from an IFC file
+ * This is used for SVG generation where we need full 1:1 geometry
+ * 
+ * @param file - The IFC file to read from
+ * @param expressIDs - Array of expressIDs to extract geometry for
+ * @returns Map of expressID to THREE.Mesh[] with detailed geometry
+ */
+export async function extractDetailedGeometry(
+    file: File,
+    expressIDs: number[]
+): Promise<Map<number, THREE.Mesh[]>> {
+    const api = await initializeIFCAPI()
+
+    // Read file as ArrayBuffer
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    // Open the IFC model
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        throw new Error('Failed to open IFC model for geometry extraction')
+    }
+
+    const targetIDs = new Set(expressIDs)
+    const result = new Map<number, THREE.Mesh[]>()
+
+    // Initialize empty arrays for all requested IDs
+    for (const id of expressIDs) {
+        result.set(id, [])
+    }
+
+    try {
+        // Stream all meshes and filter for requested expressIDs
+        api.StreamAllMeshes(modelID, (mesh) => {
+            const expressID = mesh.expressID
+
+            if (!targetIDs.has(expressID)) {
+                return // Skip elements we don't need
+            }
+
+            const meshes = result.get(expressID) || []
+            const placedGeometries = mesh.geometries
+
+            for (let i = 0; i < placedGeometries.size(); i++) {
+                const placedGeometry = placedGeometries.get(i)
+                const geometryExpressID = placedGeometry.geometryExpressID
+
+                // Get geometry data from web-ifc (detailed, full resolution)
+                const geometry = api.GetGeometry(modelID, geometryExpressID)
+                const vertexData = geometry.GetVertexData()
+                const vertexDataSize = geometry.GetVertexDataSize()
+                const indexData = geometry.GetIndexData()
+                const indexDataSize = geometry.GetIndexDataSize()
+
+                // Extract vertex and index arrays from WASM memory
+                const interleavedData = api.GetVertexArray(vertexData, vertexDataSize)
+                const indices = api.GetIndexArray(indexData, indexDataSize)
+
+                // De-interleave the vertex data (web-ifc uses [x,y,z,nx,ny,nz] per vertex)
+                const vertexCount = interleavedData.length / 6
+                const positions = new Float32Array(vertexCount * 3)
+                const normals = new Float32Array(vertexCount * 3)
+
+                for (let v = 0; v < vertexCount; v++) {
+                    positions[v * 3 + 0] = interleavedData[v * 6 + 0]
+                    positions[v * 3 + 1] = interleavedData[v * 6 + 1]
+                    positions[v * 3 + 2] = interleavedData[v * 6 + 2]
+                    normals[v * 3 + 0] = interleavedData[v * 6 + 3]
+                    normals[v * 3 + 1] = interleavedData[v * 6 + 4]
+                    normals[v * 3 + 2] = interleavedData[v * 6 + 5]
+                }
+
+                // Create Three.js BufferGeometry
+                const bufferGeometry = new THREE.BufferGeometry()
+                bufferGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+                bufferGeometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+
+                if (indices.length > 0) {
+                    bufferGeometry.setIndex(new THREE.BufferAttribute(indices, 1))
+                }
+
+                // Apply transformation matrix (places geometry in world space)
+                const transformation = new THREE.Matrix4()
+                transformation.fromArray(placedGeometry.flatTransformation)
+                bufferGeometry.applyMatrix4(transformation)
+
+                // Create mesh with userData for identification
+                const meshObj = new THREE.Mesh(bufferGeometry, new THREE.MeshBasicMaterial())
+                meshObj.userData.expressID = expressID
+                meshObj.userData.geometryExpressID = geometryExpressID
+                meshObj.userData.vertexCount = vertexCount
+
+                meshes.push(meshObj)
+
+                // Clean up geometry in WASM memory
+                geometry.delete()
+            }
+
+            result.set(expressID, meshes)
+        })
+
+        // Log extraction results
+        let totalMeshes = 0
+        let totalVertices = 0
+        for (const [id, meshes] of result) {
+            if (meshes.length > 0) {
+                const verts = meshes.reduce((sum, m) => sum + (m.userData.vertexCount || 0), 0)
+                totalMeshes += meshes.length
+                totalVertices += verts
+            }
+        }
+
+        return result
+    } finally {
+        // Close the model to free memory
+        api.CloseModel(modelID)
+    }
+}
+
+/**
+ * Extract detailed geometry for doors and their context (walls, devices)
+ * Used for high-quality SVG generation
+ */
+export async function extractDoorContextGeometry(
+    file: File,
+    doorExpressIDs: number[],
+    wallExpressIDs: number[],
+    deviceExpressIDs: number[]
+): Promise<{
+    doors: Map<number, THREE.Mesh[]>
+    walls: Map<number, THREE.Mesh[]>
+    devices: Map<number, THREE.Mesh[]>
+}> {
+    // Combine all IDs for a single pass through the file
+    const allIDs = [...doorExpressIDs, ...wallExpressIDs, ...deviceExpressIDs]
+    const allGeometry = await extractDetailedGeometry(file, allIDs)
+
+    // Split results by category
+    const doors = new Map<number, THREE.Mesh[]>()
+    const walls = new Map<number, THREE.Mesh[]>()
+    const devices = new Map<number, THREE.Mesh[]>()
+
+    const doorSet = new Set(doorExpressIDs)
+    const wallSet = new Set(wallExpressIDs)
+    const deviceSet = new Set(deviceExpressIDs)
+
+    for (const [id, meshes] of allGeometry) {
+        if (doorSet.has(id)) {
+            doors.set(id, meshes)
+        } else if (wallSet.has(id)) {
+            walls.set(id, meshes)
+        } else if (deviceSet.has(id)) {
+            devices.set(id, meshes)
+        }
+    }
+
+    return { doors, walls, devices }
 }
 

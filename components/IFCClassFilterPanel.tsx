@@ -4,7 +4,7 @@ import { useState, useMemo, useRef } from 'react'
 import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
 import type { ElementInfo } from '@/lib/ifc-types'
 
-interface TypeFilterPanelProps {
+interface IFCClassFilterPanelProps {
   visibilityManager: ElementVisibilityManager | null
   elements: ElementInfo[]
   activeFilters: Set<string> | null  // null = all visible, Set = only these visible
@@ -12,136 +12,122 @@ interface TypeFilterPanelProps {
   onClose?: () => void
 }
 
-export default function TypeFilterPanel({
+export default function IFCClassFilterPanel({
   visibilityManager,
   elements,
   activeFilters,
   onFiltersChange,
   onClose,
-}: TypeFilterPanelProps) {
+}: IFCClassFilterPanelProps) {
   const [searchQuery, setSearchQuery] = useState('')
   // Use parent-controlled state for filter persistence
-  const visibleTypes = activeFilters
-  const setVisibleTypes = onFiltersChange
+  const visibleClasses = activeFilters
+  const setVisibleClasses = onFiltersChange
   const isApplying = useRef(false) // Prevent double-calls
 
-  // Get unique product types from elements with counts
-  // Only shows productTypeName from IfcRelDefinesByType - NOT IFC classes
-  const typeCategories = useMemo(() => {
+  // Get unique IFC class names from elements with counts
+  // Only shows typeName (IFC class like IFCDOOR, IFCWALL, etc.)
+  const classCategories = useMemo(() => {
     const counts = new Map<string, number>()
-    let elementsWithType = 0
-    let elementsWithoutType = 0
 
     for (const el of elements) {
-      // Only use product type name (from IfcDoorType, IfcWindowType, etc.)
-      // Skip IFC class names like IFCDOOR, IFCWALL
-      if (el.productTypeName) {
-        counts.set(el.productTypeName, (counts.get(el.productTypeName) || 0) + 1)
-        elementsWithType++
-      } else {
-        elementsWithoutType++
+      // Only use IFC class name (typeName)
+      if (el.typeName) {
+        counts.set(el.typeName, (counts.get(el.typeName) || 0) + 1)
       }
     }
-
-    console.log(`TypeFilter: ${elementsWithType} elements have type names, ${elementsWithoutType} without`)
 
     // Sort by count descending
     return Array.from(counts.entries())
       .sort((a, b) => b[1] - a[1])
-      .map(([name, count]) => ({ name, count, isProductType: true }))
+      .map(([name, count]) => ({ name, count }))
   }, [elements])
 
-  // All type names for reference
-  const allTypeNames = useMemo(() =>
-    new Set(typeCategories.map(t => t.name)),
-    [typeCategories]
+  // All class names for reference
+  const allClassNames = useMemo(() =>
+    new Set(classCategories.map(c => c.name)),
+    [classCategories]
   )
 
   // Filter by search query
-  const filteredTypes = useMemo(() => {
-    if (!searchQuery) return typeCategories
+  const filteredClasses = useMemo(() => {
+    if (!searchQuery) return classCategories
     const query = searchQuery.toLowerCase()
-    return typeCategories.filter(t =>
-      t.name.toLowerCase().includes(query)
+    return classCategories.filter(c =>
+      c.name.toLowerCase().includes(query)
     )
-  }, [typeCategories, searchQuery])
+  }, [classCategories, searchQuery])
 
   // Apply filter directly (not via useEffect)
-  const applyFilter = async (types: Set<string> | null) => {
+  const applyFilter = async (classes: Set<string> | null) => {
     if (!visibilityManager || isApplying.current) return
 
     isApplying.current = true
     try {
-      if (types === null) {
-        console.log('ClassFilter: Resetting to show all')
+      if (classes === null) {
+        console.log('IFCClassFilter: Resetting to show all')
         await visibilityManager.resetAllVisibility()
       } else {
-        const typesToShow = Array.from(types)
-        console.log('ClassFilter: Filtering to:', typesToShow)
-        await visibilityManager.filterByType(typesToShow)
+        const classesToShow = Array.from(classes)
+        console.log('IFCClassFilter: Filtering to:', classesToShow)
+        await visibilityManager.filterByIFCClass(classesToShow)
       }
     } finally {
       isApplying.current = false
     }
   }
 
-  const handleTypeClick = async (typeName: string) => {
-    let newVisibleTypes: Set<string> | null
+  const handleClassClick = async (className: string) => {
+    let newVisibleClasses: Set<string> | null
 
-    if (visibleTypes === null) {
-      // First click - isolate to just this type
-      newVisibleTypes = new Set([typeName])
-    } else if (visibleTypes.has(typeName)) {
-      // Type is currently visible - toggle it off
-      if (visibleTypes.size === 1) {
-        // Last visible type - show all instead of hiding everything
-        newVisibleTypes = null
+    if (visibleClasses === null) {
+      // First click - isolate to just this class
+      newVisibleClasses = new Set([className])
+    } else if (visibleClasses.has(className)) {
+      // Class is currently visible - toggle it off
+      if (visibleClasses.size === 1) {
+        // Last visible class - show all instead of hiding everything
+        newVisibleClasses = null
       } else {
         // Remove from visible set
-        newVisibleTypes = new Set(visibleTypes)
-        newVisibleTypes.delete(typeName)
+        newVisibleClasses = new Set(visibleClasses)
+        newVisibleClasses.delete(className)
       }
     } else {
-      // Type is currently hidden - add to visible set
-      newVisibleTypes = new Set(visibleTypes)
-      newVisibleTypes.add(typeName)
+      // Class is currently hidden - add to visible set
+      newVisibleClasses = new Set(visibleClasses)
+      newVisibleClasses.add(className)
     }
 
     // Update state first
-    setVisibleTypes(newVisibleTypes)
+    setVisibleClasses(newVisibleClasses)
     // Then apply filter
-    await applyFilter(newVisibleTypes)
+    await applyFilter(newVisibleClasses)
   }
 
   const handleShowAll = async () => {
-    setVisibleTypes(null)
+    setVisibleClasses(null)
     await applyFilter(null)
   }
 
-  // Check if a type is currently visible
-  const isTypeVisible = (typeName: string) => {
-    return visibleTypes === null || visibleTypes.has(typeName)
+  // Check if a class is currently visible
+  const isClassVisible = (className: string) => {
+    return visibleClasses === null || visibleClasses.has(className)
   }
 
-  // Format type name for display
-  // For IFC classes: remove "Ifc" prefix
-  // For product types: display as-is
-  const formatTypeName = (name: string) => {
-    // Check if it's an IFC class name
-    if (name.startsWith('IFC') || name.startsWith('Ifc')) {
-      const stripped = name.startsWith('IFC') ? name.slice(3) : name.slice(3)
-      // Make it more readable: Door, Wall, Window etc.
-      return stripped.charAt(0).toUpperCase() + stripped.slice(1).toLowerCase()
-    }
-    // Product type names - display as-is (these are user-defined in the IFC)
-    return name
+  // Format IFC class name for display - remove "IFC" prefix
+  const formatClassName = (name: string) => {
+    // Remove "IFC" prefix and make it readable
+    const stripped = name.startsWith('IFC') ? name.slice(3) : name.startsWith('Ifc') ? name.slice(3) : name
+    // Make it more readable: Door, Wall, Window etc.
+    return stripped.charAt(0).toUpperCase() + stripped.slice(1).toLowerCase()
   }
 
-  const isFiltered = visibleTypes !== null
+  const isFiltered = visibleClasses !== null
 
   return (
     <div
-      className="type-filter-panel"
+      className="ifc-class-filter-panel"
       style={{
         padding: '10px',
         backgroundColor: 'rgba(32, 32, 32, 0.95)',
@@ -179,7 +165,7 @@ export default function TypeFilterPanel({
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span style={{ fontSize: '12px', fontWeight: 600, color: '#e0e0e0' }}>
-          Door Types
+          IFC Classes
         </span>
         {onClose && (
           <button
@@ -202,7 +188,7 @@ export default function TypeFilterPanel({
       {/* Search Input */}
       <input
         type="text"
-        placeholder="Search door types..."
+        placeholder="Search IFC classes..."
         value={searchQuery}
         onChange={(e) => setSearchQuery(e.target.value)}
         style={{
@@ -230,11 +216,11 @@ export default function TypeFilterPanel({
             color: '#4ecdc4',
           }}
         >
-          Showing {visibleTypes!.size} of {allTypeNames.size} types
+          Showing {visibleClasses!.size} of {allClassNames.size} classes
         </div>
       )}
 
-      {/* Type List */}
+      {/* Class List */}
       <div
         style={{
           display: 'flex',
@@ -245,17 +231,17 @@ export default function TypeFilterPanel({
           maxHeight: '280px',
         }}
       >
-        {filteredTypes.length === 0 ? (
+        {filteredClasses.length === 0 ? (
           <div style={{ color: '#666', fontSize: '11px', padding: '8px', textAlign: 'center' }}>
-            No types found
+            No classes found
           </div>
         ) : (
-          filteredTypes.map((type) => {
-            const visible = isTypeVisible(type.name)
+          filteredClasses.map((cls) => {
+            const visible = isClassVisible(cls.name)
             return (
               <button
-                key={type.name}
-                onClick={() => handleTypeClick(type.name)}
+                key={cls.name}
+                onClick={() => handleClassClick(cls.name)}
                 style={{
                   padding: '5px 8px',
                   border: '1px solid transparent',
@@ -290,14 +276,14 @@ export default function TypeFilterPanel({
                     border: visible ? 'none' : '1px solid #555',
                     flexShrink: 0,
                   }} />
-                  {formatTypeName(type.name)}
+                  {formatClassName(cls.name)}
                 </span>
                 <span style={{
                   color: '#666',
                   fontSize: '10px',
                   marginLeft: '8px',
                 }}>
-                  {type.count}
+                  {cls.count}
                 </span>
               </button>
             )
@@ -318,3 +304,4 @@ export default function TypeFilterPanel({
     </div>
   )
 }
+
