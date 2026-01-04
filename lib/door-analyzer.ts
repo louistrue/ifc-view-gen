@@ -297,12 +297,25 @@ function findNearbyDevices(
 /**
  * Get the opening direction and type name of a door from its type
  * Works with both web-ifc models and fragments models
+ * @param operationTypeMap - Optional map of door expressID -> OperationType (from web-ifc extraction)
  */
-async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doorElement?: ElementInfo): Promise<{ direction: string | null, typeName: string | null }> {
+async function getDoorTypeInfo(
+    model: LoadedIFCModel,
+    doorExpressID: number,
+    doorElement?: ElementInfo,
+    operationTypeMap?: Map<number, string>
+): Promise<{ direction: string | null, typeName: string | null }> {
     const result = { direction: null as string | null, typeName: null as string | null }
+
+    // Check if we have OperationType from web-ifc extraction (preferred method)
+    if (operationTypeMap && operationTypeMap.has(doorExpressID)) {
+        result.direction = operationTypeMap.get(doorExpressID) || null
+        console.log(`[getDoorTypeInfo] Door ${doorExpressID}: Using OperationType from web-ifc map: ${result.direction}`)
+    }
 
     // Check if this is a fragments model (has fragmentsModel property)
     const fragmentsModel = (model as any).fragmentsModel;
+    console.log(`[getDoorTypeInfo] Door ${doorExpressID}: fragmentsModel=${!!fragmentsModel}, doorElement.productTypeName=${doorElement?.productTypeName}`);
 
     if (fragmentsModel) {
         // Fragments model path - use already-extracted data (fast, no API calls)
@@ -313,8 +326,70 @@ async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doo
         } else if (doorElement?.typeName) {
             result.typeName = doorElement.typeName;
         }
-        // Note: Opening direction would require additional API calls to get OperationType
-        // For performance, we skip this for fragments models (can be added later if needed)
+
+        // Extract OperationType for swing arc rendering (only if not already set from web-ifc map)
+        // We need to query the door element data to get OperationType
+        if (!result.direction) {
+            try {
+                const doorData = await fragmentsModel.getItemsData([doorExpressID], {
+                    attributesDefault: true,
+                    relations: {
+                        IsTypedBy: { attributes: true, relations: { RelatingType: { attributes: true, relations: false } } },
+                    },
+                    relationsDefault: { attributes: false, relations: false },
+                });
+
+                if (doorData && doorData.length > 0) {
+                    const data = doorData[0] as any;
+
+                    // Debug: log what we got
+                    console.log(`[getDoorTypeInfo] Door ${doorExpressID} data keys:`, Object.keys(data || {}));
+                    console.log(`[getDoorTypeInfo] OperationType:`, data?.OperationType);
+                    console.log(`[getDoorTypeInfo] IsTypedBy:`, data?.IsTypedBy);
+
+                    // Check instance OperationType first
+                    // OperationType might be stored as {value: "SINGLE_SWING_LEFT"} or just a string
+                    let operationType = null;
+                    if (data.OperationType) {
+                        operationType = typeof data.OperationType === 'object' ? data.OperationType.value : data.OperationType;
+                    }
+
+                    if (operationType && operationType !== 'NOTDEFINED' && operationType !== '') {
+                        result.direction = operationType;
+                        console.log(`[getDoorTypeInfo] Found OperationType on instance: ${operationType}`);
+                    }
+
+                    // Check type OperationType if not found on instance
+                    if (!result.direction && data.IsTypedBy && Array.isArray(data.IsTypedBy)) {
+                        for (const rel of data.IsTypedBy) {
+                            const relatingType = rel?.RelatingType;
+                            if (relatingType) {
+                                let typeOperationType = null;
+                                if (relatingType.OperationType) {
+                                    typeOperationType = typeof relatingType.OperationType === 'object'
+                                        ? relatingType.OperationType.value
+                                        : relatingType.OperationType;
+                                }
+
+                                if (typeOperationType && typeOperationType !== 'NOTDEFINED' && typeOperationType !== '') {
+                                    result.direction = typeOperationType;
+                                    console.log(`[getDoorTypeInfo] Found OperationType on type: ${typeOperationType}`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!result.direction) {
+                        console.log(`[getDoorTypeInfo] No OperationType found for door ${doorExpressID}`);
+                    }
+                } else {
+                    console.log(`[getDoorTypeInfo] No data returned for door ${doorExpressID}`);
+                }
+            } catch (e) {
+                console.warn(`Failed to extract OperationType for door ${doorExpressID}:`, e);
+            }
+        }
     } else {
         // Web-ifc model path (original implementation)
         try {
@@ -419,11 +494,13 @@ function buildStoreyMap(spatialNode: any, map: StoreyMap = new Map(), currentSto
 
 /**
  * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name, storey)
+ * @param operationTypeMap - Optional map of door expressID -> OperationType (from web-ifc extraction)
  */
 export async function analyzeDoors(
     model: LoadedIFCModel,
     secondaryModel?: LoadedIFCModel,
-    spatialStructure?: any
+    spatialStructure?: any,
+    operationTypeMap?: Map<number, string>
 ): Promise<DoorContext[]> {
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure)
@@ -513,7 +590,9 @@ export async function analyzeDoors(
         const doorId = door.globalId || String(door.expressID)
 
         // Get opening direction and type name
-        const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door)
+        console.log(`[analyzeDoors] Calling getDoorTypeInfo for door ${door.expressID}, model type:`, (model as any).fragmentsModel ? 'Fragments' : 'web-ifc')
+        const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door, operationTypeMap)
+        console.log(`[analyzeDoors] Got openingDirection=${openingDirection}, doorTypeName=${doorTypeName}`)
 
         // Get storey name from spatial structure
         const storeyName = storeyMap.get(door.expressID) || null
@@ -644,19 +723,23 @@ export async function loadDetailedGeometry(
     }
 
     console.log(`[loadDetailedGeometry] Extracting geometry for ${doorIDs.size} doors, ${wallIDs.size} walls, ${deviceIDs.size} devices`)
+    console.log(`[loadDetailedGeometry] Centering offset to apply: (${modelCenterOffset.x.toFixed(2)}, ${modelCenterOffset.y.toFixed(2)}, ${modelCenterOffset.z.toFixed(2)})`)
 
     // Extract all geometry in one pass
     const allIDs = [...doorIDs, ...wallIDs, ...deviceIDs]
     const geometryMap = await extractDetailedGeometry(file, allIDs)
 
     // Apply centering offset to all extracted meshes
+    let meshCount = 0
     for (const meshes of geometryMap.values()) {
         for (const mesh of meshes) {
             if (mesh.geometry) {
                 mesh.geometry.translate(-modelCenterOffset.x, -modelCenterOffset.y, -modelCenterOffset.z)
+                meshCount++
             }
         }
     }
+    console.log(`[loadDetailedGeometry] Applied centering offset to ${meshCount} meshes`)
 
     // Populate each door context with its geometry
     for (const context of doorContexts) {

@@ -144,6 +144,91 @@ export async function extractDoorTypes(file: File): Promise<Map<number, string>>
 }
 
 /**
+ * Extract door OperationType from IFC file using web-ifc
+ * Returns a map of door expressID -> OperationType value
+ */
+export async function extractDoorOperationTypes(file: File): Promise<Map<number, string>> {
+    const api = await initializeIFCAPI()
+    const operationTypeMap = new Map<number, string>()
+
+    // Read file as ArrayBuffer
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    // Open the IFC model
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for OperationType extraction')
+        return operationTypeMap
+    }
+
+    try {
+        console.log('=== Extracting door OperationTypes using web-ifc ===')
+
+        // Get all door instances
+        const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
+        console.log(`Found ${doorIds.size()} door instances`)
+
+        for (let i = 0; i < doorIds.size(); i++) {
+            const doorId = doorIds.get(i)
+            const door = api.GetLine(modelID, doorId)
+
+            if (!door) continue
+
+            // Check instance OperationType first
+            let operationType: string | null = null
+            if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
+                operationType = door.OperationType.value
+            }
+
+            // If not found on instance, check type via IfcRelDefinesByType
+            if (!operationType) {
+                const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+
+                for (let j = 0; j < relDefinesByTypeIds.size(); j++) {
+                    const relId = relDefinesByTypeIds.get(j)
+                    const rel = api.GetLine(modelID, relId)
+
+                    if (!rel || !rel.RelatedObjects) continue
+
+                    const relatedObjects = Array.isArray(rel.RelatedObjects) ? rel.RelatedObjects : [rel.RelatedObjects]
+                    const isRelated = relatedObjects.some((obj: any) => obj?.value === doorId)
+
+                    if (isRelated) {
+                        // Found the type relation for this door
+                        const typeId = rel.RelatingType?.value
+                        if (typeId) {
+                            const typeEntity = api.GetLine(modelID, typeId)
+                            if (typeEntity?.OperationType && typeEntity.OperationType.value && typeEntity.OperationType.value !== 'NOTDEFINED') {
+                                operationType = typeEntity.OperationType.value
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (operationType) {
+                operationTypeMap.set(doorId, operationType)
+            }
+        }
+
+        // Log results
+        const uniqueTypes = new Set(operationTypeMap.values())
+        console.log(`Found ${uniqueTypes.size} unique OperationTypes:`)
+        for (const opType of Array.from(uniqueTypes).slice(0, 10)) {
+            const count = Array.from(operationTypeMap.values()).filter(t => t === opType).length
+            console.log(`  - "${opType}": ${count} doors`)
+        }
+        console.log(`Mapped ${operationTypeMap.size} doors to their OperationTypes`)
+
+        return operationTypeMap
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+/**
  * Loads an IFC file and converts it to a Three.js Group
  */
 export async function loadIFCModel(file: File): Promise<THREE.Group> {

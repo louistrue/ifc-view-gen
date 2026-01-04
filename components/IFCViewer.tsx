@@ -525,11 +525,25 @@ export default function IFCViewer() {
       if (loadedModelRef.current) {
         setLoadingStage('Analyzing doors...')
         console.log('Starting door analysis...')
+
+        // Extract OperationTypes from web-ifc for swing arc rendering
+        let operationTypeMap: Map<number, string> | undefined
+        if (archFileRef.current) {
+          try {
+            const { extractDoorOperationTypes } = await import('@/lib/ifc-loader')
+            operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
+            console.log(`✓ Extracted OperationTypes for ${operationTypeMap.size} doors`)
+          } catch (err) {
+            console.warn('Failed to extract OperationTypes, swing arcs will not be shown:', err)
+          }
+        }
+
         // Pass spatial structure to extract storey names for doors
         const contexts = await analyzeDoors(
           loadedModelRef.current,
           electricalModelRef.current || undefined,
-          spatialStructureRef.current  // Use ref for immediate access
+          spatialStructureRef.current,  // Use ref for immediate access
+          operationTypeMap  // Pass OperationType map for swing arc rendering
         )
         console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
 
