@@ -1,0 +1,14 @@
+# Exclude WASM files from language detection
+*.wasm linguist-generated=true linguist-vendored=false
+
+# Exclude binary files from language detection
+*.pdf linguist-generated=true
+*.ifc linguist-generated=true
+
+# Exclude generated TypeScript declaration files
+*.tsbuildinfo linguist-generated=true
+next-env.d.ts linguist-generated=true
+
+# Mark node_modules as vendored (if not already in .gitignore)
+node_modules/** linguist-vendored=true
+

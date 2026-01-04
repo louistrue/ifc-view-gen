@@ -315,15 +315,51 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             try {
               meshGroup = await element.getMeshes();
             } catch (e) {
-              // Ignore errors
+              console.warn(`getMeshes failed for localId ${localId}:`, e);
             }
 
-            if (!meshGroup) return null;
+            if (!meshGroup) {
+              console.warn(`No mesh group for localId ${localId}`);
+              return null;
+            }
 
             // Extract meshes from the group
             const meshes = extractMeshesFromGroup(meshGroup);
 
-            if (meshes.length === 0) return null;
+            if (meshes.length === 0) {
+              console.warn(`No meshes extracted from group for localId ${localId}`);
+              return null;
+            }
+            
+            // Verify mesh has valid geometry and debug geometry structure
+            let hasValidGeometry = false;
+            for (const mesh of meshes) {
+              const geo = mesh.geometry;
+              const posAttr = geo?.attributes?.position;
+              
+              // Check for interleaved buffer attributes (Fragments optimization)
+              if (posAttr && 'isInterleavedBufferAttribute' in posAttr) {
+                // Interleaved buffer - need to de-interleave for standard operations
+                console.log(`[Fragments] Mesh ${localId}: Found InterleavedBufferAttribute, count=${posAttr.count}`);
+                
+                // Create standard BufferAttribute from interleaved data
+                const count = posAttr.count;
+                const newPositions = new Float32Array(count * 3);
+                for (let v = 0; v < count; v++) {
+                  newPositions[v * 3] = posAttr.getX(v);
+                  newPositions[v * 3 + 1] = posAttr.getY(v);
+                  newPositions[v * 3 + 2] = posAttr.getZ(v);
+                }
+                geo.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
+                hasValidGeometry = true;
+              } else if (posAttr?.count > 0) {
+                hasValidGeometry = true;
+              }
+            }
+            
+            if (!hasValidGeometry) {
+              console.warn(`[Fragments] No valid geometry for localId ${localId}`);
+            }
 
             // Apply world transforms to meshes - CRITICAL for correct SVG generation!
             // We MUST bake the transform into the geometry vertices, not just set mesh.matrix,

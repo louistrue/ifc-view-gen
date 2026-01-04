@@ -159,16 +159,24 @@ export default function DoorPanel({
     }
   }, [doorContexts, visibilityManager])
 
-  // Handle door click - zoom to door
+  // Handle door click - zoom to door and highlight it
   const handleDoorClick = useCallback((door: DoorContext) => {
     if (!navigationManager || !door.door.boundingBox) return
 
+    console.log(`[DoorPanel] Clicking door ${door.doorId}, expressID=${door.door.expressID}, typeName=${door.door.typeName}`)
+
+    // Highlight the selected door in 3D
+    if (visibilityManager) {
+      visibilityManager.setSelectedElements([door.door.expressID])
+    }
+
+    // Zoom to door from the front view
     navigationManager.zoomToElementFromNormal(
       door.door.boundingBox,
       door.normal,
       2.5
     )
-  }, [navigationManager])
+  }, [navigationManager, visibilityManager])
 
   // Toggle door selection
   const toggleDoorSelection = useCallback((doorId: string) => {
@@ -587,12 +595,23 @@ export default function DoorPanel({
                 <button
                   className="action-button"
                   onClick={() => showSingleDoor(door, 'front')}
-                  title="Preview front view"
+                  title="Front view"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
+                  F
+                </button>
+                <button
+                  className="action-button"
+                  onClick={() => showSingleDoor(door, 'back')}
+                  title="Back view"
+                >
+                  B
+                </button>
+                <button
+                  className="action-button"
+                  onClick={() => showSingleDoor(door, 'plan')}
+                  title="Plan view"
+                >
+                  P
                 </button>
               </div>
             </div>

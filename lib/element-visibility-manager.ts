@@ -12,7 +12,7 @@ import { getAllElementIds } from './spatial-structure'
 // Highlight colors for different states
 export const HIGHLIGHT_COLORS = {
     hovered: new THREE.Color(0x00ff88),    // Bright green for hover
-    selected: new THREE.Color(0x3b82f6),   // Blue for selection
+    selected: new THREE.Color(0xffd700),   // Gold/yellow for selection (more visible)
     filtered: new THREE.Color(0x4ecdc4),   // Teal for filtered doors
 }
 
@@ -33,7 +33,7 @@ export class ElementVisibilityManager {
     private highlightedElements: Set<number> = new Set()
     private selectedElements: Set<number> = new Set()
     private originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]> = new Map()
-    private highlightMeshes: Map<number, THREE.Mesh> = new Map() // For glow/outline effects
+    private highlightMeshes: Map<number, THREE.Object3D> = new Map() // For glow/outline effects (can be Mesh or Group)
     private scene: THREE.Scene | null = null
 
     constructor(fragmentsModel: FragmentsModel, elements: ElementInfo[]) {
@@ -342,10 +342,7 @@ export class ElementVisibilityManager {
         this.hoveredElementId = localId
 
         if (localId !== null) {
-            const element = this.elements.get(localId)
-            if (element && element.mesh) {
-                this.createHighlightMesh(localId, element.mesh, HIGHLIGHT_COLORS.hovered, 1.02)
-            }
+            this.createHighlightMesh(localId, HIGHLIGHT_COLORS.hovered, 1.03)
         }
 
         if (this.onRenderNeeded) {
@@ -357,6 +354,8 @@ export class ElementVisibilityManager {
      * Set selected elements - highlights them with selection color
      */
     setSelectedElements(localIds: number[]): void {
+        console.log(`[Highlight] setSelectedElements called with ${localIds.length} IDs:`, localIds)
+        
         // Clear previous selections that are no longer selected
         for (const prevId of this.selectedElements) {
             if (!localIds.includes(prevId)) {
@@ -370,8 +369,11 @@ export class ElementVisibilityManager {
         for (const localId of localIds) {
             if (!this.highlightMeshes.has(localId)) {
                 const element = this.elements.get(localId)
-                if (element && element.mesh) {
-                    this.createHighlightMesh(localId, element.mesh, HIGHLIGHT_COLORS.selected, 1.01)
+                console.log(`[Highlight] Looking up element ${localId}: found=${!!element}, typeName=${element?.typeName}`)
+                if (element) {
+                    this.createHighlightMesh(localId, HIGHLIGHT_COLORS.selected, 1.01)
+                } else {
+                    console.warn(`[Highlight] Could not find element for localId ${localId}`)
                 }
             }
         }
@@ -393,8 +395,8 @@ export class ElementVisibilityManager {
         // Create subtle highlight for filtered elements
         for (const localId of localIds) {
             const element = this.elements.get(localId)
-            if (element && element.mesh) {
-                this.createHighlightMesh(localId, element.mesh, HIGHLIGHT_COLORS.filtered, 1.005)
+            if (element) {
+                this.createHighlightMesh(localId, HIGHLIGHT_COLORS.filtered, 1.005)
             }
         }
 
@@ -437,11 +439,11 @@ export class ElementVisibilityManager {
     }
 
     /**
-     * Create a highlight mesh (scaled outline) for an element
+     * Create a highlight box for an element using its bounding box
+     * This is more reliable than using mesh geometry which might be batched/shared
      */
     private createHighlightMesh(
         localId: number,
-        sourceMesh: THREE.Mesh,
         color: THREE.Color,
         scale: number = 1.02
     ): void {
@@ -450,44 +452,78 @@ export class ElementVisibilityManager {
         // Remove existing highlight mesh for this element
         this.removeHighlightMesh(localId)
 
-        // Clone the mesh geometry
-        const geometry = sourceMesh.geometry.clone()
+        // Get the element's bounding box - more reliable than mesh geometry
+        const element = this.elements.get(localId)
+        if (!element || !element.boundingBox) {
+            console.warn(`[Highlight] No bounding box for element ${localId}`)
+            return
+        }
 
-        // Create emissive material for glow effect
-        const material = new THREE.MeshBasicMaterial({
+        const bbox = element.boundingBox
+        const size = bbox.getSize(new THREE.Vector3())
+        const center = bbox.getCenter(new THREE.Vector3())
+
+        console.log(`[Highlight] Creating box highlight at center=${center.toArray()}, size=${size.toArray()}`)
+
+        // Create a group to hold highlight visuals
+        const highlightGroup = new THREE.Group()
+        highlightGroup.userData.isHighlightGroup = true
+
+        // 1. Create a wireframe box around the element
+        const boxGeometry = new THREE.BoxGeometry(size.x * scale, size.y * scale, size.z * scale)
+        const edgesGeometry = new THREE.EdgesGeometry(boxGeometry)
+        const lineMaterial = new THREE.LineBasicMaterial({
+            color: color,
+            linewidth: 2,
+            transparent: true,
+            opacity: 1.0,
+        })
+        const wireframe = new THREE.LineSegments(edgesGeometry, lineMaterial)
+        wireframe.position.copy(center)
+        highlightGroup.add(wireframe)
+
+        // 2. Create a semi-transparent fill box
+        const fillMaterial = new THREE.MeshBasicMaterial({
             color: color,
             transparent: true,
-            opacity: 0.4,
-            side: THREE.BackSide, // Render back faces for outline effect
+            opacity: 0.15,
+            side: THREE.DoubleSide,
             depthWrite: false,
         })
-
-        const highlightMesh = new THREE.Mesh(geometry, material)
-
-        // Copy transform from source mesh
-        sourceMesh.updateMatrixWorld(true)
-        highlightMesh.matrix.copy(sourceMesh.matrixWorld)
-        highlightMesh.matrixAutoUpdate = false
-
-        // Scale slightly to create outline effect
-        highlightMesh.scale.multiplyScalar(scale)
+        const fillMesh = new THREE.Mesh(boxGeometry.clone(), fillMaterial)
+        fillMesh.position.copy(center)
+        highlightGroup.add(fillMesh)
 
         // Add to scene
-        this.scene.add(highlightMesh)
-        this.highlightMeshes.set(localId, highlightMesh)
+        this.scene.add(highlightGroup)
+        this.highlightMeshes.set(localId, highlightGroup)
     }
 
     /**
      * Remove highlight mesh for an element
      */
     private removeHighlightMesh(localId: number): void {
-        const mesh = this.highlightMeshes.get(localId)
-        if (mesh && this.scene) {
-            this.scene.remove(mesh)
-            mesh.geometry.dispose()
-            if (mesh.material instanceof THREE.Material) {
-                mesh.material.dispose()
-            }
+        const obj = this.highlightMeshes.get(localId)
+        if (obj && this.scene) {
+            this.scene.remove(obj)
+            
+            // Dispose of all children if it's a group
+            obj.traverse((child) => {
+                if (child instanceof THREE.Mesh) {
+                    child.geometry?.dispose()
+                    if (child.material instanceof THREE.Material) {
+                        child.material.dispose()
+                    } else if (Array.isArray(child.material)) {
+                        child.material.forEach(m => m.dispose())
+                    }
+                } else if (child instanceof THREE.LineSegments) {
+                    child.geometry?.dispose()
+                    if (child.material instanceof THREE.Material) {
+                        child.material.dispose()
+                    }
+                }
+            })
+            
             this.highlightMeshes.delete(localId)
         }
     }

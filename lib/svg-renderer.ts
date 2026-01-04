@@ -210,9 +210,9 @@ function extractEdges(
 
     // Helper to create edge key from two world-space positions
     const createEdgeKey = (p1: THREE.Vector3, p2: THREE.Vector3): string => {
-        const round = (v: THREE.Vector3) => 
+        const round = (v: THREE.Vector3) =>
             `${Math.round(v.x * 1000)}_${Math.round(v.y * 1000)}_${Math.round(v.z * 1000)}`
-        
+
         const key1 = round(p1)
         const key2 = round(p2)
         return key1 < key2 ? `${key1}-${key2}` : `${key2}-${key1}`
@@ -272,7 +272,7 @@ function extractEdges(
 
     // Filter edges: only keep "sharp" edges where normals differ significantly
     const edgeList: [THREE.Vector3, THREE.Vector3][] = []
-    
+
     for (const [key, normals] of edgeToNormals.entries()) {
         // If edge belongs to only one face, it's a boundary edge - always draw it
         if (normals.length === 1) {
@@ -824,7 +824,7 @@ function setupPlanCamera(
 
 /**
  * Render door elevation to SVG (front or back view)
- * Uses simple edge projection instead of halfedge structures
+ * Uses detailed geometry from web-ifc when available, falls back to bounding box
  */
 export async function renderDoorElevationSVG(
     context: DoorContext,
@@ -833,73 +833,98 @@ export async function renderDoorElevationSVG(
 ): Promise<string> {
     const opts = { ...DEFAULT_OPTIONS, ...options }
 
-    // Setup camera
-    // Use deprecated setupDoorCamera internally, simplified here
     const door = context.door
     const bbox = door.boundingBox
-    if (!bbox) throw new Error('Door bounding box')
+    if (!bbox) throw new Error('Door bounding box not available')
+
     const size = bbox.getSize(new THREE.Vector3())
     const center = context.center
-    const margin = Math.max(opts.margin, 0.25)
-    const width = Math.max(size.x, size.z) + margin * 2
-    const height = size.y + margin * 2
 
+    // Determine door dimensions based on normal direction
+    const normal = context.normal.clone().normalize()
+    const isNormalAlongX = Math.abs(normal.x) > Math.abs(normal.z)
+
+    const doorWidth = isNormalAlongX ? size.z : size.x
+    const doorHeight = size.y
+
+    // Check if we have detailed geometry
+    const hasDetailedGeometry = context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
+
+    if (hasDetailedGeometry) {
+        console.log(`[SVG Elevation] Door ${context.doorId}: using DETAILED geometry`)
+        return renderElevationFromMeshes(context, isBackView, opts)
+    }
+
+    // Fallback to bounding box rendering
+    console.log(`[SVG Elevation] Door ${context.doorId}: using BOUNDING BOX (no detailed geometry)`)
+    return renderElevationFromBoundingBox(context, isBackView, opts, doorWidth, doorHeight)
+}
+
+/**
+ * Render elevation SVG from detailed mesh geometry
+ */
+function renderElevationFromMeshes(
+    context: DoorContext,
+    isBackView: boolean,
+    opts: Required<SVGRenderOptions>
+): string {
+    const meshes = getContextMeshes(context)
+    if (meshes.length === 0) {
+        throw new Error('No meshes available for rendering')
+    }
+
+    const door = context.door
+    const bbox = door.boundingBox!
+    const size = bbox.getSize(new THREE.Vector3())
+    const center = context.center.clone()
+    const normal = context.normal.clone().normalize()
+
+    // Determine view dimensions
+    const isNormalAlongX = Math.abs(normal.x) > Math.abs(normal.z)
+    const viewWidth = isNormalAlongX ? size.z : size.x
+    const viewHeight = size.y
+    const margin = Math.max(opts.margin, 0.25)
+    const width = viewWidth + margin * 2
+    const height = viewHeight + margin * 2
+
+    // Setup orthographic camera for elevation view
     const camera = new THREE.OrthographicCamera(
         -width / 2, width / 2, height / 2, -height / 2, 0.1, 100
     )
 
-    const normal = context.normal.clone().normalize()
-    const distance = Math.max(width, height) * 1.5
-
-    if (isBackView) {
-        camera.position.copy(center.clone().add(normal.multiplyScalar(-distance)))
-    } else {
-        camera.position.copy(center.clone().add(normal.multiplyScalar(distance)))
-    }
-
+    const distance = Math.max(width, height) * 2
+    const viewDir = isBackView ? normal.clone().negate() : normal.clone()
+    camera.position.copy(center).add(viewDir.multiplyScalar(distance))
     camera.up.set(0, 1, 0)
     camera.lookAt(center)
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
 
-    // Get all meshes for this door context
-    const contextMeshes = getContextMeshes(context)
-    if (contextMeshes.length === 0 && context.door.mesh) contextMeshes.push(context.door.mesh)
-    if (contextMeshes.length === 0) throw new Error('No meshes found for door context')
-
-    // Collect all edges and polygons
+    // Collect edges and polygons from all meshes
     const allEdges: ProjectedEdge[] = []
     const allPolygons: ProjectedPolygon[] = []
 
-    for (const mesh of contextMeshes) {
+    for (const mesh of meshes) {
         try {
             const expressID = mesh.userData.expressID
             const color = getElementColor(expressID, context, opts)
             const posCount = mesh.geometry?.attributes?.position?.count || 0
             if (posCount === 0) continue
 
-            // Extract edges - NO CLIPPING for elevation
-            // FIX: Use world dimensions (width, height) instead of pixel dimensions (opts.width, opts.height)
-            // This ensures aspect ratio is preserved during projection.
-            // generateSVGString will handle scaling to fit the target viewport.
             const edges = extractEdges(mesh, camera, opts.lineColor, width, height, false)
             allEdges.push(...edges)
 
-            // Extract polygons for fills
             if (opts.showFills) {
                 const polygons = extractPolygons(mesh, camera, color, width, height)
                 allPolygons.push(...polygons)
             }
         } catch (error) {
-            console.warn(`Failed to extract edges for mesh:`, error)
+            console.warn(`Failed to extract geometry from mesh:`, error)
         }
     }
 
-    if (allEdges.length === 0) {
-        console.warn('No edges extracted for door context (Elevation)')
-    }
+    console.log(`[SVG Elevation] Extracted ${allEdges.length} edges, ${allPolygons.length} polygons`)
 
-    // Set active context for title block rendering
     activeContext = context
     activeViewType = isBackView ? 'Back' : 'Front'
 
@@ -907,7 +932,79 @@ export async function renderDoorElevationSVG(
 }
 
 /**
+ * Render elevation SVG from bounding box (fallback)
+ */
+function renderElevationFromBoundingBox(
+    context: DoorContext,
+    isBackView: boolean,
+    opts: Required<SVGRenderOptions>,
+    doorWidth: number,
+    doorHeight: number
+): string {
+    const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
+
+    const padding = 60
+    const labelHeight = showLabels ? 80 : 0
+    const availableWidth = svgWidth - padding * 2
+    const availableHeight = svgHeight - padding * 2 - labelHeight
+
+    const marginMeters = Math.max(opts.margin, 0.25)
+    const totalWidth = doorWidth + marginMeters * 2
+    const totalHeight = doorHeight + marginMeters * 2
+
+    const scale = Math.min(availableWidth / totalWidth, availableHeight / totalHeight)
+
+    const scaledWidth = doorWidth * scale
+    const scaledHeight = doorHeight * scale
+    const offsetX = (svgWidth - scaledWidth) / 2
+    const offsetY = padding + (availableHeight - scaledHeight) / 2
+
+    activeContext = context
+    activeViewType = isBackView ? 'Back' : 'Front'
+
+    let svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
+  <rect width="100%" height="100%" fill="${backgroundColor}"/>
+  
+  <!-- Door outline (bounding box fallback) -->
+  <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledHeight}" 
+        fill="${doorColor}" fill-opacity="0.2" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
+  
+  <!-- Door panel detail -->
+  <rect x="${offsetX + scaledWidth * 0.08}" y="${offsetY + scaledHeight * 0.05}" 
+        width="${scaledWidth * 0.84}" height="${scaledHeight * 0.9}" 
+        fill="none" stroke="${lineColor}" stroke-width="${lineWidth}"/>
+  
+  <!-- Door handle -->
+  <rect x="${isBackView ? offsetX + scaledWidth * 0.12 : offsetX + scaledWidth * 0.82}" 
+        y="${offsetY + scaledHeight * 0.48}" 
+        width="${scaledWidth * 0.06}" height="${scaledHeight * 0.08}" 
+        fill="${lineColor}" fill-opacity="0.6"/>
+`
+
+    if (showLabels) {
+        const labelY = svgHeight - 40
+        svg += `
+  <!-- Labels -->
+  <text x="${svgWidth / 2}" y="${labelY}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="${lineColor}">
+    ${isBackView ? 'Rückansicht' : 'Vorderansicht'} (vereinfacht)
+  </text>
+  <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.8}" fill="#666">
+    ${context.doorId}
+  </text>
+  <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.7}" fill="#888">
+    ${(doorWidth * 100).toFixed(0)}cm × ${(doorHeight * 100).toFixed(0)}cm
+  </text>
+`
+    }
+
+    svg += `</svg>`
+    return svg
+}
+
+/**
  * Render door plan (top view) to SVG
+ * Uses detailed geometry from web-ifc when available, falls back to bounding box
  */
 export async function renderDoorPlanSVG(
     context: DoorContext,
@@ -915,69 +1012,187 @@ export async function renderDoorPlanSVG(
 ): Promise<string> {
     const opts = { ...DEFAULT_OPTIONS, ...options }
 
-    // Calculate cut height: Door Bottom + 1.2m
-    const bbox = context.door.boundingBox
-    let cutHeight = undefined
-    const VIEW_DEPTH = 1.0 // 1m view depth as requested
+    const door = context.door
+    const bbox = door.boundingBox
+    if (!bbox) throw new Error('Door bounding box not available')
 
-    if (bbox) {
-        // min.y is usually floor level for the door
-        cutHeight = bbox.min.y + 1.2
+    const size = bbox.getSize(new THREE.Vector3())
+
+    // Determine door dimensions based on normal direction
+    const normal = context.normal.clone().normalize()
+    const isNormalAlongX = Math.abs(normal.x) > Math.abs(normal.z)
+
+    const doorWidth = isNormalAlongX ? size.z : size.x
+    const doorThickness = isNormalAlongX ? size.x : size.z
+    const doorHeight = size.y
+
+    // Check if we have detailed geometry
+    const hasDetailedGeometry = context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
+
+    if (hasDetailedGeometry) {
+        console.log(`[SVG Plan] Door ${context.doorId}: using DETAILED geometry`)
+        return renderPlanFromMeshes(context, opts)
     }
 
-    // Setup camera for plan view with section cut
-    // Calculate dimensions to match setupPlanCamera logic
-    const size = bbox ? bbox.getSize(new THREE.Vector3()) : new THREE.Vector3(1, 2, 1)
+    // Fallback to bounding box rendering
+    console.log(`[SVG Plan] Door ${context.doorId}: using BOUNDING BOX (no detailed geometry)`)
+    return renderPlanFromBoundingBox(context, opts, doorWidth, doorThickness, doorHeight)
+}
+
+/**
+ * Render plan SVG from detailed mesh geometry
+ */
+function renderPlanFromMeshes(
+    context: DoorContext,
+    opts: Required<SVGRenderOptions>
+): string {
+    const meshes = getContextMeshes(context)
+    if (meshes.length === 0) {
+        throw new Error('No meshes available for rendering')
+    }
+
+    const door = context.door
+    const bbox = door.boundingBox!
+    const size = bbox.getSize(new THREE.Vector3())
+    const center = context.center.clone()
+
+    // For plan view, cut at 1.2m above door bottom
+    const cutHeight = bbox.min.y + 1.2
+
+    // Calculate view dimensions
+    const normal = context.normal.clone().normalize()
+    const isNormalAlongX = Math.abs(normal.x) > Math.abs(normal.z)
+    const viewWidth = Math.max(size.x, size.z)
+    const viewDepth = Math.min(size.x, size.z)
     const margin = Math.max(opts.margin, 0.25)
-    // Use larger horizontal dimension for width
-    const width = Math.max(size.x, size.z) + margin * 2
-    // Use smaller horizontal dimension + margin for vertical view area (on screen)
-    const planDepth = Math.min(size.x, size.z) + margin * 2
+    const width = viewWidth + margin * 2
+    const height = viewDepth + margin * 2
 
-    let camera = setupPlanCamera(context, opts, cutHeight, VIEW_DEPTH)
+    // Setup orthographic camera looking down (plan view)
+    const camera = new THREE.OrthographicCamera(
+        -width / 2, width / 2, height / 2, -height / 2, 0.1, 100
+    )
 
-    // Get all meshes for this door context
-    const contextMeshes = getContextMeshes(context)
-    if (contextMeshes.length === 0 && context.door.mesh) contextMeshes.push(context.door.mesh)
-    if (contextMeshes.length === 0) throw new Error('No meshes found for door context')
+    // Position camera above the door looking down
+    const planCenter = new THREE.Vector3(center.x, cutHeight, center.z)
+    camera.position.set(planCenter.x, planCenter.y + 50, planCenter.z)
+    camera.up.set(0, 0, -1) // Z- is "up" in plan view (front direction)
+    camera.lookAt(planCenter)
+    camera.updateProjectionMatrix()
+    camera.updateMatrixWorld()
 
-    // Collect all edges and polygons
+    // Collect edges and polygons from all meshes
     const allEdges: ProjectedEdge[] = []
     const allPolygons: ProjectedPolygon[] = []
 
-    for (const mesh of contextMeshes) {
+    for (const mesh of meshes) {
         try {
             const expressID = mesh.userData.expressID
             const color = getElementColor(expressID, context, opts)
             const posCount = mesh.geometry?.attributes?.position?.count || 0
             if (posCount === 0) continue
 
-            // Extract edges - ENABLE CLIPPING for Plan view
-            // FIX: Use world dimensions (width, depth) instead of pixel dimensions
-            // Note: depth is the vertical dimension of the camera view for Plan
-            // Rename to planDepth to avoid conflicts
-            const edges = extractEdges(mesh, camera, opts.lineColor, width, planDepth, true)
+            // Enable clipping for plan view at cut height
+            const edges = extractEdges(mesh, camera, opts.lineColor, width, height, true)
             allEdges.push(...edges)
 
-            // Extract polygons for fills
             if (opts.showFills) {
-                const polygons = extractPolygons(mesh, camera, color, width, planDepth)
+                const polygons = extractPolygons(mesh, camera, color, width, height)
                 allPolygons.push(...polygons)
             }
         } catch (error) {
-            console.warn(`Failed to extract edges for mesh:`, error)
+            console.warn(`Failed to extract geometry from mesh:`, error)
         }
     }
 
-    if (allEdges.length === 0) {
-        console.warn('No edges extracted for door context (Plan)')
-    }
+    console.log(`[SVG Plan] Extracted ${allEdges.length} edges, ${allPolygons.length} polygons`)
 
-    // Set active context for title block rendering
     activeContext = context
     activeViewType = 'Plan'
 
     return generateSVGString(allEdges, allPolygons, opts)
+}
+
+/**
+ * Render plan SVG from bounding box (fallback)
+ */
+function renderPlanFromBoundingBox(
+    context: DoorContext,
+    opts: Required<SVGRenderOptions>,
+    doorWidth: number,
+    doorThickness: number,
+    doorHeight: number
+): string {
+    const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
+
+    const padding = 60
+    const labelHeight = showLabels ? 80 : 0
+    const availableWidth = svgWidth - padding * 2
+    const availableHeight = svgHeight - padding * 2 - labelHeight
+
+    const marginMeters = Math.max(opts.margin, 0.25)
+    const totalWidth = doorWidth + marginMeters * 2
+    const totalDepth = doorThickness + marginMeters * 2
+
+    const scale = Math.min(availableWidth / totalWidth, availableHeight / totalDepth)
+
+    const scaledWidth = doorWidth * scale
+    const scaledThickness = doorThickness * scale
+    const offsetX = (svgWidth - scaledWidth) / 2
+    const offsetY = padding + (availableHeight - scaledThickness) / 2
+
+    activeContext = context
+    activeViewType = 'Plan'
+
+    const arrowY = offsetY + scaledThickness + 30
+    const arrowEndY = arrowY + 25
+
+    let svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
+  <rect width="100%" height="100%" fill="${backgroundColor}"/>
+  
+  <!-- Door outline (bounding box fallback) -->
+  <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 
+        fill="${doorColor}" fill-opacity="0.3" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
+  
+  <!-- Door panel detail -->
+  <line x1="${offsetX + scaledWidth * 0.1}" y1="${offsetY + scaledThickness / 2}" 
+        x2="${offsetX + scaledWidth * 0.9}" y2="${offsetY + scaledThickness / 2}" 
+        stroke="${lineColor}" stroke-width="${lineWidth}" stroke-dasharray="4,2"/>
+  
+  <!-- Door swing arc -->
+  <path d="M ${offsetX + scaledWidth} ${offsetY + scaledThickness / 2} 
+           A ${scaledWidth * 0.4} ${scaledWidth * 0.4} 0 0 1 ${offsetX + scaledWidth * 0.6} ${offsetY + scaledThickness + scaledWidth * 0.4}"
+        fill="none" stroke="${lineColor}" stroke-width="${lineWidth * 0.75}" stroke-dasharray="3,3"/>
+  
+  <!-- Front direction arrow -->
+  <line x1="${svgWidth / 2}" y1="${arrowY}" x2="${svgWidth / 2}" y2="${arrowEndY}" 
+        stroke="${lineColor}" stroke-width="${lineWidth}"/>
+  <polygon points="${svgWidth / 2},${arrowEndY + 8} ${svgWidth / 2 - 5},${arrowEndY} ${svgWidth / 2 + 5},${arrowEndY}" 
+           fill="${lineColor}"/>
+`
+
+    if (showLabels) {
+        const labelY = svgHeight - 40
+        svg += `
+  <!-- Labels -->
+  <text x="${svgWidth / 2}" y="${arrowEndY + 25}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.9}" fill="${lineColor}">
+    Vorderansicht
+  </text>
+  <text x="${svgWidth / 2}" y="${labelY}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="${lineColor}">
+    Grundriss (vereinfacht)
+  </text>
+  <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.8}" fill="#666">
+    ${context.doorId}
+  </text>
+  <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.7}" fill="#888">
+    ${(doorWidth * 100).toFixed(0)}cm × ${(doorHeight * 100).toFixed(0)}cm
+  </text>
+`
+    }
+
+    svg += `</svg>`
+    return svg
 }
 
 /**

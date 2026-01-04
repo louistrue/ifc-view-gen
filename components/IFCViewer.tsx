@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { loadIFCModelWithFragments, clearFragmentsCache, getFragmentsCacheStats } from '@/lib/fragments-loader'
-import { analyzeDoors } from '@/lib/door-analyzer'
+import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
 import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
@@ -29,6 +29,8 @@ export default function IFCViewer() {
 
   const loadedModelRef = useRef<any>(null)
   const electricalModelRef = useRef<any>(null)
+  const archFileRef = useRef<File | null>(null) // Store arch file for detailed geometry extraction
+  const modelCenterOffsetRef = useRef<THREE.Vector3>(new THREE.Vector3()) // Store centering offset
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingProgress, setLoadingProgress] = useState(0)
@@ -339,6 +341,7 @@ export default function IFCViewer() {
 
         loadedModelRef.current = loadedModel
         setModelLoaded(true)
+        archFileRef.current = file // Store file for detailed geometry extraction
 
         const group = loadedModel.group
 
@@ -346,6 +349,35 @@ export default function IFCViewer() {
         const box = new THREE.Box3().setFromObject(group)
         const center = box.getCenter(new THREE.Vector3())
         group.position.sub(center)
+        modelCenterOffsetRef.current = center.clone() // Store for geometry offset
+
+        // CRITICAL: Apply centering offset to extracted elements' bounding boxes and meshes
+        // The extracted meshes have world-space geometry, but we've now shifted the scene.
+        // We MUST CLONE geometry before translating to avoid modifying shared/instanced geometry!
+        for (const element of loadedModel.elements) {
+          // Offset bounding box
+          if (element.boundingBox) {
+            element.boundingBox.min.sub(center)
+            element.boundingBox.max.sub(center)
+          }
+          // Offset mesh geometry - CLONE first to avoid shared geometry issues!
+          if (element.meshes) {
+            for (let i = 0; i < element.meshes.length; i++) {
+              const mesh = element.meshes[i]
+              if (mesh.geometry) {
+                // Clone geometry to avoid modifying shared instances
+                mesh.geometry = mesh.geometry.clone()
+                mesh.geometry.translate(-center.x, -center.y, -center.z)
+              }
+            }
+          }
+          if (element.mesh?.geometry) {
+            // Clone geometry to avoid modifying shared instances
+            element.mesh.geometry = element.mesh.geometry.clone()
+            element.mesh.geometry.translate(-center.x, -center.y, -center.z)
+          }
+        }
+        console.log(`✓ Applied centering offset to ${loadedModel.elements.length} elements`)
 
         if (sceneRef.current) {
           sceneRef.current.add(group)
@@ -500,6 +532,19 @@ export default function IFCViewer() {
           spatialStructureRef.current  // Use ref for immediate access
         )
         console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
+
+        // Load detailed geometry from web-ifc for high-quality SVG generation
+        if (archFileRef.current && contexts.length > 0) {
+          setLoadingStage('Extracting detailed geometry...')
+          console.log('Loading detailed geometry from web-ifc...')
+          try {
+            await loadDetailedGeometry(contexts, archFileRef.current, modelCenterOffsetRef.current)
+            console.log('✓ Detailed geometry loaded for SVG rendering')
+          } catch (err) {
+            console.warn('Failed to load detailed geometry, SVG will use simplified rendering:', err)
+          }
+        }
+
         setDoorContexts(contexts)
 
         if (loadedModelRef.current.elements.length > 0) {
