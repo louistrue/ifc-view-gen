@@ -430,14 +430,25 @@ export default function IFCViewer() {
       cameraRef.current.lookAt(0, 0, 0)
       cameraRef.current.updateProjectionMatrix()
 
+      // CRITICAL: Update fragments with new camera position and trigger render
+      if (firstModel.fragmentsModel && firstModel.fragmentsManager) {
+        firstModel.fragmentsModel.useCamera(cameraRef.current)
+        await firstModel.fragmentsManager.update(true)
+      }
+
       if (navigationManagerRef.current) {
         navigationManagerRef.current.focusOn(new THREE.Vector3(0, 0, 0), distance)
         setTimeout(() => {
           if (navigationManagerRef.current) {
             navigationManagerRef.current.setViewPreset('iso')
           }
+          // Trigger render after view preset change
+          triggerRenderRef.current()
         }, 100)
       }
+
+      // Force immediate render
+      triggerRenderRef.current()
     }
 
     // Analyze doors from all models
@@ -459,6 +470,9 @@ export default function IFCViewer() {
       setShowBatchProcessor(true)
       batchProcessorVisibleRef.current = true
     }
+
+    // Final render trigger to ensure model is visible
+    triggerRenderRef.current()
   }, [])
 
   // Add models handler
