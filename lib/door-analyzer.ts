@@ -76,13 +76,25 @@ function isElectricalDeviceType(typeName: string): boolean {
  * This is the direction we want to look FROM to see the element front
  */
 function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
-    // 1. Try to use Mesh Rotation (Most accurate for rotated elements)
+    // Prioritize world-space bounding box from Fragments getBoxes() API
+    // This is the most reliable source since it's already in world space
+    if (element.boundingBox) {
+        const size = element.boundingBox.getSize(new THREE.Vector3())
+
+        // Thickness is the smallest horizontal dimension (X or Z)
+        // Y is height (vertical), so we compare X and Z
+        if (size.x < size.z) {
+            return new THREE.Vector3(1, 0, 0)
+        } else {
+            return new THREE.Vector3(0, 0, 1)
+        }
+    }
+
+    // Fallback: Try to use mesh geometry if bounding box not available
     if (element.mesh) {
         const mesh = element.mesh
-        mesh.updateMatrixWorld(true) // Ensure matrix is updated
+        mesh.updateMatrixWorld(true)
 
-        // We need to determine which LOCAL axis is the "thickness".
-        // Use Geometry Bounding Box (Local Space)
         if (mesh.geometry) {
             if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
             const geom = mesh.geometry
@@ -106,19 +118,8 @@ function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
         }
     }
 
-    // 2. Fallback to World Bounding Box logic (Less accurate for rotated elements)
-    if (!element.boundingBox) {
-        return new THREE.Vector3(0, 0, 1)
-    }
-
-    const size = element.boundingBox.getSize(new THREE.Vector3())
-
-    // Compare X and Z (horizontal dimensions) - Naive axis alignment
-    if (size.x < size.z) {
-        return new THREE.Vector3(1, 0, 0)
-    } else {
-        return new THREE.Vector3(0, 0, 1)
-    }
+    // Default fallback
+    return new THREE.Vector3(0, 0, 1)
 }
 
 /**
@@ -229,63 +230,87 @@ function findNearbyDevices(
 
 /**
  * Get the opening direction and type name of a door from its type
+ * Works with both web-ifc models and fragments models
  */
-function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number): { direction: string | null, typeName: string | null } {
+async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doorElement?: ElementInfo): Promise<{ direction: string | null, typeName: string | null }> {
     const result = { direction: null as string | null, typeName: null as string | null }
 
-    try {
-        const api = model.api
-        const modelID = model.modelID
+    // Check if this is a fragments model (has fragmentsModel property)
+    const fragmentsModel = (model as any).fragmentsModel;
 
-        // Check instance first
-        const door = api.GetLine(modelID, doorExpressID);
-        if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
-            result.direction = door.OperationType.value;
+    if (fragmentsModel) {
+        // Fragments model path - use already-extracted data (fast, no API calls)
+        // The typeName was already extracted during model loading
+        if (doorElement?.typeName) {
+            result.typeName = doorElement.typeName;
         }
+        // Note: Opening direction would require additional API calls to get OperationType
+        // For performance, we skip this for fragments models (can be added later if needed)
+    } else {
+        // Web-ifc model path (original implementation)
+        try {
+            const api = model.api
+            const modelID = model.modelID
 
-        // Check type
-        // Get all IfcRelDefinesByType
-        const relLines = api.GetLineIDsWithType(modelID, WebIFC.IFCRELDEFINESBYTYPE);
+            // Check instance first
+            const door = api.GetLine(modelID, doorExpressID);
+            if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
+                result.direction = door.OperationType.value;
+            }
 
-        for (let i = 0; i < relLines.size(); i++) {
-            const relID = relLines.get(i);
-            const rel = api.GetLine(modelID, relID);
+            // Check type
+            // Get all IfcRelDefinesByType
+            const relLines = api.GetLineIDsWithType(modelID, WebIFC.IFCRELDEFINESBYTYPE);
 
-            if (!rel.RelatedObjects) continue;
+            for (let i = 0; i < relLines.size(); i++) {
+                const relID = relLines.get(i);
+                const rel = api.GetLine(modelID, relID);
 
-            const relatedIds = Array.isArray(rel.RelatedObjects) ? rel.RelatedObjects : [rel.RelatedObjects];
+                if (!rel.RelatedObjects) continue;
 
-            for (const related of relatedIds) {
-                if (related.value === doorExpressID) {
-                    // Found the type relation
-                    const typeID = rel.RelatingType.value;
-                    const type = api.GetLine(modelID, typeID);
+                const relatedIds = Array.isArray(rel.RelatedObjects) ? rel.RelatedObjects : [rel.RelatedObjects];
 
-                    if (type.Name && type.Name.value) {
-                        result.typeName = type.Name.value
+                for (const related of relatedIds) {
+                    if (related.value === doorExpressID) {
+                        // Found the type relation
+                        const typeID = rel.RelatingType.value;
+                        const type = api.GetLine(modelID, typeID);
+
+                        if (type.Name && type.Name.value) {
+                            result.typeName = type.Name.value
+                        }
+
+                        // Only overwrite direction if not found on instance
+                        if (!result.direction && type.OperationType && type.OperationType.value) {
+                            result.direction = type.OperationType.value;
+                        }
+
+                        return result;
                     }
-
-                    // Only overwrite direction if not found on instance
-                    if (!result.direction && type.OperationType && type.OperationType.value) {
-                        result.direction = type.OperationType.value;
-                    }
-
-                    return result;
                 }
             }
-        }
 
-        return result;
-    } catch (e) {
-        console.warn('Error getting door type info:', e);
-        return result;
+            // Fallback to ElementInfo typeName
+            if (!result.typeName && doorElement?.typeName) {
+                result.typeName = doorElement.typeName;
+            }
+
+        } catch (e) {
+            console.warn('Error getting door type info from web-ifc:', e);
+            // Fallback to ElementInfo typeName
+            if (doorElement?.typeName) {
+                result.typeName = doorElement.typeName;
+            }
+        }
     }
+
+    return result;
 }
 
 /**
  * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name)
  */
-export function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCModel): DoorContext[] {
+export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCModel): Promise<DoorContext[]> {
     // Separate elements by type
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
@@ -367,7 +392,7 @@ export function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCMo
         const doorId = door.globalId || String(door.expressID)
 
         // Get opening direction and type name
-        const { direction: openingDirection, typeName: doorTypeName } = getDoorTypeInfo(model, door.expressID)
+        const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door)
 
         doorContexts.push({
             door,

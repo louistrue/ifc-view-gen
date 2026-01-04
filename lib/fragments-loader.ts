@@ -4,24 +4,46 @@
  */
 
 import * as THREE from 'three';
-import { IfcImporter, FragmentsModels } from '@thatopen/fragments';
+import { IfcImporter, FragmentsModels, FragmentsModel } from '@thatopen/fragments';
+import type { ElementInfo, LoadedIFCModel } from './ifc-types';
 
 // IndexedDB configuration for fragment binary caching
 const DB_NAME = 'Fragments_Binary_Cache';
 const DB_VERSION = 1;
 const STORE_NAME = 'fragmentBinaries';
 
-interface IFCElementMetadata {
-  expressID: number;
-  type: string;
-  globalId: string;
-  mesh: THREE.Mesh;
+// Mapping from IFC class names to web-ifc type codes
+const IFC_TYPE_CODE_MAP: Record<string, number> = {
+  'IfcDoor': 64,
+  'IfcWall': 65,
+  'IfcWallStandardCase': 65,
+  'IfcElectricAppliance': 266,
+  'IfcLightFixture': 267,
+  'IfcElectricDistributionBoard': 268,
+  'IfcSwitchingDevice': 269,
+  'IfcOutlet': 270,
+  'IfcFlowTerminal': 271,
+};
+
+// Helper to get IFC type code from class name
+function getIfcTypeCode(typeName: string): number {
+  // Try exact match first
+  if (IFC_TYPE_CODE_MAP[typeName]) {
+    return IFC_TYPE_CODE_MAP[typeName];
+  }
+  // Try case-insensitive match
+  const lower = typeName.toLowerCase();
+  for (const [key, value] of Object.entries(IFC_TYPE_CODE_MAP)) {
+    if (key.toLowerCase() === lower) {
+      return value;
+    }
+  }
+  // Default to -1 if unknown
+  return -1;
 }
 
-interface LoadedFragmentsModel {
-  group: THREE.Group;
-  elements: IFCElementMetadata[];
-  fragmentsModel: any; // The actual fragments model
+interface LoadedFragmentsModel extends Omit<LoadedIFCModel, 'modelID' | 'api'> {
+  fragmentsModel: FragmentsModel;
 }
 
 interface CachedFragmentData {
@@ -29,7 +51,8 @@ interface CachedFragmentData {
   fileName: string;
   timestamp: number;
   fragmentBytes: Uint8Array;
-  metadata: string; // JSON serialized metadata
+  // Note: We don't cache metadata anymore since it requires the loaded model
+  // Metadata will be extracted fresh each time from the fragments model
 }
 
 // Singleton fragments manager
@@ -114,35 +137,209 @@ async function generateFileId(file: File): Promise<string> {
 }
 
 /**
- * Extract metadata from fragments model
+ * Extract THREE.Mesh objects from a THREE.Group
  */
-function extractMetadata(fragmentsModel: any): IFCElementMetadata[] {
-  const elements: IFCElementMetadata[] = [];
+function extractMeshesFromGroup(group: THREE.Group): THREE.Mesh[] {
+  const meshes: THREE.Mesh[] = [];
+  group.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      meshes.push(child);
+    }
+  });
+  return meshes;
+}
+
+/**
+ * Extract metadata from fragments model using the correct API
+ * Uses ItemGeometry API to get world transforms and apply them to meshes
+ * This ensures meshes have correct matrixWorld for SVG generation
+ */
+async function extractMetadata(fragmentsModel: FragmentsModel): Promise<ElementInfo[]> {
+  const elements: ElementInfo[] = [];
 
   try {
-    // Access the model's data structure
-    const modelData = fragmentsModel.data;
+    // Get all categories (IFC class names)
+    const categories = await fragmentsModel.getCategories();
+    console.log(`Found ${categories.length} IFC categories`);
 
-    if (modelData) {
-      // Iterate through all items in the model
-      modelData.forEach((properties: any, expressID: number) => {
-        if (expressID === 0) return; // Skip invalid IDs
+    // Get items with geometry - these are Item objects with getGeometry() method
+    const items = await fragmentsModel.getItemsWithGeometry();
+    console.log(`Found ${items.length} items with geometry`);
 
-        const type = properties.type || 'UNKNOWN';
-        const globalId = properties.GlobalId?.value || '';
+    if (items.length === 0) {
+      console.warn('No items with geometry found in fragments model');
+      return elements;
+    }
 
-        // Find corresponding mesh - this is a simplified approach
-        // In production, you'd need more robust mesh-to-element mapping
-        elements.push({
-          expressID,
-          type,
-          globalId,
-          mesh: null as any, // Will be populated when needed
-        });
+    // Get localIds for parallel data fetching
+    const localIdsWithGeometry = await fragmentsModel.getItemsIdsWithGeometry();
+
+    // Get items data for all items at once
+    const itemsData = await fragmentsModel.getItemsData(localIdsWithGeometry, {
+      attributesDefault: true,
+      relationsDefault: { attributes: false, relations: false },
+    });
+
+    // Get GUIDs for all items at once
+    const guids = await fragmentsModel.getGuidsByLocalIds(localIdsWithGeometry);
+
+    // Get categories for all items with geometry
+    const itemCategories = await fragmentsModel.getItemsWithGeometryCategories();
+
+    // Get world-space bounding boxes for all items at once - this is the proper Fragments way!
+    // These boxes are already in world space with correct transforms applied
+    const worldBoxes = await fragmentsModel.getBoxes(localIdsWithGeometry);
+    console.log(`Got ${worldBoxes.length} world-space bounding boxes`);
+
+    // Get Element objects using the internal API - these have getMeshes()
+    // Cast to any to access the internal _getElements method
+    const fragmentElements = await (fragmentsModel as any)._getElements(localIdsWithGeometry);
+    console.log(`Got ${fragmentElements.length} Element objects`);
+
+    // Create a map from localId to Element for quick lookup
+    const elementMap = new Map<number, any>();
+    fragmentElements.forEach((element: any) => {
+      elementMap.set(element.localId, element);
+    });
+
+    // Process items in parallel batches for speed
+    const batchSize = 50;
+    for (let batchStart = 0; batchStart < items.length; batchStart += batchSize) {
+      const batchEnd = Math.min(batchStart + batchSize, items.length);
+      const batch = items.slice(batchStart, batchEnd);
+
+      // Process batch in parallel
+      const batchPromises = batch.map(async (item) => {
+        try {
+          const localId = await item.getLocalId();
+          if (!localId) return null;
+
+          const dataIndex = localIdsWithGeometry.indexOf(localId);
+          if (dataIndex === -1) return null;
+
+          const worldBox = worldBoxes[dataIndex];
+          const itemData = itemsData[dataIndex];
+          const globalId = guids[dataIndex] || undefined;
+          const category = itemCategories[dataIndex] || 'Unknown';
+
+          // Extract type name from category or itemData
+          let typeName = category;
+          if (!typeName || typeName === 'Unknown') {
+            if (itemData && typeof itemData === 'object') {
+              for (const [key, value] of Object.entries(itemData)) {
+                if (key.toLowerCase().includes('type') && typeof value === 'object' && value !== null) {
+                  const attrValue = (value as any).value;
+                  if (typeof attrValue === 'string' && attrValue.length > 0) {
+                    typeName = attrValue;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+
+          // Get IFC type code
+          const ifcType = getIfcTypeCode(typeName);
+
+          // Get geometry with transforms using ItemGeometry API
+          const geometry = await item.getGeometry();
+          if (!geometry) return null;
+
+          // Get world transform matrices - these are the key to correct SVG rendering!
+          const transforms = await geometry.getTransform();
+
+          // Get Element object for getMeshes()
+          const element = elementMap.get(localId);
+          if (!element) return null;
+
+          // Get meshes from Element.getMeshes()
+          let meshGroup: THREE.Group | null = null;
+          try {
+            meshGroup = await element.getMeshes();
+          } catch (e) {
+            // Ignore errors
+          }
+
+          if (!meshGroup) return null;
+
+          // Extract meshes from the group
+          const meshes = extractMeshesFromGroup(meshGroup);
+
+          if (meshes.length === 0) return null;
+
+          // Apply world transforms to meshes - CRITICAL for correct SVG generation!
+          // We MUST bake the transform into the geometry vertices, not just set mesh.matrix,
+          // because EdgesGeometry extracts edges from local geometry and doesn't respect mesh transforms.
+          if (transforms && transforms.length > 0) {
+            for (let i = 0; i < meshes.length && i < transforms.length; i++) {
+              const mesh = meshes[i];
+              const transform = transforms[i];
+
+              if (transform && mesh.geometry) {
+                // Clone the geometry to avoid modifying shared geometry
+                mesh.geometry = mesh.geometry.clone();
+
+                // Apply the transform directly to the geometry vertices
+                // This ensures EdgesGeometry will work with world-space coordinates
+                mesh.geometry.applyMatrix4(transform);
+
+                // Reset mesh transforms since geometry is now in world space
+                mesh.position.set(0, 0, 0);
+                mesh.rotation.set(0, 0, 0);
+                mesh.scale.set(1, 1, 1);
+                mesh.updateMatrixWorld(true);
+              }
+            }
+          }
+
+          const primaryMesh = meshes[0];
+
+          // Use world-space bounding box from Fragments API (proper way!)
+          // This box is already correctly positioned and transformed in world space
+          const boundingBox = worldBox && !worldBox.isEmpty() ? worldBox : undefined;
+
+          // Create ElementInfo
+          const elementInfo: ElementInfo = {
+            expressID: localId,
+            ifcType,
+            typeName,
+            mesh: primaryMesh,
+            meshes: meshes.length > 0 ? meshes : undefined,
+            boundingBox,
+            globalId,
+          };
+
+          // Store elementInfo in mesh userData for later lookup
+          meshes.forEach(mesh => {
+            mesh.userData.expressID = localId;
+            mesh.userData.elementInfo = elementInfo;
+          });
+
+          return elementInfo;
+        } catch (error) {
+          console.warn(`Failed to process item:`, error);
+          return null;
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      batchResults.forEach(result => {
+        if (result) {
+          elements.push(result);
+        }
       });
     }
+
+    console.log(`✓ Extracted ${elements.length} elements from fragments model`);
+
+    // Log some statistics
+    const doorCount = elements.filter(e => e.typeName.toLowerCase().includes('door')).length;
+    const wallCount = elements.filter(e => e.typeName.toLowerCase().includes('wall')).length;
+    const windowCount = elements.filter(e => e.typeName.toLowerCase().includes('window')).length;
+    console.log(`  - Doors: ${doorCount}, Walls: ${wallCount}, Windows: ${windowCount}`);
+
   } catch (error) {
-    console.warn('Failed to extract metadata from fragments:', error);
+    console.error('Failed to extract metadata from fragments:', error);
   }
 
   return elements;
@@ -162,15 +359,12 @@ export async function loadIFCModelWithFragments(
   const cached = await getCachedFragment(fileId);
 
   let fragmentBytes: Uint8Array;
-  let metadata: IFCElementMetadata[] = [];
 
   if (cached) {
     console.log('✓ Loading from cached Fragments binary (ultra-fast!)');
     onProgress?.(50);
 
     fragmentBytes = cached.fragmentBytes;
-    metadata = JSON.parse(cached.metadata);
-
     onProgress?.(70);
   } else {
     console.log('Converting IFC to Fragments binary (first-time conversion)...');
@@ -205,31 +399,16 @@ export async function loadIFCModelWithFragments(
 
     onProgress?.(70);
 
-    // Extract metadata before caching
-    // We'll need to load the model temporarily to get metadata
-    const tempManager = new FragmentsModels('/fragments-worker/worker.mjs');
-    const tempModel = await tempManager.load(fragmentBytes, {
-      modelId: `temp_${fileId}`
-    });
-
-    metadata = extractMetadata(tempModel);
-
-    // Dispose temp model
-    await tempManager.dispose();
-
-    onProgress?.(80);
-
     // Cache the fragment binary for future use
     await cacheFragment({
       id: fileId,
       fileName: file.name,
       timestamp: Date.now(),
       fragmentBytes,
-      metadata: JSON.stringify(metadata),
     });
 
     console.log('✓ Fragments binary cached for future use');
-    onProgress?.(90);
+    onProgress?.(80);
   }
 
   // Load the fragment into the fragments manager
@@ -241,38 +420,37 @@ export async function loadIFCModelWithFragments(
   // Update the manager to prepare for rendering
   await manager.update(true);
 
-  onProgress?.(95);
+  onProgress?.(85);
 
-  // Create Three.js group from the fragments model
+  onProgress?.(90);
+
+  // Extract metadata from the loaded fragments model
+  // This also creates properly transformed meshes that we'll add to the scene
+  const elements = await extractMetadata(fragmentsModel);
+
+  // Create Three.js group from the transformed meshes
   const group = new THREE.Group();
   group.name = file.name;
 
-  // Add the fragments model's scene object to our group
-  if (fragmentsModel.object) {
-    group.add(fragmentsModel.object);
+  // Add all transformed meshes to the group for 3D display
+  // These meshes have world transforms baked into their geometry vertices
+  for (const element of elements) {
+    if (element.meshes) {
+      // Add all meshes for this element
+      element.meshes.forEach(mesh => group.add(mesh));
+    } else if (element.mesh) {
+      // Fallback to single mesh
+      group.add(element.mesh);
+    }
   }
 
-  // Update mesh references in metadata
-  const updatedElements = metadata.map(el => {
-    // Try to find the actual mesh for this element
-    // This is a simplified approach - in production you'd need better mapping
-    let mesh: THREE.Mesh | null = null;
-
-    fragmentsModel.object?.traverse((child: any) => {
-      if (child instanceof THREE.Mesh && !mesh) {
-        mesh = child;
-      }
-    });
-
-    return { ...el, mesh: mesh || el.mesh };
-  });
-
-  console.log(`✓ Loaded ${updatedElements.length} elements using Fragments format`);
+  console.log(`✓ Loaded ${elements.length} elements using Fragments format`);
+  console.log(`✓ Added ${group.children.length} meshes to scene`);
   onProgress?.(100);
 
   return {
     group,
-    elements: updatedElements,
+    elements,
     fragmentsModel,
   };
 }

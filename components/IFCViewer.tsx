@@ -113,7 +113,7 @@ export default function IFCViewer() {
           const spherical = new THREE.Spherical()
           spherical.setFromVector3(cameraRef.current.position)
           spherical.theta -= deltaX * 0.01
-          spherical.phi += deltaY * 0.01
+          spherical.phi -= deltaY * 0.01
           spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi))
 
           cameraRef.current.position.setFromSpherical(spherical)
@@ -290,7 +290,7 @@ export default function IFCViewer() {
       if (loadedModelRef.current) {
         setLoadingStage('Analyzing doors...')
         console.log('Starting door analysis...')
-        const contexts = analyzeDoors(loadedModelRef.current, electricalModelRef.current || undefined)
+        const contexts = await analyzeDoors(loadedModelRef.current, electricalModelRef.current || undefined)
         console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
         setDoorContexts(contexts)
 
