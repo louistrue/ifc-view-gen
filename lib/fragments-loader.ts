@@ -4,7 +4,7 @@
  */
 
 import * as THREE from 'three';
-import { IfcImporter, FragmentsModels, FragmentsModel } from '@thatopen/fragments';
+import { IfcImporter, FragmentsModels, FragmentsModel, LodMode } from '@thatopen/fragments';
 import type { ElementInfo, LoadedIFCModel } from './ifc-types';
 
 // IndexedDB configuration for fragment binary caching
@@ -44,6 +44,7 @@ function getIfcTypeCode(typeName: string): number {
 
 interface LoadedFragmentsModel extends Omit<LoadedIFCModel, 'modelID' | 'api'> {
   fragmentsModel: FragmentsModel;
+  fragmentsManager: FragmentsModels; // Manager for calling update() in render loop
 }
 
 interface CachedFragmentData {
@@ -349,26 +350,41 @@ async function extractMetadata(fragmentsModel: FragmentsModel): Promise<ElementI
  * Load IFC model using true Fragments format
  * Provides 10x+ faster loading with the optimized Fragments binary format!
  */
+export interface LoadingProgress {
+  percent: number;
+  stage: string;
+}
+
 export async function loadIFCModelWithFragments(
   file: File,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: LoadingProgress) => void
 ): Promise<LoadedFragmentsModel> {
   console.log('Loading IFC model with Fragments...');
 
+  // Stage 1: Initialize
+  onProgress?.({ percent: 0, stage: 'Initializing...' });
+
   const fileId = await generateFileId(file);
+  onProgress?.({ percent: 5, stage: 'Checking cache...' });
+
   const cached = await getCachedFragment(fileId);
 
   let fragmentBytes: Uint8Array;
 
   if (cached) {
+    // Cached path - faster
     console.log('✓ Loading from cached Fragments binary (ultra-fast!)');
-    onProgress?.(50);
+    onProgress?.({ percent: 10, stage: 'Loading from cache...' });
+
+    // Simulate a brief delay to show the stage (cache read is too fast)
+    await new Promise(r => setTimeout(r, 100));
 
     fragmentBytes = cached.fragmentBytes;
-    onProgress?.(70);
+    onProgress?.({ percent: 30, stage: 'Cache loaded' });
   } else {
+    // Fresh conversion path
     console.log('Converting IFC to Fragments binary (first-time conversion)...');
-    onProgress?.(10);
+    onProgress?.({ percent: 10, stage: 'Reading IFC file...' });
 
     // Initialize the IFC importer
     const importer = new IfcImporter();
@@ -379,25 +395,26 @@ export async function loadIFCModelWithFragments(
       absolute: true,
     };
 
-    onProgress?.(20);
+    onProgress?.({ percent: 15, stage: 'Initializing parser...' });
 
     // Read file as buffer
     const buffer = await file.arrayBuffer();
     const uint8 = new Uint8Array(buffer);
 
-    onProgress?.(30);
+    onProgress?.({ percent: 20, stage: 'Parsing IFC structure...' });
 
     // Convert IFC to Fragments binary format
     // This is the key step that creates the optimized format!
     fragmentBytes = await importer.process({
       bytes: uint8,
       progressCallback: (progress) => {
-        // Map importer progress (0-1) to our progress (30-70)
-        onProgress?.(30 + progress * 40);
+        // Map importer progress (0-1) to our progress (20-60)
+        const percent = Math.round(20 + progress * 40);
+        onProgress?.({ percent, stage: `Converting geometry (${Math.round(progress * 100)}%)...` });
       },
     });
 
-    onProgress?.(70);
+    onProgress?.({ percent: 65, stage: 'Saving to cache...' });
 
     // Cache the fragment binary for future use
     await cacheFragment({
@@ -408,50 +425,60 @@ export async function loadIFCModelWithFragments(
     });
 
     console.log('✓ Fragments binary cached for future use');
-    onProgress?.(80);
+    onProgress?.({ percent: 70, stage: 'Cached for next time' });
   }
 
-  // Load the fragment into the fragments manager
+  // Stage 2: Load into renderer
+  onProgress?.({ percent: 75, stage: 'Building 3D scene...' });
+
   const manager = await getFragmentsManager();
   const modelId = `model_${Date.now()}`;
 
   const fragmentsModel = await manager.load(fragmentBytes, { modelId });
 
+  onProgress?.({ percent: 80, stage: 'Optimizing rendering...' });
+
   // Update the manager to prepare for rendering
   await manager.update(true);
 
-  onProgress?.(85);
-
-  onProgress?.(90);
+  onProgress?.({ percent: 85, stage: 'Extracting metadata...' });
 
   // Extract metadata from the loaded fragments model
-  // This also creates properly transformed meshes that we'll add to the scene
+  // This creates properly transformed meshes for SVG generation ONLY
+  // NOTE: We do NOT add these meshes to the 3D scene - we use fragmentsModel.object instead!
   const elements = await extractMetadata(fragmentsModel);
 
-  // Create Three.js group from the transformed meshes
+  onProgress?.({ percent: 95, stage: 'Finalizing...' });
+
+  // CRITICAL: Use Fragments' optimized scene object for 3D rendering
+  // This provides LOD, frustum culling, instanced rendering, and all performance optimizations!
   const group = new THREE.Group();
   group.name = file.name;
 
-  // Add all transformed meshes to the group for 3D display
-  // These meshes have world transforms baked into their geometry vertices
-  for (const element of elements) {
-    if (element.meshes) {
-      // Add all meshes for this element
-      element.meshes.forEach(mesh => group.add(mesh));
-    } else if (element.mesh) {
-      // Fallback to single mesh
-      group.add(element.mesh);
-    }
+  // Add Fragments' optimized scene object (contains all performance optimizations)
+  if (fragmentsModel.object) {
+    group.add(fragmentsModel.object);
   }
 
+  // Configure Fragments performance settings
+  // Enable LOD system for automatic level-of-detail based on camera distance
+  await fragmentsModel.setLodMode(LodMode.DEFAULT);
+
+  // Configure manager settings for optimal performance
+  manager.settings.maxUpdateRate = 100; // Max 10 updates per second (100ms)
+  manager.settings.graphicsQuality = 0.8; // High quality (0-1 scale)
+  manager.settings.forceUpdateRate = 200; // Force update every 200ms if needed
+
   console.log(`✓ Loaded ${elements.length} elements using Fragments format`);
-  console.log(`✓ Added ${group.children.length} meshes to scene`);
-  onProgress?.(100);
+  console.log(`✓ Using Fragments optimized rendering (LOD, culling, instancing enabled)`);
+  console.log(`✓ Extracted meshes available for SVG generation: ${elements.length} elements`);
+  onProgress?.({ percent: 100, stage: 'Complete!' });
 
   return {
     group,
     elements,
     fragmentsModel,
+    fragmentsManager: manager, // Return manager for update() calls in render loop
   };
 }
 
