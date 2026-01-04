@@ -152,18 +152,31 @@ function extractMeshesFromGroup(group: THREE.Group): THREE.Mesh[] {
 
 // IFC categories needed for door SVG generation
 const DOOR_SVG_CATEGORIES = new Set([
+  // Doors and openings
   'IFCDOOR',
+  'IFCWINDOW',
+  'IFCOPENINGELEMENT',
+  // Walls
   'IFCWALL',
   'IFCWALLSTANDARDCASE',
   'IFCCURTAINWALL',
-  'IFCWINDOW',
-  'IFCSLAB',             // Floor/ceiling context
-  'IFCFLOWTERMINAL',     // Electrical devices
+  // Context
+  'IFCSLAB',
+  // Electrical devices (all types)
+  'IFCFLOWTERMINAL',
   'IFCLIGHTFIXTURE',
   'IFCOUTLET',
   'IFCSWITCHINGDEVICE',
   'IFCELECTRICALDISTRIBUTIONPOINT',
   'IFCELECTRICAPPLIANCE',
+  'IFCFLOWCONTROLLER',
+  'IFCFLOWSEGMENT',
+  'IFCDISTRIBUTIONCONTROLELEMENT',
+  'IFCDISTRIBUTIONFLOWELEMENT',
+  'IFCELECTRICDISTRIBUTIONBOARD',
+  'IFCJUNCTIONBOX',
+  'IFCCABLECARRIERSEGMENT',
+  'IFCCABLESEGMENT',
 ])
 
 /**
@@ -210,154 +223,163 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
     // Get only filtered localIds
     const filteredLocalIds = filteredIndices.map(i => localIdsWithGeometry[i]);
 
-    // Fetch data only for filtered items in parallel
-    const [itemsData, guids, worldBoxes, fragmentElements] = await Promise.all([
-      fragmentsModel.getItemsData(filteredLocalIds, {
-        attributesDefault: true,
-        relationsDefault: { attributes: false, relations: false },
-      }),
+    // Only fetch detailed attributes for doors (saves time for walls/windows)
+    const doorLocalIds = filteredLocalIds.filter((_, idx) => {
+      const cat = itemCategories[filteredIndices[idx]]?.toUpperCase() || '';
+      return cat === 'IFCDOOR';
+    });
+
+    // Fetch data for filtered items in parallel
+    // Note: Only fetching detailed itemsData for doors since walls/windows don't need attributes
+    const [doorItemsData, guids, worldBoxes, fragmentElements] = await Promise.all([
+      doorLocalIds.length > 0
+        ? fragmentsModel.getItemsData(doorLocalIds, {
+          attributesDefault: true,
+          relationsDefault: { attributes: false, relations: false },
+        })
+        : Promise.resolve([]),
       fragmentsModel.getGuidsByLocalIds(filteredLocalIds),
       fragmentsModel.getBoxes(filteredLocalIds),
       (fragmentsModel as any)._getElements(filteredLocalIds),
     ]);
+
+    // Create map for door data lookup
+    const doorDataMap = new Map<number, any>();
+    doorLocalIds.forEach((id, idx) => {
+      doorDataMap.set(id, doorItemsData[idx]);
+    });
     console.log(`Got ${worldBoxes.length} world-space bounding boxes`);
     console.log(`Got ${fragmentElements.length} Element objects`);
 
-    // Create a map from localId to Element for quick lookup
-    const elementMap = new Map<number, any>();
-    fragmentElements.forEach((element: any) => {
-      elementMap.set(element.localId, element);
-    });
+    // Create arrays for direct index-based access (faster than maps)
+    // fragmentElements are already in the same order as filteredLocalIds
 
-    // Create localId to filtered index map for quick lookup
-    const localIdToFilteredIndex = new Map<number, number>();
-    filteredLocalIds.forEach((id, index) => {
-      localIdToFilteredIndex.set(id, index);
-    });
-
-    // Get filtered items
+    // Get filtered items - these correspond 1:1 with filteredLocalIds
     const filteredItems = filteredIndices.map(i => items[i]);
 
     // Process items in parallel batches for speed
-    const batchSize = 100; // Increased batch size since we have fewer items now
+    // Larger batch = more parallelism but more memory
+    const batchSize = 200;
     for (let batchStart = 0; batchStart < filteredItems.length; batchStart += batchSize) {
       const batchEnd = Math.min(batchStart + batchSize, filteredItems.length);
-      const batch = filteredItems.slice(batchStart, batchEnd);
 
-      // Process batch in parallel
-      const batchPromises = batch.map(async (item) => {
-        try {
-          const localId = await item.getLocalId();
-          if (!localId) return null;
+      // Process batch in parallel using index for direct array access
+      const batchPromises: Promise<ElementInfo | null>[] = [];
+      for (let i = batchStart; i < batchEnd; i++) {
+        const item = filteredItems[i];
+        const dataIndex = i; // Direct index - no map lookup needed
+        const localId = filteredLocalIds[i];
+        const originalIndex = filteredIndices[i];
 
-          const dataIndex = localIdToFilteredIndex.get(localId);
-          if (dataIndex === undefined) return null;
+        batchPromises.push((async () => {
+          try {
+            const worldBox = worldBoxes[dataIndex];
+            const globalId = guids[dataIndex] || undefined;
+            const category = itemCategories[originalIndex] || 'Unknown';
 
-          const worldBox = worldBoxes[dataIndex];
-          const itemData = itemsData[dataIndex];
-          const globalId = guids[dataIndex] || undefined;
-          const originalIndex = filteredIndices[dataIndex];
-          const category = itemCategories[originalIndex] || 'Unknown';
+            // Only get detailed data for doors
+            const itemData = doorDataMap.get(localId);
 
-          // Extract type name from category or itemData
-          let typeName = category;
-          if (!typeName || typeName === 'Unknown') {
-            if (itemData && typeof itemData === 'object') {
-              for (const [key, value] of Object.entries(itemData)) {
-                if (key.toLowerCase().includes('type') && typeof value === 'object' && value !== null) {
-                  const attrValue = (value as any).value;
-                  if (typeof attrValue === 'string' && attrValue.length > 0) {
-                    typeName = attrValue;
-                    break;
+            // Extract type name from category or itemData (for doors)
+            let typeName = category;
+            if ((!typeName || typeName === 'Unknown') && itemData) {
+              if (typeof itemData === 'object') {
+                for (const [key, value] of Object.entries(itemData)) {
+                  if (key.toLowerCase().includes('type') && typeof value === 'object' && value !== null) {
+                    const attrValue = (value as any).value;
+                    if (typeof attrValue === 'string' && attrValue.length > 0) {
+                      typeName = attrValue;
+                      break;
+                    }
                   }
                 }
               }
             }
-          }
 
-          // Get IFC type code
-          const ifcType = getIfcTypeCode(typeName);
+            // Get IFC type code
+            const ifcType = getIfcTypeCode(typeName);
 
-          // Get geometry with transforms using ItemGeometry API
-          const geometry = await item.getGeometry();
-          if (!geometry) return null;
+            // Get geometry with transforms using ItemGeometry API
+            const geometry = await item.getGeometry();
+            if (!geometry) return null;
 
-          // Get world transform matrices - these are the key to correct SVG rendering!
-          const transforms = await geometry.getTransform();
+            // Get world transform matrices - these are the key to correct SVG rendering!
+            const transforms = await geometry.getTransform();
 
-          // Get Element object for getMeshes()
-          const element = elementMap.get(localId);
-          if (!element) return null;
+            // Get Element object for getMeshes() - direct array access
+            const element = fragmentElements[dataIndex];
+            if (!element) return null;
 
-          // Get meshes from Element.getMeshes()
-          let meshGroup: THREE.Group | null = null;
-          try {
-            meshGroup = await element.getMeshes();
-          } catch (e) {
-            // Ignore errors
-          }
+            // Get meshes from Element.getMeshes()
+            let meshGroup: THREE.Group | null = null;
+            try {
+              meshGroup = await element.getMeshes();
+            } catch (e) {
+              // Ignore errors
+            }
 
-          if (!meshGroup) return null;
+            if (!meshGroup) return null;
 
-          // Extract meshes from the group
-          const meshes = extractMeshesFromGroup(meshGroup);
+            // Extract meshes from the group
+            const meshes = extractMeshesFromGroup(meshGroup);
 
-          if (meshes.length === 0) return null;
+            if (meshes.length === 0) return null;
 
-          // Apply world transforms to meshes - CRITICAL for correct SVG generation!
-          // We MUST bake the transform into the geometry vertices, not just set mesh.matrix,
-          // because EdgesGeometry extracts edges from local geometry and doesn't respect mesh transforms.
-          if (transforms && transforms.length > 0) {
-            for (let i = 0; i < meshes.length && i < transforms.length; i++) {
-              const mesh = meshes[i];
-              const transform = transforms[i];
+            // Apply world transforms to meshes - CRITICAL for correct SVG generation!
+            // We MUST bake the transform into the geometry vertices, not just set mesh.matrix,
+            // because EdgesGeometry extracts edges from local geometry and doesn't respect mesh transforms.
+            if (transforms && transforms.length > 0) {
+              for (let j = 0; j < meshes.length && j < transforms.length; j++) {
+                const mesh = meshes[j];
+                const transform = transforms[j];
 
-              if (transform && mesh.geometry) {
-                // Clone the geometry to avoid modifying shared geometry
-                mesh.geometry = mesh.geometry.clone();
+                if (transform && mesh.geometry) {
+                  // Clone the geometry to avoid modifying shared geometry
+                  mesh.geometry = mesh.geometry.clone();
 
-                // Apply the transform directly to the geometry vertices
-                // This ensures EdgesGeometry will work with world-space coordinates
-                mesh.geometry.applyMatrix4(transform);
+                  // Apply the transform directly to the geometry vertices
+                  // This ensures EdgesGeometry will work with world-space coordinates
+                  mesh.geometry.applyMatrix4(transform);
 
-                // Reset mesh transforms since geometry is now in world space
-                mesh.position.set(0, 0, 0);
-                mesh.rotation.set(0, 0, 0);
-                mesh.scale.set(1, 1, 1);
-                mesh.updateMatrixWorld(true);
+                  // Reset mesh transforms since geometry is now in world space
+                  mesh.position.set(0, 0, 0);
+                  mesh.rotation.set(0, 0, 0);
+                  mesh.scale.set(1, 1, 1);
+                  mesh.updateMatrixWorld(true);
+                }
               }
             }
+
+            const primaryMesh = meshes[0];
+
+            // Use world-space bounding box from Fragments API (proper way!)
+            // This box is already correctly positioned and transformed in world space
+            const boundingBox = worldBox && !worldBox.isEmpty() ? worldBox : undefined;
+
+            // Create ElementInfo
+            const elementInfo: ElementInfo = {
+              expressID: localId,
+              ifcType,
+              typeName,
+              mesh: primaryMesh,
+              meshes: meshes.length > 0 ? meshes : undefined,
+              boundingBox,
+              globalId,
+            };
+
+            // Store elementInfo in mesh userData for later lookup
+            meshes.forEach(mesh => {
+              mesh.userData.expressID = localId;
+              mesh.userData.elementInfo = elementInfo;
+            });
+
+            return elementInfo;
+          } catch (error) {
+            console.warn(`Failed to process item:`, error);
+            return null;
           }
-
-          const primaryMesh = meshes[0];
-
-          // Use world-space bounding box from Fragments API (proper way!)
-          // This box is already correctly positioned and transformed in world space
-          const boundingBox = worldBox && !worldBox.isEmpty() ? worldBox : undefined;
-
-          // Create ElementInfo
-          const elementInfo: ElementInfo = {
-            expressID: localId,
-            ifcType,
-            typeName,
-            mesh: primaryMesh,
-            meshes: meshes.length > 0 ? meshes : undefined,
-            boundingBox,
-            globalId,
-          };
-
-          // Store elementInfo in mesh userData for later lookup
-          meshes.forEach(mesh => {
-            mesh.userData.expressID = localId;
-            mesh.userData.elementInfo = elementInfo;
-          });
-
-          return elementInfo;
-        } catch (error) {
-          console.warn(`Failed to process item:`, error);
-          return null;
-        }
-      });
+        })());
+      }
 
       const batchResults = await Promise.all(batchPromises);
       batchResults.forEach(result => {
