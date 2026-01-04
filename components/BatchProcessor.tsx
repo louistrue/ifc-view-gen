@@ -26,6 +26,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
   const [batchMode, setBatchMode] = useState<'test' | 'all'>('test')
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
+  const [modalImage, setModalImage] = useState<{ svg: string; doorId: string; view: string } | null>(null)
 
   const [options, setOptions] = useState<SVGRenderOptions>({
     width: 1000,
@@ -285,7 +286,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     setPendingAction(null)
   }
 
-  const downloadSingleDoor = useCallback(
+  const showSingleDoor = useCallback(
     async (context: DoorContext, view: 'front' | 'back' | 'plan') => {
       try {
         let svg = ''
@@ -294,21 +295,41 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         } else {
           svg = await renderDoorElevationSVG(context, view === 'back', options)
         }
-        const blob = new Blob([svg], { type: 'image/svg+xml' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `${context.doorId}_${view}.svg`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
+        setModalImage({ svg, doorId: context.doorId, view })
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to render SVG')
       }
     },
     [options]
   )
+
+  const closeModal = () => {
+    setModalImage(null)
+  }
+
+  // Handle ESC key to close modal
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && modalImage) {
+        setModalImage(null)
+      }
+    }
+    window.addEventListener('keydown', handleEscape)
+    return () => window.removeEventListener('keydown', handleEscape)
+  }, [modalImage])
+
+  const downloadFromModal = () => {
+    if (!modalImage) return
+    const blob = new Blob([modalImage.svg], { type: 'image/svg+xml' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${modalImage.doorId}_${modalImage.view}.svg`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
 
   return (
     <div className="batch-processor">
@@ -514,21 +535,21 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               </span>
               <div className="door-actions">
                 <button
-                  onClick={() => downloadSingleDoor(context, 'front')}
+                  onClick={() => showSingleDoor(context, 'front')}
                   disabled={isProcessing}
                   className="download-button"
                 >
                   Front
                 </button>
                 <button
-                  onClick={() => downloadSingleDoor(context, 'back')}
+                  onClick={() => showSingleDoor(context, 'back')}
                   disabled={isProcessing}
                   className="download-button"
                 >
                   Back
                 </button>
                 <button
-                  onClick={() => downloadSingleDoor(context, 'plan')}
+                  onClick={() => showSingleDoor(context, 'plan')}
                   disabled={isProcessing}
                   className="download-button"
                 >
@@ -558,8 +579,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
       </div>
 
       {showConfirmation && (
-        <div className="modal-overlay">
-          <div className="modal-content">
+        <div className="modal-overlay" onClick={cancelAction}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <h3>Confirm Large Batch Operation</h3>
             <p>
               You are about to {pendingAction === 'download' ? 'generate a ZIP for' : 'upload to Airtable'} <strong>{doorsToProcess.length} doors</strong>.
@@ -574,6 +595,33 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               </button>
               <button onClick={confirmAction} className="confirm-button">
                 Yes, Proceed
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalImage && (
+        <div className="image-modal-overlay" onClick={closeModal}>
+          <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="image-modal-header">
+              <h3>{modalImage.doorId} - {modalImage.view.charAt(0).toUpperCase() + modalImage.view.slice(1)} View</h3>
+              <button className="close-button" onClick={closeModal} aria-label="Close">
+                ×
+              </button>
+            </div>
+            <div className="image-modal-body">
+              <div 
+                className="image-container"
+                dangerouslySetInnerHTML={{ __html: modalImage.svg }}
+              />
+            </div>
+            <div className="image-modal-footer">
+              <button onClick={downloadFromModal} className="download-button-modal">
+                Download SVG
+              </button>
+              <button onClick={closeModal} className="close-button-modal">
+                Close
               </button>
             </div>
           </div>
@@ -650,6 +698,114 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           justify-content: space-between;
           align-items: center;
           margin-bottom: 2rem;
+        }
+        .image-modal-overlay {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 0, 0, 0.85);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 2000;
+          padding: 2rem;
+        }
+        .image-modal-content {
+          background: #1a1a1a;
+          border-radius: 8px;
+          max-width: 90vw;
+          max-height: 90vh;
+          display: flex;
+          flex-direction: column;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+          overflow: hidden;
+          min-height: 0;
+        }
+        .image-modal-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 1rem 1.5rem;
+          border-bottom: 1px solid #333;
+        }
+        .image-modal-header h3 {
+          color: #fff;
+          font-size: 1.125rem;
+          margin: 0;
+        }
+        .close-button {
+          background: transparent;
+          border: none;
+          color: #fff;
+          font-size: 2rem;
+          line-height: 1;
+          cursor: pointer;
+          padding: 0;
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 4px;
+          transition: background-color 0.2s;
+        }
+        .close-button:hover {
+          background-color: #333;
+        }
+        .image-modal-body {
+          flex: 1;
+          overflow: auto;
+          padding: 2rem;
+          background: #fff;
+          min-height: 0;
+          display: flex;
+          align-items: flex-start;
+          justify-content: center;
+        }
+        .image-container {
+          display: inline-block;
+          max-width: 100%;
+        }
+        .image-container svg {
+          display: block;
+          max-width: 100%;
+          width: auto;
+          height: auto;
+        }
+        .image-modal-footer {
+          display: flex;
+          gap: 1rem;
+          justify-content: flex-end;
+          padding: 1rem 1.5rem;
+          border-top: 1px solid #333;
+        }
+        .download-button-modal {
+          background: #0070f3;
+          color: white;
+          border: none;
+          padding: 0.5rem 1rem;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 0.875rem;
+          transition: background-color 0.2s;
+        }
+        .download-button-modal:hover {
+          background: #0051cc;
+        }
+        .close-button-modal {
+          background: #444;
+          color: white;
+          border: none;
+          padding: 0.5rem 1rem;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 0.875rem;
+          transition: background-color 0.2s;
+        }
+        .close-button-modal:hover {
+          background: #555;
         }
       `}</style>
     </div>

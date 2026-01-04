@@ -183,7 +183,9 @@ function clipLineZ(
 }
 
 /**
- * Extract edges from mesh geometry using EdgesGeometry
+ * Extract edges from mesh geometry by directly processing triangles
+ * This works with both indexed and non-indexed geometry (Fragments uses non-indexed)
+ * Only draws "sharp" edges where adjacent face normals differ significantly (>30 degrees)
  */
 function extractEdges(
     mesh: THREE.Mesh,
@@ -199,24 +201,106 @@ function extractEdges(
     mesh.updateMatrixWorld()
     const worldMatrix = mesh.matrixWorld
 
-    // Create EdgesGeometry to extract visible edges
-    // Increasing threshold slightly to avoid internal triangulation lines if any
-    const edgesGeometry = new THREE.EdgesGeometry(mesh.geometry, 30) // 30 degree threshold
-    const positions = edgesGeometry.attributes.position
+    const geometry = mesh.geometry
+    const positions = geometry.attributes.position
+    const indices = geometry.index
 
-    for (let i = 0; i < positions.count; i += 2) {
+    const thresholdAngle = 30 // degrees - same as EdgesGeometry default
+    const thresholdDot = Math.cos((thresholdAngle * Math.PI) / 180)
+
+    // Helper to create edge key from two world-space positions
+    const createEdgeKey = (p1: THREE.Vector3, p2: THREE.Vector3): string => {
+        const round = (v: THREE.Vector3) => 
+            `${Math.round(v.x * 1000)}_${Math.round(v.y * 1000)}_${Math.round(v.z * 1000)}`
+        
+        const key1 = round(p1)
+        const key2 = round(p2)
+        return key1 < key2 ? `${key1}-${key2}` : `${key2}-${key1}`
+    }
+
+    // Build a map of edges to face normals
+    // Map: edge key -> array of face normals that share this edge
+    const edgeToNormals = new Map<string, THREE.Vector3[]>()
+    const edgeToPoints = new Map<string, [THREE.Vector3, THREE.Vector3]>()
+
+    // Helper to process a triangle and register its edges
+    const processTriangle = (i1: number, i2: number, i3: number) => {
         const p1 = new THREE.Vector3(
-            positions.getX(i),
-            positions.getY(i),
-            positions.getZ(i)
+            positions.getX(i1), positions.getY(i1), positions.getZ(i1)
         ).applyMatrix4(worldMatrix)
-
         const p2 = new THREE.Vector3(
-            positions.getX(i + 1),
-            positions.getY(i + 1),
-            positions.getZ(i + 1)
+            positions.getX(i2), positions.getY(i2), positions.getZ(i2)
+        ).applyMatrix4(worldMatrix)
+        const p3 = new THREE.Vector3(
+            positions.getX(i3), positions.getY(i3), positions.getZ(i3)
         ).applyMatrix4(worldMatrix)
 
+        // Calculate face normal
+        const edge1 = p2.clone().sub(p1)
+        const edge2 = p3.clone().sub(p1)
+        const normal = edge1.cross(edge2).normalize()
+
+        // Register this normal for all 3 edges of the triangle
+        const edges = [
+            [p1, p2],
+            [p2, p3],
+            [p3, p1]
+        ]
+
+        for (const [pa, pb] of edges) {
+            const key = createEdgeKey(pa, pb)
+            if (!edgeToNormals.has(key)) {
+                edgeToNormals.set(key, [])
+                edgeToPoints.set(key, [pa, pb])
+            }
+            edgeToNormals.get(key)!.push(normal)
+        }
+    }
+
+    // Process all triangles
+    if (indices) {
+        // Indexed geometry
+        for (let i = 0; i < indices.count; i += 3) {
+            processTriangle(indices.getX(i), indices.getX(i + 1), indices.getX(i + 2))
+        }
+    } else {
+        // Non-indexed geometry
+        for (let i = 0; i < positions.count; i += 3) {
+            processTriangle(i, i + 1, i + 2)
+        }
+    }
+
+    // Filter edges: only keep "sharp" edges where normals differ significantly
+    const edgeList: [THREE.Vector3, THREE.Vector3][] = []
+    
+    for (const [key, normals] of edgeToNormals.entries()) {
+        // If edge belongs to only one face, it's a boundary edge - always draw it
+        if (normals.length === 1) {
+            edgeList.push(edgeToPoints.get(key)!)
+            continue
+        }
+
+        // If edge has 2+ faces, check if normals differ significantly
+        // Only draw if angle between any pair of normals > threshold
+        let isSharpEdge = false
+        for (let i = 0; i < normals.length; i++) {
+            for (let j = i + 1; j < normals.length; j++) {
+                const dot = normals[i].dot(normals[j])
+                if (dot < thresholdDot) {
+                    isSharpEdge = true
+                    break
+                }
+            }
+            if (isSharpEdge) break
+        }
+
+        if (isSharpEdge) {
+            edgeList.push(edgeToPoints.get(key)!)
+        }
+    }
+
+    // Project edges to 2D and apply clipping
+    for (const [p1, p2] of edgeList) {
         const proj1 = projectPoint(p1, camera, width, height)
         const proj2 = projectPoint(p2, camera, width, height)
 
@@ -253,7 +337,6 @@ function extractEdges(
         }
     }
 
-    edgesGeometry.dispose()
     return edges
 }
 
@@ -697,7 +780,7 @@ function setupPlanCamera(
         // Ortho frustum
         // width/height of camera view volume match the Plan dimensions
         near = 0
-        far = viewDepth
+        far = viewDepth * 10 // Increase far plane to capture all geometry properly
 
         // Note: OrthographicCamera(left, right, top, bottom, near, far)
         // Top/Bottom correspond to the Local Y axis of the camera.
