@@ -310,12 +310,10 @@ async function getDoorTypeInfo(
     // Check if we have OperationType from web-ifc extraction (preferred method)
     if (operationTypeMap && operationTypeMap.has(doorExpressID)) {
         result.direction = operationTypeMap.get(doorExpressID) || null
-        console.log(`[getDoorTypeInfo] Door ${doorExpressID}: Using OperationType from web-ifc map: ${result.direction}`)
     }
 
     // Check if this is a fragments model (has fragmentsModel property)
     const fragmentsModel = (model as any).fragmentsModel;
-    console.log(`[getDoorTypeInfo] Door ${doorExpressID}: fragmentsModel=${!!fragmentsModel}, doorElement.productTypeName=${doorElement?.productTypeName}`);
 
     if (fragmentsModel) {
         // Fragments model path - use already-extracted data (fast, no API calls)
@@ -342,11 +340,6 @@ async function getDoorTypeInfo(
                 if (doorData && doorData.length > 0) {
                     const data = doorData[0] as any;
 
-                    // Debug: log what we got
-                    console.log(`[getDoorTypeInfo] Door ${doorExpressID} data keys:`, Object.keys(data || {}));
-                    console.log(`[getDoorTypeInfo] OperationType:`, data?.OperationType);
-                    console.log(`[getDoorTypeInfo] IsTypedBy:`, data?.IsTypedBy);
-
                     // Check instance OperationType first
                     // OperationType might be stored as {value: "SINGLE_SWING_LEFT"} or just a string
                     let operationType = null;
@@ -356,7 +349,6 @@ async function getDoorTypeInfo(
 
                     if (operationType && operationType !== 'NOTDEFINED' && operationType !== '') {
                         result.direction = operationType;
-                        console.log(`[getDoorTypeInfo] Found OperationType on instance: ${operationType}`);
                     }
 
                     // Check type OperationType if not found on instance
@@ -373,18 +365,12 @@ async function getDoorTypeInfo(
 
                                 if (typeOperationType && typeOperationType !== 'NOTDEFINED' && typeOperationType !== '') {
                                     result.direction = typeOperationType;
-                                    console.log(`[getDoorTypeInfo] Found OperationType on type: ${typeOperationType}`);
                                     break;
                                 }
                             }
                         }
                     }
 
-                    if (!result.direction) {
-                        console.log(`[getDoorTypeInfo] No OperationType found for door ${doorExpressID}`);
-                    }
-                } else {
-                    console.log(`[getDoorTypeInfo] No data returned for door ${doorExpressID}`);
                 }
             } catch (e) {
                 console.warn(`Failed to extract OperationType for door ${doorExpressID}:`, e);
@@ -504,7 +490,6 @@ export async function analyzeDoors(
 ): Promise<DoorContext[]> {
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure)
-    console.log(`Built storey map with ${storeyMap.size} element mappings`)
 
     // Separate elements by type
     const doors: ElementInfo[] = []
@@ -530,11 +515,8 @@ export async function analyzeDoors(
 
     // Process secondary model if provided
     if (secondaryModel) {
-        console.log(`Processing secondary model elements: ${secondaryModel.elements.length}`)
         processElements(secondaryModel.elements)
     }
-
-    console.log(`Found ${doors.length} doors, ${walls.length} walls, ${devices.length} electrical devices`)
 
     // Analyze each door
     const doorContexts: DoorContext[] = []
@@ -590,9 +572,7 @@ export async function analyzeDoors(
         const doorId = door.globalId || String(door.expressID)
 
         // Get opening direction and type name
-        console.log(`[analyzeDoors] Calling getDoorTypeInfo for door ${door.expressID}, model type:`, (model as any).fragmentsModel ? 'Fragments' : 'web-ifc')
         const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door, operationTypeMap)
-        console.log(`[analyzeDoors] Got openingDirection=${openingDirection}, doorTypeName=${doorTypeName}`)
 
         // Get storey name from spatial structure
         const storeyName = storeyMap.get(door.expressID) || null
@@ -625,7 +605,6 @@ export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
         const totalVerts = [...doorMeshes, ...deviceMeshes].reduce(
             (sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0
         )
-        console.log(`[getContextMeshes] Door ${context.doorId}: using DETAILED geometry (${doorMeshes.length} door meshes, ${totalVerts} verts)`)
 
         // Return door meshes + device meshes (not wall - too large for SVG)
         return [...doorMeshes, ...deviceMeshes]
@@ -634,12 +613,6 @@ export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
     // Fallback to Fragments geometry (simplified)
     const meshes: THREE.Mesh[] = []
     const doorMeshes = collectMeshesFromElement(context.door)
-    console.log(`[getContextMeshes] Door ${context.doorId}: using FRAGMENTS geometry (${doorMeshes.length} meshes, simplified)`)
-
-    for (const mesh of doorMeshes) {
-        const posCount = mesh.geometry?.attributes?.position?.count || 0
-        console.log(`  - Mesh: positions=${posCount}`)
-    }
 
     meshes.push(...doorMeshes)
 
@@ -722,8 +695,6 @@ export async function loadDetailedGeometry(
         }
     }
 
-    console.log(`[loadDetailedGeometry] Extracting geometry for ${doorIDs.size} doors, ${wallIDs.size} walls, ${deviceIDs.size} devices`)
-    console.log(`[loadDetailedGeometry] Centering offset to apply: (${modelCenterOffset.x.toFixed(2)}, ${modelCenterOffset.y.toFixed(2)}, ${modelCenterOffset.z.toFixed(2)})`)
 
     // Extract all geometry in one pass
     const allIDs = [...doorIDs, ...wallIDs, ...deviceIDs]
@@ -739,7 +710,6 @@ export async function loadDetailedGeometry(
             }
         }
     }
-    console.log(`[loadDetailedGeometry] Applied centering offset to ${meshCount} meshes`)
 
     // Populate each door context with its geometry
     for (const context of doorContexts) {
@@ -760,6 +730,5 @@ export async function loadDetailedGeometry(
         }
     }
 
-    console.log(`[loadDetailedGeometry] Complete`)
 }
 

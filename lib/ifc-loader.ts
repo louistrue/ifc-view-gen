@@ -85,11 +85,8 @@ export async function extractDoorTypes(file: File): Promise<Map<number, string>>
     }
 
     try {
-        console.log('=== Extracting door types using web-ifc ===')
-
         // Get all IfcRelDefinesByType entities
         const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
-        console.log(`Found ${relDefinesByTypeIds.size()} IFCRELDEFINESBYTYPE entities`)
 
         for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
             const relId = relDefinesByTypeIds.get(i)
@@ -128,14 +125,6 @@ export async function extractDoorTypes(file: File): Promise<Map<number, string>>
             }
         }
 
-        // Log results
-        const uniqueTypes = new Set(productTypeMap.values())
-        console.log(`Found ${uniqueTypes.size} unique door types:`)
-        for (const typeName of Array.from(uniqueTypes).slice(0, 20)) {
-            const count = Array.from(productTypeMap.values()).filter(t => t === typeName).length
-            console.log(`  - "${typeName}": ${count} doors`)
-        }
-        console.log(`Mapped ${productTypeMap.size} doors to their product type names`)
 
         return productTypeMap
     } finally {
@@ -163,11 +152,8 @@ export async function extractDoorOperationTypes(file: File): Promise<Map<number,
     }
 
     try {
-        console.log('=== Extracting door OperationTypes using web-ifc ===')
-
         // Get all door instances
         const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
-        console.log(`Found ${doorIds.size()} door instances`)
 
         for (let i = 0; i < doorIds.size(); i++) {
             const doorId = doorIds.get(i)
@@ -213,14 +199,6 @@ export async function extractDoorOperationTypes(file: File): Promise<Map<number,
             }
         }
 
-        // Log results
-        const uniqueTypes = new Set(operationTypeMap.values())
-        console.log(`Found ${uniqueTypes.size} unique OperationTypes:`)
-        for (const opType of Array.from(uniqueTypes).slice(0, 10)) {
-            const count = Array.from(operationTypeMap.values()).filter(t => t === opType).length
-            console.log(`  - "${opType}": ${count} doors`)
-        }
-        console.log(`Mapped ${operationTypeMap.size} doors to their OperationTypes`)
 
         return operationTypeMap
     } finally {
@@ -510,14 +488,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                     }
                 }
 
-                // Log for first 5 doors to debug - show what we found
-                if (typeName.toLowerCase().includes('door') && expressID < 200000) {
-                    const props = elementProps as any
-                    console.log(`Door ExpressID ${expressID}:`)
-                    console.log(`  GlobalId.value: "${props.GlobalId?.value || 'undefined'}"`)
-                    console.log(`  GlobalId type: ${typeof props.GlobalId}`)
-                    console.log(`  GlobalId extracted: "${globalId || 'NOT FOUND'}"`)
-                }
 
                 // Empty string is not valid, treat as undefined
                 if (globalId === '') {
@@ -528,10 +498,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 console.warn(`Failed to extract GlobalId for ExpressID ${expressID}:`, e)
             }
 
-            // Log for debugging
-            if (expressID % 100 === 0 || typeName.toLowerCase().includes('door') || typeName.toLowerCase().includes('wall')) {
-                console.log(`ExpressID ${expressID}: type=${ifcType}, typeName=${typeName}, globalId=${globalId || 'N/A'}`)
-            }
 
             // Calculate bounding box for all meshes of this element
             let bbox: THREE.Box3 | undefined = undefined
@@ -582,10 +548,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 mesh.userData.elementInfo = elementInfo
             })
 
-            // Debug logging
-            if (typeName.toLowerCase().includes('door') || typeName.toLowerCase().includes('wall')) {
-                console.log(`Found ${typeName} with ExpressID ${expressID}`)
-            }
         } catch (error) {
             console.warn(`Failed to get properties for ExpressID ${expressID}:`, error)
 
@@ -637,14 +599,12 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
             for (const typeCode of doorTypeCodes) {
                 try {
                     const doorIDs = api.GetLineIDsWithType(modelID, typeCode)
-                    console.log(`Found ${doorIDs.size()} doors using type code ${typeCode}`)
                     // Mark these as doors in our elements array
                     for (let i = 0; i < doorIDs.size(); i++) {
                         const doorID = doorIDs.get(i)
                         const element = elements.find(e => e.expressID === doorID)
                         if (element && !element.typeName.toLowerCase().includes('door')) {
                             element.typeName = 'IFCDOOR'
-                            console.log(`Updated element ${doorID} to IFCDOOR`)
                         }
                     }
                 } catch (e) {
@@ -656,7 +616,6 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
         console.warn('Could not use GetLineIDsWithType:', error)
     }
 
-    console.log(`Loaded ${elements.length} elements total`)
 
     return {
         group,
@@ -787,7 +746,6 @@ export async function extractDetailedGeometry(
                 totalVertices += verts
             }
         }
-        console.log(`[web-ifc] Extracted detailed geometry: ${totalMeshes} meshes, ${totalVertices} vertices for ${expressIDs.length} elements`)
 
         return result
     } finally {

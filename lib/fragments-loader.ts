@@ -200,8 +200,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
       fragmentsModel.getItemsIdsWithGeometry(),
       fragmentsModel.getItemsWithGeometryCategories(),
     ]);
-    console.log(`Found ${categories.length} IFC categories`);
-    console.log(`Found ${items.length} items with geometry`);
 
     if (items.length === 0) {
       console.warn('No items with geometry found in fragments model');
@@ -217,7 +215,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
           filteredIndices.push(i);
         }
       }
-      console.log(`Filtered to ${filteredIndices.length} door-related elements (from ${items.length})`);
     } else {
       filteredIndices = Array.from({ length: items.length }, (_, i) => i);
     }
@@ -245,7 +242,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
           doorIndices.push(i);
         }
       }
-      console.log(`Found ${doorIndices.length} IFCDOOR elements`);
 
       // Use web-ifc to extract door types (Fragments doesn't expose IFCRELDEFINESBYTYPE properly)
       if (originalFile) {
@@ -256,14 +252,11 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
           productTypeMap.set(expressId, typeName);
         }
       } else {
-        console.log('No original file provided, skipping type extraction');
       }
     } catch (err) {
       console.warn('Failed to extract door type names:', err);
       console.error(err);
     }
-    console.log(`Got ${worldBoxes.length} world-space bounding boxes`);
-    console.log(`Got ${fragmentElements.length} Element objects`);
 
     // Create arrays for direct index-based access (faster than maps)
     // fragmentElements are already in the same order as filteredLocalIds
@@ -341,7 +334,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
               // Check for interleaved buffer attributes (Fragments optimization)
               if (posAttr && 'isInterleavedBufferAttribute' in posAttr) {
                 // Interleaved buffer - need to de-interleave for standard operations
-                console.log(`[Fragments] Mesh ${localId}: Found InterleavedBufferAttribute, count=${posAttr.count}`);
 
                 // Create standard BufferAttribute from interleaved data
                 const count = posAttr.count;
@@ -427,13 +419,6 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
       });
     }
 
-    console.log(`✓ Extracted ${elements.length} elements from fragments model`);
-
-    // Log some statistics
-    const doorCount = elements.filter(e => e.typeName.toLowerCase().includes('door')).length;
-    const wallCount = elements.filter(e => e.typeName.toLowerCase().includes('wall')).length;
-    const windowCount = elements.filter(e => e.typeName.toLowerCase().includes('window')).length;
-    console.log(`  - Doors: ${doorCount}, Walls: ${wallCount}, Windows: ${windowCount}`);
 
   } catch (error) {
     console.error('Failed to extract metadata from fragments:', error);
@@ -455,7 +440,6 @@ export async function loadIFCModelWithFragments(
   file: File,
   onProgress?: (progress: LoadingProgress) => void
 ): Promise<LoadedFragmentsModel> {
-  console.log('Loading IFC model with Fragments...');
 
   // Stage 1: Initialize
   onProgress?.({ percent: 0, stage: 'Initializing...' });
@@ -469,7 +453,6 @@ export async function loadIFCModelWithFragments(
 
   if (cached) {
     // Cached path - faster
-    console.log('✓ Loading from cached Fragments binary (ultra-fast!)');
     onProgress?.({ percent: 10, stage: 'Loading from cache...' });
 
     // Simulate a brief delay to show the stage (cache read is too fast)
@@ -479,7 +462,6 @@ export async function loadIFCModelWithFragments(
     onProgress?.({ percent: 30, stage: 'Cache loaded' });
   } else {
     // Fresh conversion path
-    console.log('Converting IFC to Fragments binary (first-time conversion)...');
     onProgress?.({ percent: 10, stage: 'Reading IFC file...' });
 
     // Initialize the IFC importer
@@ -520,7 +502,6 @@ export async function loadIFCModelWithFragments(
       fragmentBytes,
     });
 
-    console.log('✓ Fragments binary cached for future use');
     onProgress?.({ percent: 70, stage: 'Cached for next time' });
   }
 
@@ -566,9 +547,6 @@ export async function loadIFCModelWithFragments(
   manager.settings.graphicsQuality = 0.8; // High quality (0-1 scale)
   manager.settings.forceUpdateRate = 200; // Force update every 200ms if needed
 
-  console.log(`✓ Loaded ${elements.length} elements using Fragments format`);
-  console.log(`✓ Using Fragments optimized rendering (LOD, culling, instancing enabled)`);
-  console.log(`✓ Extracted meshes available for SVG generation: ${elements.length} elements`);
   onProgress?.({ percent: 100, stage: 'Complete!' });
 
   return {
@@ -590,7 +568,6 @@ export async function clearFragmentsCache(): Promise<void> {
       const store = transaction.objectStore(STORE_NAME);
       const request = store.clear();
       request.onsuccess = () => {
-        console.log('Fragments cache cleared');
         resolve();
       };
       request.onerror = () => reject(request.error);

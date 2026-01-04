@@ -25,6 +25,7 @@ export class ElementVisibilityManager {
     private hiddenElements: Set<number> = new Set()
     private isolatedElements: Set<number> | null = null
     private typeFilters: Set<string> = new Set()
+    private ifcClassFilters: Set<string> = new Set()
     private transparencyMap: Map<number, number> = new Map() // localId -> opacity (0-1)
     private onRenderNeeded: (() => void) | null = null
 
@@ -55,7 +56,6 @@ export class ElementVisibilityManager {
         try {
             const ids = await this.fragmentsModel.getItemsIdsWithGeometry()
             this.allModelIds = Array.isArray(ids) ? ids : Array.from(ids)
-            console.log(`Cached ${this.allModelIds.length} model IDs for visibility management`)
         } catch (e) {
             console.warn('Failed to cache model IDs:', e)
             // Fallback to tracked elements
@@ -116,7 +116,6 @@ export class ElementVisibilityManager {
             await this.cacheAllModelIds()
         }
 
-        console.log(`Hiding all ${this.allModelIds.length} elements`)
         await this.fragmentsModel.setVisible(this.allModelIds, false)
         await this.applyChanges()
     }
@@ -125,7 +124,6 @@ export class ElementVisibilityManager {
      * Set visibility for specific elements (works with any IDs, not just tracked ones)
      */
     async setElementsVisible(localIds: number[], visible: boolean): Promise<void> {
-        console.log(`Setting ${localIds.length} elements visible: ${visible}`)
         await this.fragmentsModel.setVisible(localIds, visible)
         await this.applyChanges()
     }
@@ -167,7 +165,6 @@ export class ElementVisibilityManager {
         }
 
         // Hide ALL elements in the entire model
-        console.log(`Isolating ${localIds.length} elements, hiding ${this.allModelIds.length} total`)
         await this.fragmentsModel.setVisible(this.allModelIds, false)
 
         // Then show only the isolated elements
@@ -197,6 +194,8 @@ export class ElementVisibilityManager {
      */
     async filterByType(typeNames: string[]): Promise<void> {
         this.typeFilters = new Set(typeNames.map(t => t.toLowerCase()))
+        // Clear IFC class filters when applying type filters (mutually exclusive)
+        this.ifcClassFilters.clear()
 
         // Ensure we have all model IDs cached
         if (this.allModelIds.length === 0) {
@@ -214,7 +213,41 @@ export class ElementVisibilityManager {
             }
         }
 
-        console.log(`Type filter: showing ${visibleIds.length} elements, hiding ${this.allModelIds.length - visibleIds.length} (total model: ${this.allModelIds.length})`)
+
+        // First hide ALL elements in the entire model
+        await this.fragmentsModel.setVisible(this.allModelIds, false)
+
+        // Then show only the matching elements
+        if (visibleIds.length > 0) {
+            await this.fragmentsModel.setVisible(visibleIds, true)
+        }
+        await this.applyChanges()
+    }
+
+    /**
+     * Filter by IFC class names (e.g., "IFCDOOR", "IFCWALL") - hides ALL model elements except matching classes
+     * Filters by typeName (IFC class) - NOT product type names
+     */
+    async filterByIFCClass(classNames: string[]): Promise<void> {
+        this.ifcClassFilters = new Set(classNames.map(c => c.toLowerCase()))
+        // Clear type filters when applying IFC class filters (mutually exclusive)
+        this.typeFilters.clear()
+
+        // Ensure we have all model IDs cached
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
+        }
+
+        // Find elements that match the filter by typeName (IFC class)
+        const visibleIds: number[] = []
+        for (const [id, element] of this.elements.entries()) {
+            const ifcClass = (element.typeName || '').toLowerCase()
+
+            // Match against IFC class name (e.g., "ifcdoor", "ifcwall")
+            if (ifcClass && this.ifcClassFilters.has(ifcClass) && !this.hiddenElements.has(id)) {
+                visibleIds.push(id)
+            }
+        }
 
         // First hide ALL elements in the entire model
         await this.fragmentsModel.setVisible(this.allModelIds, false)
@@ -232,7 +265,23 @@ export class ElementVisibilityManager {
     async clearTypeFilters(): Promise<void> {
         this.typeFilters.clear()
 
-        console.log('Clearing class filters, showing all elements')
+
+        // Show all elements using resetVisible()
+        await this.fragmentsModel.resetVisible()
+
+        // Re-apply any hidden elements
+        if (this.hiddenElements.size > 0) {
+            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        }
+
+        await this.applyChanges()
+    }
+
+    /**
+     * Clear IFC class filters (show all classes)
+     */
+    async clearIFCClassFilters(): Promise<void> {
+        this.ifcClassFilters.clear()
 
         // Show all elements using resetVisible()
         await this.fragmentsModel.resetVisible()
@@ -278,9 +327,9 @@ export class ElementVisibilityManager {
         this.hiddenElements.clear()
         this.isolatedElements = null
         this.typeFilters.clear()
+        this.ifcClassFilters.clear()
         this.transparencyMap.clear()
 
-        console.log('Resetting all visibility')
         await this.fragmentsModel.resetVisible()
         await this.applyChanges()
     }
@@ -314,11 +363,13 @@ export class ElementVisibilityManager {
         hidden: number[]
         isolated: number[] | null
         typeFilters: string[]
+        ifcClassFilters: string[]
     } {
         return {
             hidden: Array.from(this.hiddenElements),
             isolated: this.isolatedElements ? Array.from(this.isolatedElements) : null,
             typeFilters: Array.from(this.typeFilters),
+            ifcClassFilters: Array.from(this.ifcClassFilters),
         }
     }
 
@@ -357,7 +408,6 @@ export class ElementVisibilityManager {
      * Set selected elements - highlights them with selection color
      */
     setSelectedElements(localIds: number[]): void {
-        console.log(`[Highlight] setSelectedElements called with ${localIds.length} IDs:`, localIds)
 
         // Clear previous selections that are no longer selected
         for (const prevId of this.selectedElements) {
@@ -372,7 +422,6 @@ export class ElementVisibilityManager {
         for (const localId of localIds) {
             if (!this.highlightMeshes.has(localId)) {
                 const element = this.elements.get(localId)
-                console.log(`[Highlight] Looking up element ${localId}: found=${!!element}, typeName=${element?.typeName}`)
                 if (element) {
                     this.createHighlightMesh(localId, HIGHLIGHT_COLORS.selected, 1.01)
                 } else {
@@ -466,7 +515,6 @@ export class ElementVisibilityManager {
         const size = bbox.getSize(new THREE.Vector3())
         const center = bbox.getCenter(new THREE.Vector3())
 
-        console.log(`[Highlight] Creating box highlight at center=${center.toArray()}, size=${size.toArray()}`)
 
         // Create a group to hold highlight visuals
         const highlightGroup = new THREE.Group()

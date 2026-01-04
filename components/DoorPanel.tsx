@@ -167,7 +167,6 @@ export default function DoorPanel({
   const handleDoorClick = useCallback((door: DoorContext) => {
     if (!navigationManager || !door.door.boundingBox) return
 
-    console.log(`[DoorPanel] Clicking door ${door.doorId}, expressID=${door.door.expressID}, typeName=${door.door.typeName}`)
 
     // Highlight the selected door in 3D
     if (visibilityManager) {

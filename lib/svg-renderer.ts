@@ -475,7 +475,11 @@ function generateSVGString(
     const legendHeight = showLegendActual ? (fontSize + 10) : 0
 
     const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
-    const viewHeight = height - titleBlockHeight
+
+    // Reserve space for Vorderansicht label in plan views (arrow + text = ~60px)
+    const vorderansichtReserve = (activeViewType === 'Plan') ? 100 : 0
+
+    const viewHeight = height - titleBlockHeight - vorderansichtReserve
 
     // Compute bounding box of all edges
     let minX = Infinity, maxX = -Infinity
@@ -502,12 +506,9 @@ function generateSVGString(
         minX = 0; maxX = width; minY = 0; maxY = viewHeight;
     }
 
-    // DEBUG: Log coordinate ranges
-    console.log(`[generateSVGString] Edge bounds: x=[${minX.toFixed(2)}, ${maxX.toFixed(2)}], y=[${minY.toFixed(2)}, ${maxY.toFixed(2)}]`)
-    console.log(`[generateSVGString] Total edges=${edges.length}, polygons=${polygons.length}`)
 
     // Calculate scale to fit in viewport with padding
-    const padding = 50 // pixels
+    const padding = 80 // Increased from 50 to 80 pixels for more border room
     const contentWidth = maxX - minX
     const contentHeight = maxY - minY
     const availWidth = width - padding * 2
@@ -567,18 +568,14 @@ function generateSVGString(
         svg += `    <line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${edge.color}" stroke-width="${lineWidth * (edge.isDashed ? 0.75 : 1)}" stroke-linecap="round"${dashAttr} opacity="${edge.isDashed ? 0.7 : 1}"/>\n`
     }
 
-    if (dashedCount > 0) {
-        console.log(`[generateSVGString] Rendered ${dashedCount} dashed edges (door swing arcs)`)
-    }
 
     svg += `  </g>`
 
     // Render "Vorderansicht" arrow for Plan view
-    // Render "Vorderansicht" arrow for Plan view
     if (activeViewType === 'Plan') {
         // Place arrow relative to the content bounding box (scaledHeight + offsetY)
-        // Add some padding (e.g. 10px) below the content
-        const arrowY = offsetY + scaledHeight + 10
+        // Add sufficient padding below the content to avoid overlap with door geometry
+        const arrowY = offsetY + scaledHeight + 40 // Increased from 10px to 40px for better spacing
         const midX = width / 2
 
         svg += `
@@ -863,12 +860,10 @@ export async function renderDoorElevationSVG(
     const hasDetailedGeometry = context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
 
     if (hasDetailedGeometry) {
-        console.log(`[SVG Elevation] Door ${context.doorId}: using DETAILED geometry`)
         return renderElevationFromMeshes(context, isBackView, opts)
     }
 
     // Fallback to bounding box rendering
-    console.log(`[SVG Elevation] Door ${context.doorId}: using BOUNDING BOX (no detailed geometry)`)
     return renderElevationFromBoundingBox(context, isBackView, opts, doorWidth, doorHeight)
 }
 
@@ -935,7 +930,6 @@ function renderElevationFromMeshes(
         }
     }
 
-    console.log(`[SVG Elevation] Extracted ${allEdges.length} edges, ${allPolygons.length} polygons`)
 
     activeContext = context
     activeViewType = isBackView ? 'Back' : 'Front'
@@ -1042,12 +1036,10 @@ export async function renderDoorPlanSVG(
     const hasDetailedGeometry = context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
 
     if (hasDetailedGeometry) {
-        console.log(`[SVG Plan] Door ${context.doorId}: using DETAILED geometry`)
         return renderPlanFromMeshes(context, opts)
     }
 
     // Fallback to bounding box rendering
-    console.log(`[SVG Plan] Door ${context.doorId}: using BOUNDING BOX (no detailed geometry)`)
     return renderPlanFromBoundingBox(context, opts, doorWidth, doorThickness, doorHeight)
 }
 
@@ -1106,10 +1098,99 @@ function parseOperationType(operationType: string | null): SwingArcParams {
 }
 
 /**
+ * Generate arc edges for a single door leaf
+ * @param hinge3D - 3D position of the hinge
+ * @param latch3D - 3D position of the latch (door closed position)
+ * @param leafWidth - Width of this door leaf
+ * @param swingSign - 1 for CCW (left), -1 for CW (right)
+ * @param cutHeight - Y coordinate for plan view cut
+ * @param camera - Camera for projection
+ * @param width - SVG width
+ * @param height - SVG height
+ */
+function generateSingleLeafArc(
+    hinge3D: THREE.Vector3,
+    latch3D: THREE.Vector3,
+    leafWidth: number,
+    swingSign: number,
+    cutHeight: number,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number
+): ProjectedEdge[] {
+    const edges: ProjectedEdge[] = []
+    const color = '#666666' // Lighter color for arc
+
+    // Calculate direction from hinge to latch (door closed position)
+    const latchDir = latch3D.clone().sub(hinge3D)
+    const startDir = latchDir.clone().normalize()
+
+    // Generate arc points (90° swing)
+    const arcPoints: THREE.Vector3[] = []
+    const numSegments = 20
+
+    for (let i = 0; i <= numSegments; i++) {
+        const t = i / numSegments
+        const angle = (Math.PI / 2) * t * swingSign
+        const dir = startDir.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle)
+        const point = hinge3D.clone().add(dir.multiplyScalar(leafWidth))
+        point.y = cutHeight
+        arcPoints.push(point)
+    }
+
+    // Project arc points
+    for (let i = 0; i < arcPoints.length - 1; i++) {
+        const proj1 = projectPoint(arcPoints[i], camera, width, height)
+        const proj2 = projectPoint(arcPoints[i + 1], camera, width, height)
+
+        edges.push({
+            x1: proj1.x,
+            y1: proj1.y,
+            x2: proj2.x,
+            y2: proj2.y,
+            color,
+            depth: (proj1.z + proj2.z) / 2,
+            isDashed: true // Mark arc edges as dashed
+        })
+    }
+
+    // Add door leaf line (from hinge to latch - door in closed position)
+    const hingeProj = projectPoint(hinge3D, camera, width, height)
+    const latchProj = projectPoint(latch3D, camera, width, height)
+
+    edges.push({
+        x1: hingeProj.x,
+        y1: hingeProj.y,
+        x2: latchProj.x,
+        y2: latchProj.y,
+        color: '#333333', // Darker for door leaf
+        depth: (hingeProj.z + latchProj.z) / 2,
+        isDashed: false // Door leaf line is solid
+    })
+
+    // Add dashed line showing door in OPEN position (90 degrees)
+    const openDoorEnd = arcPoints[arcPoints.length - 1] // Last arc point = open position
+    const openDoorProj = projectPoint(openDoorEnd, camera, width, height)
+
+    edges.push({
+        x1: hingeProj.x,
+        y1: hingeProj.y,
+        x2: openDoorProj.x,
+        y2: openDoorProj.y,
+        color: '#666666', // Same color as arc
+        depth: (hingeProj.z + openDoorProj.z) / 2,
+        isDashed: true // Dashed to indicate open position
+    })
+
+    return edges
+}
+
+/**
  * Calculate door swing arc edges for plan view
  * Returns edges that can be added to allEdges array (in camera projection space)
  * @param geometryCenter - Optional center from actual mesh geometry (for coordinate alignment)
  * @param geometrySize - Optional size from actual mesh geometry
+ * @param isWidthAlongX - Whether door width runs along X-axis (affects camera orientation)
  */
 function calculateSwingArcEdges(
     context: DoorContext,
@@ -1117,14 +1198,12 @@ function calculateSwingArcEdges(
     width: number,
     height: number,
     geometryCenter?: THREE.Vector3,
-    geometrySize?: THREE.Vector3
+    geometrySize?: THREE.Vector3,
+    isWidthAlongX?: boolean
 ): ProjectedEdge[] {
     const params = parseOperationType(context.openingDirection)
-    console.log(`[calculateSwingArcEdges] Parsed OperationType:`, params)
 
-    if (params.type !== 'swing' || !params.hingeSide || params.hingeSide === 'both') {
-        // Only handle single swing doors for now
-        console.log(`[calculateSwingArcEdges] Skipping - type=${params.type}, hingeSide=${params.hingeSide}`)
+    if (params.type !== 'swing' || !params.hingeSide) {
         return []
     }
 
@@ -1148,111 +1227,149 @@ function calculateSwingArcEdges(
     // - SINGLE_SWING_RIGHT: hinge on right when viewing from approach side
 
     // Determine door orientation from ACTUAL geometry dimensions
-    const isWidthAlongX = size.x > size.z  // True if door width runs along X axis
-    const doorWidth = isWidthAlongX ? size.x : size.z
-    const doorThickness = isWidthAlongX ? size.z : size.x
+    // Use passed parameter if provided (from renderPlanFromMeshes), otherwise calculate
+    const doorIsWidthAlongX = isWidthAlongX !== undefined ? isWidthAlongX : (size.x > size.z)
+    const doorWidth = doorIsWidthAlongX ? size.x : size.z
+    const doorThickness = doorIsWidthAlongX ? size.z : size.x
 
     // Normal points along the thickness direction (perpendicular to door face)
     // This is the direction the door swings into
-    const normal = isWidthAlongX
+    const geometryNormal = doorIsWidthAlongX
         ? new THREE.Vector3(0, 0, 1)  // Door width along X, so normal along Z
         : new THREE.Vector3(1, 0, 0)  // Door width along Z, so normal along X
 
-    console.log(`[calculateSwingArcEdges] Geometry-based orientation:`)
-    console.log(`  - size: (${size.x.toFixed(2)}, ${size.y.toFixed(2)}, ${size.z.toFixed(2)})`)
-    console.log(`  - isWidthAlongX: ${isWidthAlongX}, doorWidth: ${doorWidth.toFixed(2)}, thickness: ${doorThickness.toFixed(2)}`)
-    console.log(`  - normal: (${normal.x}, ${normal.y}, ${normal.z})`)
-    console.log(`  - center: (${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)})`)
-    console.log(`  - hingeSide: ${params.hingeSide}`)
+    // Use context.normal to determine if door faces opposite direction
+    // If context.normal points opposite to geometryNormal, flip the swing
+    const actualNormal = context.normal.clone().normalize()
+    const normalAlignment = geometryNormal.dot(actualNormal)
+    const normalFlipped = normalAlignment < 0
 
-    // Calculate hinge position in 3D space
-    // IFC LEFT/RIGHT is relative to viewing from the approach (positive normal) direction
-    // When viewing from +normal direction, +width direction is to your right
-    const widthDir = new THREE.Vector3()
-    if (isWidthAlongX) {
-        // Width along X: left is -X, right is +X (when viewing from +Z)
-        widthDir.set(params.hingeSide === 'left' ? -doorWidth / 2 : doorWidth / 2, 0, 0)
-    } else {
-        // Width along Z: left is -Z, right is +Z (when viewing from +X)
-        widthDir.set(0, 0, params.hingeSide === 'left' ? -doorWidth / 2 : doorWidth / 2)
-    }
-
-    // Hinge is at the door center + offset to the edge
-    const hinge3D = center.clone().add(widthDir)
-
-    // Calculate arc points in 3D space (at cut height for plan view)
     const cutHeight = minY + 1.2
-    hinge3D.y = cutHeight
 
-    // Calculate latch position (opposite edge from hinge)
-    const latchDir = widthDir.clone().negate() // Direction from center to latch
-    const latch3D = center.clone().add(latchDir)
-    latch3D.y = cutHeight
+    const allEdges: ProjectedEdge[] = []
 
-    console.log(`  - hinge3D: (${hinge3D.x.toFixed(2)}, ${hinge3D.y.toFixed(2)}, ${hinge3D.z.toFixed(2)})`)
-    console.log(`  - latch3D: (${latch3D.x.toFixed(2)}, ${latch3D.y.toFixed(2)}, ${latch3D.z.toFixed(2)})`)
+    if (params.hingeSide === 'both') {
+        // Double door: generate arcs for both leaves
+        const leafWidth = doorWidth / 2
 
-    // Create arc points (90° swing)
-    // Arc traces the latch position from CLOSED (along wall) to OPEN (perpendicular)
-    const arcPoints: THREE.Vector3[] = []
-    const numSegments = 20 // Number of segments for smooth arc
+        // Left leaf: hinge at left edge, swings CCW (positive)
+        const leftHingeOffset = doorIsWidthAlongX
+            ? new THREE.Vector3(-doorWidth / 2, 0, 0)
+            : new THREE.Vector3(0, 0, -doorWidth / 2)
+        const leftHinge3D = center.clone().add(leftHingeOffset)
+        leftHinge3D.y = cutHeight
+        const leftLatch3D = center.clone() // Latch at center (meeting point)
+        leftLatch3D.y = cutHeight
 
-    // Start direction: from hinge toward latch when door is CLOSED
-    // This is along the wall, opposite from the hinge side
-    const startDir = latchDir.clone().normalize()
+        let leftSwingSign = 1 // CCW for left leaf
+        if (normalFlipped) {
+            leftSwingSign *= -1
+        }
+        // When camera is rotated (door width along Z), ensure arc swings UP on screen
+        if (isWidthAlongX !== undefined && !isWidthAlongX) {
+            leftSwingSign *= -1
+        }
 
-    // Swing direction based on hinge side:
-    // - LEFT hinge: door opens toward +normal direction (positive rotation around Y)
-    // - RIGHT hinge: door opens toward +normal direction (negative rotation around Y)
-    // (When viewed from above, the door always swings into the room/toward the normal)
-    const swingSign = params.hingeSide === 'left' ? 1 : -1
+        const leftEdges = generateSingleLeafArc(
+            leftHinge3D,
+            leftLatch3D,
+            leafWidth,
+            leftSwingSign,
+            cutHeight,
+            camera,
+            width,
+            height
+        )
+        allEdges.push(...leftEdges)
 
-    // Generate arc points - arc starts at CLOSED position and sweeps 90 degrees
-    for (let i = 0; i <= numSegments; i++) {
-        const t = i / numSegments
-        const angle = (Math.PI / 2) * t * swingSign
-        const dir = startDir.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle)
-        const point = hinge3D.clone().add(dir.multiplyScalar(doorWidth))
-        point.y = cutHeight
-        arcPoints.push(point)
+        // Right leaf: hinge at right edge, swings CW (negative)
+        const rightHingeOffset = doorIsWidthAlongX
+            ? new THREE.Vector3(doorWidth / 2, 0, 0)
+            : new THREE.Vector3(0, 0, doorWidth / 2)
+        const rightHinge3D = center.clone().add(rightHingeOffset)
+        rightHinge3D.y = cutHeight
+        const rightLatch3D = center.clone() // Latch at center (meeting point)
+        rightLatch3D.y = cutHeight
+
+        let rightSwingSign = -1 // CW for right leaf
+        if (normalFlipped) {
+            rightSwingSign *= -1
+        }
+        // When camera is rotated (door width along Z), ensure arc swings UP on screen
+        if (isWidthAlongX !== undefined && !isWidthAlongX) {
+            rightSwingSign *= -1
+        }
+
+        const rightEdges = generateSingleLeafArc(
+            rightHinge3D,
+            rightLatch3D,
+            leafWidth,
+            rightSwingSign,
+            cutHeight,
+            camera,
+            width,
+            height
+        )
+        allEdges.push(...rightEdges)
+
+        return allEdges
+    } else {
+        // Single door: generate arc for one leaf
+        // Calculate hinge position in 3D space
+        // IFC LEFT/RIGHT is relative to viewing from the approach (positive normal) direction
+        const widthDir = new THREE.Vector3()
+        if (doorIsWidthAlongX) {
+            // Width along X: left is -X, right is +X (when viewing from +Z)
+            widthDir.set(params.hingeSide === 'left' ? -doorWidth / 2 : doorWidth / 2, 0, 0)
+        } else {
+            // Width along Z: left is -Z, right is +Z (when viewing from +X)
+            widthDir.set(0, 0, params.hingeSide === 'left' ? -doorWidth / 2 : doorWidth / 2)
+        }
+
+        // Hinge is at the door center + offset to the edge
+        const hinge3D = center.clone().add(widthDir)
+        hinge3D.y = cutHeight
+
+        // Calculate latch position (opposite edge from hinge)
+        const latchDir = widthDir.clone().negate() // Direction from center to latch
+        const latch3D = center.clone().add(latchDir)
+        latch3D.y = cutHeight
+
+        // Swing direction based on hinge side (IFC convention):
+        // - SINGLE_SWING_LEFT: Hinge on LEFT when viewing from approach, door swings INTO room (toward +normal)
+        // - SINGLE_SWING_RIGHT: Hinge on RIGHT when viewing from approach, door swings INTO room (toward +normal)
+        // When viewed from above:
+        //   - LEFT hinge: door swings counter-clockwise (positive rotation) into room
+        //   - RIGHT hinge: door swings clockwise (negative rotation) into room
+        // Both swing toward the normal direction (into the room)
+        let swingSign = params.hingeSide === 'left' ? 1 : -1
+
+        // If the door faces the opposite direction (negative normal), flip the swing sign
+        // This ensures doors always swing INTO the room regardless of which direction they face
+        if (normalFlipped) {
+            swingSign *= -1
+        }
+
+        // When camera is rotated (door width along Z), ensure arc swings UP on screen
+        // Camera rotation changes how swing direction appears in screen space
+        if (isWidthAlongX !== undefined && !isWidthAlongX) {
+            // Camera is rotated 90°, so we need to flip swing to ensure it goes UP on screen
+            swingSign *= -1
+        }
+
+        const edges = generateSingleLeafArc(
+            hinge3D,
+            latch3D,
+            doorWidth,
+            swingSign,
+            cutHeight,
+            camera,
+            width,
+            height
+        )
+
+        return edges
     }
-
-    // Project arc points using the same method as extractEdges
-    const edges: ProjectedEdge[] = []
-    const color = '#666666' // Lighter color for arc
-
-    for (let i = 0; i < arcPoints.length - 1; i++) {
-        const proj1 = projectPoint(arcPoints[i], camera, width, height)
-        const proj2 = projectPoint(arcPoints[i + 1], camera, width, height)
-
-        edges.push({
-            x1: proj1.x,
-            y1: proj1.y,
-            x2: proj2.x,
-            y2: proj2.y,
-            color,
-            depth: (proj1.z + proj2.z) / 2, // Average depth for sorting
-            isDashed: true // Mark arc edges as dashed
-        })
-    }
-
-    // Also add door leaf line (from hinge to latch - door in closed position)
-    // We already calculated latch3D above
-    const hingeProj = projectPoint(hinge3D, camera, width, height)
-    const latchProj = projectPoint(latch3D, camera, width, height)
-
-    edges.push({
-        x1: hingeProj.x,
-        y1: hingeProj.y,
-        x2: latchProj.x,
-        y2: latchProj.y,
-        color: '#333333', // Darker for door leaf
-        depth: (hingeProj.z + latchProj.z) / 2,
-        isDashed: false // Door leaf line is solid
-    })
-
-    console.log(`[calculateSwingArcEdges] Generated ${edges.length} edges (${edges.filter(e => e.isDashed).length} dashed arc, ${edges.filter(e => !e.isDashed).length} solid leaf)`)
-    return edges
 }
 
 /**
@@ -1370,7 +1487,7 @@ function renderPlanFromMeshes(
     const doorThickness = Math.min(actualSize.x, actualSize.z)  // Smaller horizontal = thickness
     const isWidthAlongX = actualSize.x > actualSize.z
 
-    const margin = Math.max(opts.margin, 0.25)
+    const margin = Math.max(opts.margin, 0.5) // Increased from 0.25 to 0.5m for better border spacing
 
     // View must show door width + margin on the width axis
     // View must show door width (arc radius) + thickness + margin on the depth axis
@@ -1407,19 +1524,20 @@ function renderPlanFromMeshes(
     // Position camera above the view center
     const planCenter = new THREE.Vector3(viewCenterX, cutHeight, viewCenterZ)
     camera.position.set(planCenter.x, planCenter.y + 50, planCenter.z)
-    camera.up.set(0, 0, -1) // Z- is "up" in plan view (front direction)
+
+    // Set camera up vector based on door orientation to ensure door always appears horizontal
+    // - If door width is along X-axis: -Z is up (door width appears horizontal)
+    // - If door width is along Z-axis: -X is up (door width appears horizontal)
+    if (isWidthAlongX) {
+        camera.up.set(0, 0, -1) // -Z is up, door width along X appears horizontal
+    } else {
+        camera.up.set(-1, 0, 0) // -X is up, door width along Z appears horizontal
+    }
+
     camera.lookAt(planCenter)
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
 
-    // DEBUG: Log coordinate spaces
-    console.log(`[SVG Plan DEBUG] Door ${context.doorId}:`)
-    console.log(`  - Actual geometry center: (${actualCenter.x.toFixed(2)}, ${actualCenter.y.toFixed(2)}, ${actualCenter.z.toFixed(2)})`)
-    console.log(`  - Actual geometry size: (${actualSize.x.toFixed(2)}, ${actualSize.y.toFixed(2)}, ${actualSize.z.toFixed(2)})`)
-    console.log(`  - Door: width=${doorWidth.toFixed(2)}, thickness=${doorThickness.toFixed(2)}, isWidthAlongX=${isWidthAlongX}`)
-    console.log(`  - View center: (${viewCenterX.toFixed(2)}, ${viewCenterZ.toFixed(2)})`)
-    console.log(`  - Camera frustum: ${frustumWidth.toFixed(2)} x ${frustumHeight.toFixed(2)}`)
-    console.log(`  - Camera position: (${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)})`)
 
     // Collect edges and polygons from all meshes
     const allEdges: ProjectedEdge[] = []
@@ -1445,28 +1563,12 @@ function renderPlanFromMeshes(
         }
     }
 
-    // DEBUG: Show sample of mesh edges before adding arc
-    if (allEdges.length > 0) {
-        const meshEdge = allEdges[0]
-        console.log(`  - Sample mesh edge: (${meshEdge.x1.toFixed(2)}, ${meshEdge.y1.toFixed(2)}) -> (${meshEdge.x2.toFixed(2)}, ${meshEdge.y2.toFixed(2)})`)
-    }
-
     // Add door swing arc edges if OperationType is available
     // Use the ACTUAL geometry center for arc calculation to match mesh coordinates
     if (context.openingDirection) {
-        console.log(`[SVG Plan] Door ${context.doorId}: OperationType=${context.openingDirection}, calculating swing arc...`)
-        const arcEdges = calculateSwingArcEdges(context, camera, frustumWidth, frustumHeight, actualCenter, actualSize)
-        console.log(`[SVG Plan] Generated ${arcEdges.length} arc edges`)
-        if (arcEdges.length > 0) {
-            const arcEdge = arcEdges[0]
-            console.log(`  - Sample arc edge: (${arcEdge.x1.toFixed(2)}, ${arcEdge.y1.toFixed(2)}) -> (${arcEdge.x2.toFixed(2)}, ${arcEdge.y2.toFixed(2)})`)
-        }
+        const arcEdges = calculateSwingArcEdges(context, camera, frustumWidth, frustumHeight, actualCenter, actualSize, isWidthAlongX)
         allEdges.push(...arcEdges)
-    } else {
-        console.log(`[SVG Plan] Door ${context.doorId}: No OperationType available (openingDirection=${context.openingDirection})`)
     }
-
-    console.log(`[SVG Plan] Extracted ${allEdges.length} edges, ${allPolygons.length} polygons`)
 
     activeContext = context
     activeViewType = 'Plan'
