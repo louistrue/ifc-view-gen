@@ -369,6 +369,79 @@ export class NavigationManager {
   }
 
   /**
+   * Zoom to a specific element/bounding box with smooth animation
+   */
+  zoomToElement(boundingBox: THREE.Box3, padding: number = 1.5): void {
+    if (this.currentMode !== 'orbit') {
+      this.setMode('orbit')
+    }
+
+    if (!this.controls) return
+
+    const center = boundingBox.getCenter(new THREE.Vector3())
+    const size = boundingBox.getSize(new THREE.Vector3())
+    const maxDim = Math.max(size.x, size.y, size.z)
+
+    // Calculate camera distance for good framing
+    const fov = this.camera.fov * (Math.PI / 180)
+    const distance = (maxDim * padding) / (2 * Math.tan(fov / 2))
+
+    // Position camera at an isometric angle relative to the element
+    const offset = distance / Math.sqrt(3)
+
+    this.controls.setLookAt(
+      center.x + offset,
+      center.y + offset * 0.5, // Slightly lower angle for door viewing
+      center.z + offset,
+      center.x,
+      center.y,
+      center.z,
+      true // smooth animation
+    )
+  }
+
+  /**
+   * Zoom to element and look at it from its normal direction (for doors)
+   */
+  zoomToElementFromNormal(
+    boundingBox: THREE.Box3,
+    normal: THREE.Vector3,
+    padding: number = 2.0
+  ): void {
+    if (this.currentMode !== 'orbit') {
+      this.setMode('orbit')
+    }
+
+    if (!this.controls) return
+
+    const center = boundingBox.getCenter(new THREE.Vector3())
+    const size = boundingBox.getSize(new THREE.Vector3())
+    const maxDim = Math.max(size.x, size.y, size.z)
+
+    // Calculate camera distance for good framing
+    const fov = this.camera.fov * (Math.PI / 180)
+    const distance = (maxDim * padding) / (2 * Math.tan(fov / 2))
+
+    // Position camera along the normal direction
+    const cameraPos = center.clone().add(normal.clone().multiplyScalar(distance))
+
+    // Ensure camera is not below ground
+    if (cameraPos.y < 0.5) {
+      cameraPos.y = 0.5
+    }
+
+    this.controls.setLookAt(
+      cameraPos.x,
+      cameraPos.y,
+      cameraPos.z,
+      center.x,
+      center.y,
+      center.z,
+      true // smooth animation
+    )
+  }
+
+  /**
    * Dispose of controls
    */
   dispose(): void {

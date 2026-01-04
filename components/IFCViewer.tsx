@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { loadIFCModelWithFragments, clearFragmentsCache, getFragmentsCacheStats } from '@/lib/fragments-loader'
 import { analyzeDoors } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
-import BatchProcessor from './BatchProcessor'
+import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
@@ -57,6 +57,7 @@ export default function IFCViewer() {
 
   // Spatial structure
   const [spatialStructure, setSpatialStructure] = useState<SpatialNode | null>(null)
+  const spatialStructureRef = useRef<SpatialNode | null>(null) // For immediate access in async code
 
   // UI state
   const [showSpatialPanel, setShowSpatialPanel] = useState(false)
@@ -367,9 +368,12 @@ export default function IFCViewer() {
         )
         visibilityManagerRef.current = visibilityManager
 
-        // Connect visibility manager to Fragments and render system
+        // Connect visibility manager to Fragments, render system, and scene (for highlights)
         if (loadedModel.fragmentsManager) {
           visibilityManager.setFragmentsManager(loadedModel.fragmentsManager)
+        }
+        if (sceneRef.current) {
+          visibilityManager.setScene(sceneRef.current)
         }
         visibilityManager.setRenderCallback(() => triggerRenderRef.current())
 
@@ -379,6 +383,7 @@ export default function IFCViewer() {
           loadedModel.elements
         )
         setSpatialStructure(spatialRoot)
+        spatialStructureRef.current = spatialRoot // Store in ref for immediate access
 
         // Initialize section box with renderer for global clipping
         const modelBounds = new THREE.Box3().setFromObject(group)
@@ -488,7 +493,12 @@ export default function IFCViewer() {
       if (loadedModelRef.current) {
         setLoadingStage('Analyzing doors...')
         console.log('Starting door analysis...')
-        const contexts = await analyzeDoors(loadedModelRef.current, electricalModelRef.current || undefined)
+        // Pass spatial structure to extract storey names for doors
+        const contexts = await analyzeDoors(
+          loadedModelRef.current,
+          electricalModelRef.current || undefined,
+          spatialStructureRef.current  // Use ref for immediate access
+        )
         console.log(`Door analysis complete. Found ${contexts.length} door contexts.`)
         setDoorContexts(contexts)
 
@@ -907,11 +917,12 @@ export default function IFCViewer() {
 
         {showBatchProcessor && doorContexts.length > 0 && (
           <div className="batch-panel">
-            <BatchProcessor
+            <DoorPanel
               doorContexts={doorContexts}
+              visibilityManager={visibilityManagerRef.current}
+              navigationManager={navigationManagerRef.current}
               onComplete={() => {
-                // Optional: hide batch processor after completion
-                // setShowBatchProcessor(false)
+                // Optional callback when export completes
               }}
             />
           </div>

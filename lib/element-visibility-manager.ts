@@ -1,12 +1,20 @@
 /**
  * Element visibility manager using Fragments API
- * Provides hide/show/isolate/filter functionality with optimal performance
+ * Provides hide/show/isolate/filter/highlight functionality with optimal performance
  */
 
 import { FragmentsModel, FragmentsModels } from '@thatopen/fragments'
+import * as THREE from 'three'
 import type { ElementInfo } from './ifc-types'
 import type { SpatialNode } from './spatial-structure'
 import { getAllElementIds } from './spatial-structure'
+
+// Highlight colors for different states
+export const HIGHLIGHT_COLORS = {
+    hovered: new THREE.Color(0x00ff88),    // Bright green for hover
+    selected: new THREE.Color(0x3b82f6),   // Blue for selection
+    filtered: new THREE.Color(0x4ecdc4),   // Teal for filtered doors
+}
 
 export class ElementVisibilityManager {
     private fragmentsModel: FragmentsModel
@@ -19,6 +27,14 @@ export class ElementVisibilityManager {
     private typeFilters: Set<string> = new Set()
     private transparencyMap: Map<number, number> = new Map() // localId -> opacity (0-1)
     private onRenderNeeded: (() => void) | null = null
+
+    // Highlight state
+    private hoveredElementId: number | null = null
+    private highlightedElements: Set<number> = new Set()
+    private selectedElements: Set<number> = new Set()
+    private originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]> = new Map()
+    private highlightMeshes: Map<number, THREE.Mesh> = new Map() // For glow/outline effects
+    private scene: THREE.Scene | null = null
 
     constructor(fragmentsModel: FragmentsModel, elements: ElementInfo[]) {
         this.fragmentsModel = fragmentsModel
@@ -301,6 +317,193 @@ export class ElementVisibilityManager {
             isolated: this.isolatedElements ? Array.from(this.isolatedElements) : null,
             typeFilters: Array.from(this.typeFilters),
         }
+    }
+
+    // ============================================
+    // Highlight Methods for Door Panel Integration
+    // ============================================
+
+    /**
+     * Set the scene reference for adding highlight meshes
+     */
+    setScene(scene: THREE.Scene): void {
+        this.scene = scene
+    }
+
+    /**
+     * Set hovered element - creates a glow effect on the element
+     */
+    setHoveredElement(localId: number | null): void {
+        // Clear previous hover
+        if (this.hoveredElementId !== null) {
+            this.removeHighlightMesh(this.hoveredElementId)
+        }
+
+        this.hoveredElementId = localId
+
+        if (localId !== null) {
+            const element = this.elements.get(localId)
+            if (element && element.mesh) {
+                this.createHighlightMesh(localId, element.mesh, HIGHLIGHT_COLORS.hovered, 1.02)
+            }
+        }
+
+        if (this.onRenderNeeded) {
+            this.onRenderNeeded()
+        }
+    }
+
+    /**
+     * Set selected elements - highlights them with selection color
+     */
+    setSelectedElements(localIds: number[]): void {
+        // Clear previous selections that are no longer selected
+        for (const prevId of this.selectedElements) {
+            if (!localIds.includes(prevId)) {
+                this.removeHighlightMesh(prevId)
+            }
+        }
+
+        this.selectedElements = new Set(localIds)
+
+        // Create highlight meshes for new selections
+        for (const localId of localIds) {
+            if (!this.highlightMeshes.has(localId)) {
+                const element = this.elements.get(localId)
+                if (element && element.mesh) {
+                    this.createHighlightMesh(localId, element.mesh, HIGHLIGHT_COLORS.selected, 1.01)
+                }
+            }
+        }
+
+        if (this.onRenderNeeded) {
+            this.onRenderNeeded()
+        }
+    }
+
+    /**
+     * Highlight filtered elements with a subtle tint
+     */
+    highlightFilteredElements(localIds: number[]): void {
+        // Clear previous highlights
+        this.clearHighlights()
+
+        this.highlightedElements = new Set(localIds)
+
+        // Create subtle highlight for filtered elements
+        for (const localId of localIds) {
+            const element = this.elements.get(localId)
+            if (element && element.mesh) {
+                this.createHighlightMesh(localId, element.mesh, HIGHLIGHT_COLORS.filtered, 1.005)
+            }
+        }
+
+        if (this.onRenderNeeded) {
+            this.onRenderNeeded()
+        }
+    }
+
+    /**
+     * Clear all highlights (keeps selection and hover)
+     */
+    clearHighlights(): void {
+        for (const localId of this.highlightedElements) {
+            // Don't remove if it's hovered or selected
+            if (localId !== this.hoveredElementId && !this.selectedElements.has(localId)) {
+                this.removeHighlightMesh(localId)
+            }
+        }
+        this.highlightedElements.clear()
+
+        if (this.onRenderNeeded) {
+            this.onRenderNeeded()
+        }
+    }
+
+    /**
+     * Clear all highlight state (including selection and hover)
+     */
+    clearAllHighlights(): void {
+        for (const [localId] of this.highlightMeshes) {
+            this.removeHighlightMesh(localId)
+        }
+        this.hoveredElementId = null
+        this.selectedElements.clear()
+        this.highlightedElements.clear()
+
+        if (this.onRenderNeeded) {
+            this.onRenderNeeded()
+        }
+    }
+
+    /**
+     * Create a highlight mesh (scaled outline) for an element
+     */
+    private createHighlightMesh(
+        localId: number,
+        sourceMesh: THREE.Mesh,
+        color: THREE.Color,
+        scale: number = 1.02
+    ): void {
+        if (!this.scene) return
+
+        // Remove existing highlight mesh for this element
+        this.removeHighlightMesh(localId)
+
+        // Clone the mesh geometry
+        const geometry = sourceMesh.geometry.clone()
+
+        // Create emissive material for glow effect
+        const material = new THREE.MeshBasicMaterial({
+            color: color,
+            transparent: true,
+            opacity: 0.4,
+            side: THREE.BackSide, // Render back faces for outline effect
+            depthWrite: false,
+        })
+
+        const highlightMesh = new THREE.Mesh(geometry, material)
+
+        // Copy transform from source mesh
+        sourceMesh.updateMatrixWorld(true)
+        highlightMesh.matrix.copy(sourceMesh.matrixWorld)
+        highlightMesh.matrixAutoUpdate = false
+
+        // Scale slightly to create outline effect
+        highlightMesh.scale.multiplyScalar(scale)
+
+        // Add to scene
+        this.scene.add(highlightMesh)
+        this.highlightMeshes.set(localId, highlightMesh)
+    }
+
+    /**
+     * Remove highlight mesh for an element
+     */
+    private removeHighlightMesh(localId: number): void {
+        const mesh = this.highlightMeshes.get(localId)
+        if (mesh && this.scene) {
+            this.scene.remove(mesh)
+            mesh.geometry.dispose()
+            if (mesh.material instanceof THREE.Material) {
+                mesh.material.dispose()
+            }
+            this.highlightMeshes.delete(localId)
+        }
+    }
+
+    /**
+     * Get element info by localId
+     */
+    getElement(localId: number): ElementInfo | undefined {
+        return this.elements.get(localId)
+    }
+
+    /**
+     * Get all tracked elements
+     */
+    getAllElements(): ElementInfo[] {
+        return Array.from(this.elements.values())
     }
 }
 

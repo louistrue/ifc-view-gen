@@ -12,6 +12,65 @@ export interface DoorContext {
     doorId: string
     openingDirection: string | null
     doorTypeName: string | null
+    storeyName: string | null  // Building storey name from spatial structure
+}
+
+/**
+ * Filter options for door filtering
+ */
+export interface DoorFilterOptions {
+    /** Filter by door type names (comma-separated or array) */
+    doorTypes?: string | string[]
+    /** Filter by building storey names (comma-separated or array) */
+    storeys?: string | string[]
+    /** Filter by specific door GUIDs (comma-separated or array) */
+    guids?: string | string[]
+}
+
+/**
+ * Filter doors based on filter options
+ * Uses AND logic between filter types, OR logic within each type
+ */
+export function filterDoors(doors: DoorContext[], options: DoorFilterOptions): DoorContext[] {
+    if (!options || Object.keys(options).length === 0) {
+        return doors
+    }
+
+    // Parse filter values
+    const parseFilter = (value: string | string[] | undefined): string[] => {
+        if (!value) return []
+        if (Array.isArray(value)) return value.map(v => v.toLowerCase().trim())
+        return value.split(',').map(v => v.toLowerCase().trim()).filter(Boolean)
+    }
+
+    const doorTypes = parseFilter(options.doorTypes)
+    const storeys = parseFilter(options.storeys)
+    const guids = parseFilter(options.guids)
+
+    return doors.filter(door => {
+        // Door type filter (partial match, case-insensitive)
+        if (doorTypes.length > 0) {
+            const doorType = (door.doorTypeName || '').toLowerCase()
+            const matchesType = doorTypes.some(t => doorType.includes(t))
+            if (!matchesType) return false
+        }
+
+        // Storey filter (partial match, case-insensitive)
+        if (storeys.length > 0) {
+            const storey = (door.storeyName || '').toLowerCase()
+            const matchesStorey = storeys.some(s => storey.includes(s))
+            if (!matchesStorey) return false
+        }
+
+        // GUID filter (exact match)
+        if (guids.length > 0) {
+            const guid = door.doorId.toLowerCase()
+            const matchesGuid = guids.some(g => g === guid)
+            if (!matchesGuid) return false
+        }
+
+        return true
+    })
 }
 
 /**
@@ -308,9 +367,58 @@ async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doo
 }
 
 /**
- * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name)
+ * Storey map type for quick lookup
  */
-export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCModel): Promise<DoorContext[]> {
+type StoreyMap = Map<number, string>
+
+/**
+ * Build a map of element ID -> storey name from spatial structure
+ */
+function buildStoreyMap(spatialNode: any, map: StoreyMap = new Map(), currentStorey: string | null = null): StoreyMap {
+    if (!spatialNode) return map
+
+    // If this is a storey node, track it
+    let storeyName = currentStorey
+    if (spatialNode.type === 'IfcBuildingStorey') {
+        storeyName = spatialNode.name || `Storey ${spatialNode.id}`
+    }
+
+    // Map all elements in this node to the current storey
+    if (storeyName && spatialNode.elementIds) {
+        for (const elementId of spatialNode.elementIds) {
+            map.set(elementId, storeyName)
+        }
+    }
+    if (storeyName && spatialNode.allElementIds) {
+        for (const elementId of spatialNode.allElementIds) {
+            if (!map.has(elementId)) {
+                map.set(elementId, storeyName)
+            }
+        }
+    }
+
+    // Recurse into children
+    if (spatialNode.children) {
+        for (const child of spatialNode.children) {
+            buildStoreyMap(child, map, storeyName)
+        }
+    }
+
+    return map
+}
+
+/**
+ * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name, storey)
+ */
+export async function analyzeDoors(
+    model: LoadedIFCModel,
+    secondaryModel?: LoadedIFCModel,
+    spatialStructure?: any
+): Promise<DoorContext[]> {
+    // Build storey map from spatial structure for quick lookup
+    const storeyMap = buildStoreyMap(spatialStructure)
+    console.log(`Built storey map with ${storeyMap.size} element mappings`)
+
     // Separate elements by type
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
@@ -394,6 +502,9 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
         // Get opening direction and type name
         const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door)
 
+        // Get storey name from spatial structure
+        const storeyName = storeyMap.get(door.expressID) || null
+
         doorContexts.push({
             door,
             wall: null, // Legacy field
@@ -404,6 +515,7 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
             doorId,
             openingDirection,
             doorTypeName,
+            storeyName,
         })
     }
 
