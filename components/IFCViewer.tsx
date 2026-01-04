@@ -117,8 +117,18 @@ export default function IFCViewer() {
     let needsRender = true
     let lastTime = performance.now()
 
+    // Force render function that directly renders (not just setting flag)
+    const forceRender = () => {
+      if (fragmentsManagerRef.current) {
+        fragmentsManagerRef.current.update(true)
+      }
+      renderer.render(scene, camera)
+    }
+
     triggerRenderRef.current = () => {
       needsRender = true
+      // Also schedule a direct render on next frame to ensure it happens
+      requestAnimationFrame(forceRender)
     }
 
     const animate = () => {
