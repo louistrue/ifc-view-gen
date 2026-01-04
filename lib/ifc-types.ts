@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import type { FragmentsModel, FragmentsModels } from '@thatopen/fragments'
 
 /**
  * IFC Type Constants for web-ifc
@@ -24,4 +25,20 @@ export interface LoadedIFCModel {
     elements: ElementInfo[]
     modelID: number
     api: any // IfcAPI instance
+}
+
+/**
+ * Extended model info for multi-model management
+ */
+export interface LoadedModel {
+    id: string
+    fileName: string
+    group: THREE.Group
+    elements: ElementInfo[]
+    fragmentsModel?: FragmentsModel
+    fragmentsManager?: FragmentsModels
+    color: string // Display color for UI
+    visible: boolean
+    loadedAt: Date
+    elementCount: number
 }

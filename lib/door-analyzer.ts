@@ -232,7 +232,7 @@ function findNearbyDevices(
  * Get the opening direction and type name of a door from its type
  * Works with both web-ifc models and fragments models
  */
-async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doorElement?: ElementInfo): Promise<{ direction: string | null, typeName: string | null }> {
+async function getDoorTypeInfo(model: LoadedIFCModel | { group: any, elements: ElementInfo[], fragmentsModel?: any, fragmentsManager?: any }, doorExpressID: number, doorElement?: ElementInfo): Promise<{ direction: string | null, typeName: string | null }> {
     const result = { direction: null as string | null, typeName: null as string | null }
 
     // Check if this is a fragments model (has fragmentsModel property)
@@ -246,11 +246,12 @@ async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doo
         }
         // Note: Opening direction would require additional API calls to get OperationType
         // For performance, we skip this for fragments models (can be added later if needed)
-    } else {
-        // Web-ifc model path (original implementation)
+    } else if ('api' in model && 'modelID' in model) {
+        // Web-ifc model path (original implementation) - only for LoadedIFCModel
         try {
-            const api = model.api
-            const modelID = model.modelID
+            const webIfcModel = model as LoadedIFCModel
+            const api = webIfcModel.api
+            const modelID = webIfcModel.modelID
 
             // Check instance first
             const door = api.GetLine(modelID, doorExpressID);
@@ -302,6 +303,11 @@ async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doo
                 result.typeName = doorElement.typeName;
             }
         }
+    } else {
+        // Combined model without direct API access - use ElementInfo typeName
+        if (doorElement?.typeName) {
+            result.typeName = doorElement.typeName;
+        }
     }
 
     return result;
@@ -309,8 +315,9 @@ async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doo
 
 /**
  * Analyze all doors in the model and find their context (host wall, nearby devices, opening direction, type name)
+ * Supports multi-model loading - all elements are analyzed together
  */
-export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: LoadedIFCModel): Promise<DoorContext[]> {
+export async function analyzeDoors(model: LoadedIFCModel | { group: any, elements: ElementInfo[], fragmentsModel?: any, fragmentsManager?: any }, secondaryModel?: LoadedIFCModel): Promise<DoorContext[]> {
     // Separate elements by type
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
@@ -330,10 +337,10 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
         }
     }
 
-    // Process primary model
+    // Process primary model (which may be a combined model with elements from multiple sources)
     processElements(model.elements)
 
-    // Process secondary model if provided
+    // Process secondary model if provided (for backwards compatibility)
     if (secondaryModel) {
         console.log(`Processing secondary model elements: ${secondaryModel.elements.length}`)
         processElements(secondaryModel.elements)
@@ -345,10 +352,7 @@ export async function analyzeDoors(model: LoadedIFCModel, secondaryModel?: Loade
     const doorContexts: DoorContext[] = []
 
     for (const door of doors) {
-        // Only analyse if door comes from primary model (or should we support doors in secondary? Assumption: doors are in AR model)
-        // Check if door belongs to primary model elements
-        const isPrimaryDoor = model.elements.includes(door)
-        if (!isPrimaryDoor) continue
+        // Analyze all doors from all models
 
         // CRITICAL: Ensure door bounding box and center are derived from WORLD coordinates
         // The loader might give local boxes or stale ones.
