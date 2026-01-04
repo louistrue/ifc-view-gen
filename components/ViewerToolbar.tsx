@@ -302,7 +302,7 @@ Navigation:
   W/A/S/D — Move (Walk mode)
   
 Views:
-  1-7 — View presets (Top, Bottom, Front, Back, Left, Right, 3D)
+  1-7 — View presets (Top, Bottom, Front, Back, Left, 3D)
   Z — Zoom window
   
 Section:

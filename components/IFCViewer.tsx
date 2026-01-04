@@ -115,13 +115,7 @@ export default function IFCViewer() {
     directionalLight.position.set(10, 10, 5)
     scene.add(directionalLight)
 
-    // Grid helper
-    const gridHelper = new THREE.GridHelper(20, 20)
-    scene.add(gridHelper)
-
-    // Axes helper
-    const axesHelper = new THREE.AxesHelper(5)
-    scene.add(axesHelper)
+    // Grid and axes helpers removed for cleaner view
 
     // Optimized render loop: render on-demand instead of continuous 60fps
     let needsRender = true
@@ -1176,12 +1170,6 @@ export default function IFCViewer() {
             <SpatialHierarchyPanel
               spatialStructure={spatialStructure}
               visibilityManager={visibilityManagerRef.current}
-              onFocusNode={(node) => {
-                if (navigationManagerRef.current) {
-                  const center = new THREE.Vector3(0, 0, 0)
-                  navigationManagerRef.current.focusOn(center)
-                }
-              }}
               onClose={() => setShowSpatialPanel(false)}
             />
           )}

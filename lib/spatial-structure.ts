@@ -13,34 +13,29 @@ export interface SpatialNode {
     name: string
     type: 'IfcProject' | 'IfcSite' | 'IfcBuilding' | 'IfcBuildingStorey' | 'IfcSpace' | 'Element' | 'Category'
     children: SpatialNode[]
-    elementIds: number[] // localIds of geometry elements contained in this spatial container
+    elementIds: number[] // localIds of tracked geometry elements (for analysis)
+    allElementIds: number[] // ALL localIds from model (for visibility operations)
     visible: boolean
     isolated: boolean
     boundingBox?: { min: [number, number, number]; max: [number, number, number] }
 }
 
 /**
- * Extract spatial hierarchy from Fragments model using getSpatialStructure()
- * Falls back to category-based grouping if spatial structure is unavailable
+ * Extract spatial hierarchy from Fragments model
+ * 1. Try getSpatialStructure() API
+ * 2. Try getItemsOfCategory() for spatial types directly
+ * 3. Fall back to category-based grouping
  */
 export async function extractSpatialStructure(
     fragmentsModel: FragmentsModel,
     elements: ElementInfo[]
 ): Promise<SpatialNode | null> {
     try {
-        // Try Fragments' built-in spatial structure API first
-        let spatialTree: SpatialTreeItem | null = null
-        try {
-            spatialTree = await fragmentsModel.getSpatialStructure()
-        } catch (e) {
-            console.warn('getSpatialStructure not available:', e)
-        }
-
         // Get all local IDs and their categories for both methods
         const allLocalIds = await fragmentsModel.getItemsIdsWithGeometry()
         const itemCategories = await fragmentsModel.getItemsWithGeometryCategories()
 
-        // Create category map
+        // Create category map for geometry elements
         const categoryMap = new Map<number, string>()
         for (let i = 0; i < allLocalIds.length; i++) {
             const localId = allLocalIds[i]
@@ -48,21 +43,307 @@ export async function extractSpatialStructure(
             if (category) categoryMap.set(localId, category)
         }
 
-        // If spatial tree exists and has valid structure, use it
-        if (spatialTree && spatialTree.localId) {
-            const result = await tryBuildFromSpatialTree(fragmentsModel, spatialTree, elements, categoryMap)
-            if (result) return result
+        // Method 1: Try Fragments' built-in spatial structure API
+        let spatialTree: SpatialTreeItem | null = null
+        try {
+            spatialTree = await fragmentsModel.getSpatialStructure()
+        } catch (e) {
+            // getSpatialStructure not available
         }
 
-        // Fallback: Build structure from element categories
+        if (spatialTree && spatialTree.localId) {
+            const result = await tryBuildFromSpatialTree(fragmentsModel, spatialTree, elements, categoryMap)
+            if (result && result.children.length > 0) return result
+        }
+
+        // Method 2: Build from getItemsOfCategories() for spatial types
+        // This works because spatial items (Project, Site, Building, Storey) don't have geometry
+        // but ARE accessible via getItemsOfCategories()
+        const spatialResult = await tryBuildFromSpatialCategories(fragmentsModel, elements, categoryMap)
+        if (spatialResult && spatialResult.children.length > 0) {
+            return spatialResult
+        }
+
+        // Method 3: Fallback to category-based grouping
         console.log('Using category-based fallback for spatial structure')
         return buildFromCategories(elements, categoryMap)
 
     } catch (error) {
         console.error('Failed to extract spatial structure:', error)
-        // Last resort fallback
         return buildFromCategories(elements, new Map())
     }
+}
+
+/**
+ * Build spatial structure using getItemsOfCategories() for spatial types
+ * This approach works because spatial items don't need geometry
+ */
+async function tryBuildFromSpatialCategories(
+    fragmentsModel: FragmentsModel,
+    elements: ElementInfo[],
+    categoryMap: Map<number, string>
+): Promise<SpatialNode | null> {
+    try {
+        // Get spatial items by category using RegExp patterns
+        // The API is getItemsOfCategories(RegExp[]) which returns { [category: string]: number[] }
+        const spatialPatterns = [
+            /^IFCPROJECT$/i,
+            /^IFCSITE$/i,
+            /^IFCBUILDING$/i,
+            /^IFCBUILDINGSTOREY$/i,
+            /^IFCSPACE$/i
+        ]
+
+        const spatialItems = new Map<string, number[]>()
+
+        try {
+            const result = await fragmentsModel.getItemsOfCategories(spatialPatterns)
+
+            // Result is { [category: string]: number[] }
+            for (const [category, ids] of Object.entries(result)) {
+                if (ids && ids.length > 0) {
+                    // Normalize category name to uppercase
+                    const normalizedCategory = category.toUpperCase()
+                    spatialItems.set(normalizedCategory, ids)
+                }
+            }
+        } catch (e) {
+            // getItemsOfCategories not available
+        }
+
+        // Need at least project or building
+        if (!spatialItems.has('IFCPROJECT') && !spatialItems.has('IFCBUILDING')) {
+            return null
+        }
+
+        // Get names for spatial items
+        const allSpatialIds: number[] = []
+        for (const ids of spatialItems.values()) {
+            allSpatialIds.push(...ids)
+        }
+
+        let nameMap = new Map<number, string>()
+        let guidMap = new Map<number, string>()
+
+        if (allSpatialIds.length > 0) {
+            try {
+                const itemsData = await fragmentsModel.getItemsData(allSpatialIds, {
+                    attributesDefault: true,
+                    relationsDefault: { attributes: false, relations: false },
+                })
+                const guids = await fragmentsModel.getGuidsByLocalIds(allSpatialIds)
+
+                for (let i = 0; i < allSpatialIds.length; i++) {
+                    const localId = allSpatialIds[i]
+                    const name = extractName(itemsData[i])
+                    if (name) nameMap.set(localId, name)
+                    const guid = guids[i]
+                    if (guid) guidMap.set(localId, guid)
+                }
+            } catch (e) {
+                console.warn('Could not get spatial item data:', e)
+            }
+        }
+
+        // Build the spatial tree
+        // Create Project node
+        const projectIds = spatialItems.get('IFCPROJECT') || []
+        const projectId = projectIds[0] || -1
+        const projectName = nameMap.get(projectId) || 'Project'
+
+        const root: SpatialNode = {
+            id: projectId,
+            globalId: guidMap.get(projectId),
+            name: projectName,
+            type: 'IfcProject',
+            children: [],
+            elementIds: [],
+            allElementIds: [],
+            visible: true,
+            isolated: false,
+        }
+
+        // Create Site nodes under Project
+        const siteIds = spatialItems.get('IFCSITE') || []
+        for (const siteId of siteIds) {
+            const site: SpatialNode = {
+                id: siteId,
+                globalId: guidMap.get(siteId),
+                name: nameMap.get(siteId) || `Site`,
+                type: 'IfcSite',
+                children: [],
+                elementIds: [],
+                allElementIds: [],
+                visible: true,
+                isolated: false,
+            }
+            root.children.push(site)
+        }
+
+        // Create Building nodes
+        const buildingIds = spatialItems.get('IFCBUILDING') || []
+        for (const buildingId of buildingIds) {
+            const building: SpatialNode = {
+                id: buildingId,
+                globalId: guidMap.get(buildingId),
+                name: nameMap.get(buildingId) || `Building`,
+                type: 'IfcBuilding',
+                children: [],
+                elementIds: [],
+                allElementIds: [],
+                visible: true,
+                isolated: false,
+            }
+
+            // Add building to site if exists, otherwise to project
+            if (root.children.length > 0) {
+                root.children[0].children.push(building)
+            } else {
+                root.children.push(building)
+            }
+        }
+
+        // Create Storey nodes under Buildings
+        const storeyIds = spatialItems.get('IFCBUILDINGSTOREY') || []
+        const storeys: SpatialNode[] = []
+
+        for (const storeyId of storeyIds) {
+            const storey: SpatialNode = {
+                id: storeyId,
+                globalId: guidMap.get(storeyId),
+                name: nameMap.get(storeyId) || `Storey`,
+                type: 'IfcBuildingStorey',
+                children: [],
+                elementIds: [],
+                allElementIds: [],
+                visible: true,
+                isolated: false,
+            }
+            storeys.push(storey)
+        }
+
+        // Create a set of valid element IDs from the elements we're actually tracking
+        const validElementIds = new Set(elements.map(e => e.expressID))
+        
+        // Get all geometry IDs from model for visibility
+        const allGeometryIds = await fragmentsModel.getItemsIdsWithGeometry()
+        const allGeometrySet = new Set(Array.isArray(allGeometryIds) ? allGeometryIds : Array.from(allGeometryIds))
+
+        // Map elements to storeys using getItemsChildren
+        const elementToStorey = new Map<number, number>()
+        for (const storey of storeys) {
+            try {
+                const children = await fragmentsModel.getItemsChildren([storey.id])
+                for (const childId of children) {
+                    // Store ALL geometry children for visibility operations
+                    if (allGeometrySet.has(childId)) {
+                        storey.allElementIds.push(childId)
+                    }
+                    // Store tracked elements for analysis
+                    if (validElementIds.has(childId)) {
+                        elementToStorey.set(childId, storey.id)
+                        storey.elementIds.push(childId)
+                    }
+                }
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        // Add storeys to buildings
+        const buildings = getAllBuildingNodes(root)
+        if (buildings.length > 0) {
+            // Add all storeys to first building for now
+            // TODO: Map storeys to correct buildings using relations
+            buildings[0].children.push(...storeys)
+        } else if (root.children.length > 0 && root.children[0].type === 'IfcSite') {
+            // Add to site if no building
+            root.children[0].children.push(...storeys)
+        } else {
+            // Add directly to project
+            root.children.push(...storeys)
+        }
+
+        // Elements not assigned to any storey - add them to an "Unassigned" node
+        const assignedElements = new Set(elementToStorey.keys())
+        const unassignedElements = elements.filter(e => !assignedElements.has(e.expressID))
+
+        if (unassignedElements.length > 0) {
+            // Create a single "Unassigned" node with all unassigned elements
+            const unassignedIds = unassignedElements.map(e => e.expressID)
+            const unassignedNode: SpatialNode = {
+                id: -99999,
+                name: `Unassigned (${unassignedElements.length})`,
+                type: 'Category',
+                children: [],
+                elementIds: unassignedIds,
+                allElementIds: unassignedIds, // Same for unassigned since they're all tracked
+                visible: true,
+                isolated: false,
+            }
+
+            // Add to first building if exists, otherwise to root
+            const buildings = getAllBuildingNodes(root)
+            if (buildings.length > 0) {
+                buildings[0].children.push(unassignedNode)
+            } else {
+                root.children.push(unassignedNode)
+            }
+        }
+
+        console.log(`✓ Built spatial structure from categories`)
+        console.log(`  Storeys: ${storeys.length}`)
+        console.log(`  Elements mapped to storeys: ${elementToStorey.size}`)
+        console.log(`  Unassigned elements: ${unassignedElements.length}`)
+
+        // Log per-storey counts
+        for (const storey of storeys) {
+            console.log(`    ${storey.name}: ${storey.allElementIds.length} model elements (${storey.elementIds.length} tracked)`)
+        }
+
+        return root
+    } catch (error) {
+        console.warn('Failed to build from spatial categories:', error)
+        return null
+    }
+}
+
+/**
+ * Get all building nodes from spatial tree
+ */
+function getAllBuildingNodes(node: SpatialNode): SpatialNode[] {
+    const buildings: SpatialNode[] = []
+    if (node.type === 'IfcBuilding') {
+        buildings.push(node)
+    }
+    for (const child of node.children) {
+        buildings.push(...getAllBuildingNodes(child))
+    }
+    return buildings
+}
+
+/**
+ * Find deepest spatial container (for adding unassigned elements)
+ */
+function findDeepestSpatialContainer(node: SpatialNode): SpatialNode | null {
+    // Prefer storeys, then buildings, then sites, then project
+    const storeys: SpatialNode[] = []
+    const collect = (n: SpatialNode) => {
+        if (n.type === 'IfcBuildingStorey') storeys.push(n)
+        n.children.forEach(collect)
+    }
+    collect(node)
+
+    if (storeys.length > 0) return storeys[0]
+
+    const buildings = getAllBuildingNodes(node)
+    if (buildings.length > 0) return buildings[0]
+
+    if (node.children.length > 0 && node.children[0].type === 'IfcSite') {
+        return node.children[0]
+    }
+
+    return node
 }
 
 /**
@@ -119,6 +400,7 @@ async function tryBuildFromSpatialTree(
                 type: spatialType,
                 children: [],
                 elementIds: [],
+                allElementIds: [],
                 visible: true,
                 isolated: false,
             }
@@ -222,15 +504,19 @@ function buildFromCategories(
         })
 
     // Create category nodes
-    const categoryNodes: SpatialNode[] = sortedCategories.map(([category, categoryElements], index) => ({
-        id: -1000 - index, // Use negative IDs to avoid conflicts
-        name: `${formatCategoryName(category)} (${categoryElements.length})`,
-        type: 'Category' as const,
-        children: [],
-        elementIds: categoryElements.map(e => e.expressID),
-        visible: true,
-        isolated: false,
-    }))
+    const categoryNodes: SpatialNode[] = sortedCategories.map(([category, categoryElements], index) => {
+        const ids = categoryElements.map(e => e.expressID)
+        return {
+            id: -1000 - index, // Use negative IDs to avoid conflicts
+            name: `${formatCategoryName(category)} (${categoryElements.length})`,
+            type: 'Category' as const,
+            children: [],
+            elementIds: ids,
+            allElementIds: ids, // Same for categories
+            visible: true,
+            isolated: false,
+        }
+    })
 
     // Create root node
     const root: SpatialNode = {
@@ -239,6 +525,7 @@ function buildFromCategories(
         type: 'IfcProject',
         children: categoryNodes,
         elementIds: [],
+        allElementIds: [],
         visible: true,
         isolated: false,
     }
@@ -320,12 +607,24 @@ function countNodes(node: SpatialNode): number {
 }
 
 /**
- * Get all element IDs recursively from a spatial node
+ * Get all tracked element IDs recursively from a spatial node
  */
 export function getAllElementIds(node: SpatialNode): number[] {
     const ids: number[] = [...node.elementIds]
     for (const child of node.children) {
         ids.push(...getAllElementIds(child))
+    }
+    return ids
+}
+
+/**
+ * Get ALL element IDs (including non-tracked) recursively from a spatial node
+ * Use this for visibility operations to hide/show all geometry
+ */
+export function getAllModelElementIds(node: SpatialNode): number[] {
+    const ids: number[] = [...(node.allElementIds || node.elementIds)]
+    for (const child of node.children) {
+        ids.push(...getAllModelElementIds(child))
     }
     return ids
 }

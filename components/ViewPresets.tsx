@@ -12,7 +12,7 @@ interface ViewPreset {
 const PRESETS: ViewPreset[] = [
   { id: 'top', name: 'Top', shortcut: '1', preset: 'top' },
   { id: 'front', name: 'Front', shortcut: '2', preset: 'front' },
-  { id: 'right', name: 'Right', shortcut: '3', preset: 'right' },
+  { id: 'right', name: 'Left', shortcut: '3', preset: 'right' },
   { id: 'iso', name: '3D', shortcut: '4', preset: 'iso' },
 ]
 

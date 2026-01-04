@@ -1,299 +1,355 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { SpatialNode } from '@/lib/spatial-structure'
 import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
+import { getAllElementIds, getAllModelElementIds } from '@/lib/spatial-structure'
+
+interface StoreyInfo {
+    id: number
+    name: string
+    elementCount: number
+    elementIds: number[] // Tracked elements (for display count)
+    allElementIds: number[] // ALL model elements (for visibility)
+}
 
 interface SpatialHierarchyPanelProps {
-  spatialStructure: SpatialNode | null
-  visibilityManager: ElementVisibilityManager | null
-  onFocusNode?: (node: SpatialNode) => void
-  onClose?: () => void
+    spatialStructure: SpatialNode | null
+    visibilityManager: ElementVisibilityManager | null
+    onClose?: () => void
 }
 
 export default function SpatialHierarchyPanel({
-  spatialStructure,
-  visibilityManager,
-  onFocusNode,
-  onClose,
+    spatialStructure,
+    visibilityManager,
+    onClose,
 }: SpatialHierarchyPanelProps) {
-  const [isMinimized, setIsMinimized] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [expandedNodes, setExpandedNodes] = useState<Set<number>>(new Set())
+    const [isMinimized, setIsMinimized] = useState(false)
+    const [storeys, setStoreys] = useState<StoreyInfo[]>([])
+    const [hiddenStoreys, setHiddenStoreys] = useState<Set<number>>(new Set())
+    const [isolatedStorey, setIsolatedStorey] = useState<number | null>(null)
+    const [allElements, setAllElements] = useState<number[]>([])
 
-  useEffect(() => {
-    if (spatialStructure) {
-      setExpandedNodes(new Set([spatialStructure.id]))
+    // Extract storeys (and unassigned category) from spatial structure
+    useEffect(() => {
+        if (!spatialStructure) {
+            setStoreys([])
+            return
+        }
+
+        const foundStoreys: StoreyInfo[] = []
+
+        // Recursively find all storeys and special categories
+        const findStoreys = (node: SpatialNode) => {
+            // Include both storeys and the "Unassigned" category
+            if (node.type === 'IfcBuildingStorey' || (node.type === 'Category' && node.id === -99999)) {
+                const trackedIds = getAllElementIds(node)
+                const allIds = getAllModelElementIds(node)
+                if (allIds.length > 0) {
+                    foundStoreys.push({
+                        id: node.id,
+                        name: node.name,
+                        elementCount: trackedIds.length, // Show tracked count
+                        elementIds: trackedIds,
+                        allElementIds: allIds, // Use all IDs for visibility
+                    })
+                }
+            }
+
+            for (const child of node.children) {
+                findStoreys(child)
+            }
+        }
+
+        findStoreys(spatialStructure)
+
+        // Also collect all elements from root
+        const rootElements = getAllModelElementIds(spatialStructure)
+
+        console.log(`Found ${foundStoreys.length} storeys/categories with total ${rootElements.length} model elements`)
+        setStoreys(foundStoreys)
+        setAllElements(rootElements)
+    }, [spatialStructure])
+
+    const handleVisibilityToggle = async (storey: StoreyInfo, visible: boolean) => {
+        if (!visibilityManager) {
+            console.warn('No visibility manager')
+            return
+        }
+
+        console.log(`Toggle storey: ${storey.name} (${storey.allElementIds.length} model elements) -> ${visible}`)
+
+        let newHidden = new Set(hiddenStoreys)
+
+        // If we're in solo mode and user is adding another storey
+        if (isolatedStorey !== null && visible && isolatedStorey !== storey.id) {
+            console.log('Adding storey to solo view - switching to multi-select mode')
+            // Mark all OTHER storeys as hidden (except the solo'd one and the new one)
+            newHidden = new Set(storeys.filter(s => s.id !== isolatedStorey && s.id !== storey.id).map(s => s.id))
+            setIsolatedStorey(null)
+        } else if (visible) {
+            newHidden.delete(storey.id)
+        } else {
+            newHidden.add(storey.id)
+        }
+
+        // Apply visibility
+        if (visible) {
+            await visibilityManager.setElementsVisible(storey.allElementIds, true)
+        } else {
+            await visibilityManager.setElementsVisible(storey.allElementIds, false)
+        }
+
+        setHiddenStoreys(newHidden)
     }
-  }, [spatialStructure])
 
-  const toggleExpanded = (nodeId: number) => {
-    const newExpanded = new Set(expandedNodes)
-    if (newExpanded.has(nodeId)) {
-      newExpanded.delete(nodeId)
-    } else {
-      newExpanded.add(nodeId)
-    }
-    setExpandedNodes(newExpanded)
-  }
+    const handleIsolate = async (storey: StoreyInfo) => {
+        if (!visibilityManager) {
+            console.warn('No visibility manager')
+            return
+        }
 
-  const handleVisibilityToggle = async (node: SpatialNode, visible: boolean) => {
-    if (!visibilityManager) return
-    await visibilityManager.setSpatialNodeVisibility(node, visible)
-  }
+        console.log(`Solo storey: ${storey.name} (${storey.allElementIds.length} model elements)`)
 
-  const handleIsolate = async (node: SpatialNode) => {
-    if (!visibilityManager) return
-    await visibilityManager.isolateSpatialNode(node)
-  }
+        // If already in solo mode on this storey, exit solo
+        if (isolatedStorey === storey.id) {
+            console.log('Exiting solo mode - showing all')
+            setIsolatedStorey(null)
+            setHiddenStoreys(new Set()) // Clear hidden state - all visible
+            await visibilityManager.resetAllVisibility()
+            return
+        }
 
-  const handleFocus = (node: SpatialNode) => {
-    if (onFocusNode) {
-      onFocusNode(node)
-    }
-  }
-
-  const filterNodes = (node: SpatialNode, query: string): SpatialNode | null => {
-    if (!query) return node
-
-    const matchesQuery = node.name.toLowerCase().includes(query.toLowerCase())
-    const filteredChildren = node.children
-      .map(child => filterNodes(child, query))
-      .filter((child): child is SpatialNode => child !== null)
-
-    if (matchesQuery || filteredChildren.length > 0) {
-      return {
-        ...node,
-        children: filteredChildren,
-      }
+        // Enter solo mode - hide everything except this storey
+        setIsolatedStorey(storey.id)
+        // Mark all OTHER storeys as hidden in UI state
+        const othersHidden = new Set(storeys.filter(s => s.id !== storey.id).map(s => s.id))
+        setHiddenStoreys(othersHidden)
+        await visibilityManager.isolateElements(storey.allElementIds)
     }
 
-    return null
-  }
+    const handleShowAll = async () => {
+        if (!visibilityManager) return
 
-  const filteredStructure = spatialStructure
-    ? filterNodes(spatialStructure, searchQuery)
-    : null
+        console.log('Show all storeys')
+        setHiddenStoreys(new Set())
+        setIsolatedStorey(null)
+        await visibilityManager.resetAllVisibility()
+    }
 
-  const renderNode = (node: SpatialNode, depth: number = 0): JSX.Element | null => {
-    const isExpanded = expandedNodes.has(node.id)
-    const hasChildren = node.children.length > 0
-    const elementCount = node.elementIds.length
+    const handleHideAll = async () => {
+        if (!visibilityManager) return
+
+        console.log('Hide all elements')
+        const allStoreyIds = new Set(storeys.map(s => s.id))
+        setHiddenStoreys(allStoreyIds)
+
+        // Hide ALL elements in the entire model
+        await visibilityManager.hideAllElements()
+    }
+
+    const isStoreyVisible = (storey: StoreyInfo): boolean => {
+        return !hiddenStoreys.has(storey.id)
+    }
+
+    const hasChanges = hiddenStoreys.size > 0 || isolatedStorey !== null
+
+    if (!spatialStructure) {
+        return null
+    }
 
     return (
-      <div key={node.id} className="spatial-node">
         <div
-          className="spatial-node-header"
-          style={{ paddingLeft: `${depth * 12 + 6}px` }}
+            style={{
+                width: isMinimized ? '140px' : '260px',
+                backgroundColor: 'rgba(32, 32, 32, 0.95)',
+                border: '1px solid #444',
+                borderRadius: '6px',
+                boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+                display: 'flex',
+                flexDirection: 'column',
+                maxHeight: '300px',
+                overflow: 'hidden',
+                flexShrink: 0,
+            }}
         >
-          <button
-            className="spatial-node-toggle"
-            onClick={() => toggleExpanded(node.id)}
-            disabled={!hasChildren}
-            style={{ 
-              opacity: hasChildren ? 1 : 0.3,
-              background: 'none',
-              border: 'none',
-              color: '#888',
-              cursor: hasChildren ? 'pointer' : 'default',
-              fontSize: '10px',
-              padding: '0 4px',
-            }}
-          >
-            {hasChildren ? (isExpanded ? '▼' : '▶') : '·'}
-          </button>
-
-          <span 
-            className="spatial-node-name" 
-            title={node.name}
-            style={{
-              flex: 1,
-              fontSize: '12px',
-              color: '#e0e0e0',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {node.name}
-          </span>
-
-          {elementCount > 0 && (
-            <span style={{ fontSize: '10px', color: '#666', marginLeft: '4px' }}>
-              ({elementCount})
-            </span>
-          )}
-
-          <div className="spatial-node-actions" style={{ display: 'flex', gap: '2px', marginLeft: '4px' }}>
-            <button
-              onClick={() => handleFocus(node)}
-              title="Focus"
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#888',
-                cursor: 'pointer',
-                fontSize: '10px',
-                padding: '2px 4px',
-              }}
+            {/* Header */}
+            <div
+                style={{
+                    padding: '8px 10px',
+                    borderBottom: '1px solid #444',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                }}
             >
-              ◎
-            </button>
-            <button
-              onClick={() => handleIsolate(node)}
-              title="Isolate"
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#888',
-                cursor: 'pointer',
-                fontSize: '10px',
-                padding: '2px 4px',
-              }}
-            >
-              ◉
-            </button>
-            <input
-              type="checkbox"
-              checked={node.visible}
-              onChange={(e) => handleVisibilityToggle(node, e.target.checked)}
-              title="Visible"
-              style={{ margin: 0, cursor: 'pointer' }}
-            />
-          </div>
-        </div>
+                <span style={{ fontSize: '11px', color: '#888', fontWeight: 500 }}>
+                    Storeys ({storeys.length})
+                </span>
+                <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                    {hasChanges && (
+                        <button
+                            onClick={handleShowAll}
+                            title="Show All"
+                            style={{
+                                background: 'rgba(0, 150, 136, 0.2)',
+                                border: '1px solid rgba(0, 150, 136, 0.4)',
+                                borderRadius: '3px',
+                                cursor: 'pointer',
+                                fontSize: '10px',
+                                color: '#00bcd4',
+                                padding: '2px 6px',
+                            }}
+                        >
+                            ↺ Reset
+                        </button>
+                    )}
+                    <button
+                        onClick={() => setIsMinimized(!isMinimized)}
+                        style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer',
+                            fontSize: '12px',
+                            color: '#888',
+                            padding: '2px 6px',
+                        }}
+                    >
+                        {isMinimized ? '+' : '−'}
+                    </button>
+                    {onClose && (
+                        <button
+                            onClick={onClose}
+                            style={{
+                                background: 'none',
+                                border: 'none',
+                                cursor: 'pointer',
+                                fontSize: '14px',
+                                color: '#888',
+                                padding: '2px 6px',
+                            }}
+                        >
+                            ×
+                        </button>
+                    )}
+                </div>
+            </div>
 
-        {isExpanded && hasChildren && (
-          <div className="spatial-node-children">
-            {node.children.map((child) => renderNode(child, depth + 1))}
-          </div>
-        )}
-      </div>
-    )
-  }
+            {!isMinimized && (
+                <>
+                    {/* Quick actions */}
+                    <div style={{
+                        padding: '6px 8px',
+                        borderBottom: '1px solid #333',
+                        display: 'flex',
+                        gap: '6px',
+                    }}>
+                        <button
+                            onClick={handleShowAll}
+                            style={{
+                                flex: 1,
+                                padding: '4px 8px',
+                                fontSize: '10px',
+                                background: '#333',
+                                border: '1px solid #555',
+                                borderRadius: '3px',
+                                color: '#aaa',
+                                cursor: 'pointer',
+                            }}
+                        >
+                            Show All
+                        </button>
+                        <button
+                            onClick={handleHideAll}
+                            style={{
+                                flex: 1,
+                                padding: '4px 8px',
+                                fontSize: '10px',
+                                background: '#333',
+                                border: '1px solid #555',
+                                borderRadius: '3px',
+                                color: '#aaa',
+                                cursor: 'pointer',
+                            }}
+                        >
+                            Hide All
+                        </button>
+                    </div>
 
-  if (!spatialStructure) {
-    return null
-  }
+                    {/* Storey list */}
+                    <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+                        {storeys.length === 0 ? (
+                            <div style={{ padding: '12px', textAlign: 'center', color: '#666', fontSize: '11px' }}>
+                                No storeys found
+                            </div>
+                        ) : (
+                            storeys.map((storey) => {
+                                const isVisible = isStoreyVisible(storey)
+                                const isIsolated = isolatedStorey === storey.id
 
-  return (
-    <div
-      className="spatial-hierarchy-panel"
-      style={{
-        width: isMinimized ? '140px' : '280px',
-        maxHeight: isMinimized ? 'auto' : '400px',
-        backgroundColor: 'rgba(32, 32, 32, 0.95)',
-        border: '1px solid #444',
-        borderRadius: '6px',
-        boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
-        display: 'flex',
-        flexDirection: 'column',
-      }}
-    >
-      <div
-        style={{
-          padding: '8px 10px',
-          borderBottom: '1px solid #444',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-        }}
-      >
-        <span style={{ fontSize: '11px', color: '#888', fontWeight: 500 }}>
-          Spatial Hierarchy
-        </span>
-        <div style={{ display: 'flex', gap: '4px' }}>
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              setIsMinimized(!isMinimized)
-            }}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              fontSize: '12px',
-              color: '#888',
-              padding: '2px 6px',
-              lineHeight: '1',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = '#fff'
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = '#888'
-            }}
-          >
-            {isMinimized ? '+' : '−'}
-          </button>
-          {onClose && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onClose()
-              }}
-              style={{
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: '14px',
-                color: '#888',
-                padding: '2px 6px',
-                lineHeight: '1',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.color = '#fff'
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.color = '#888'
-              }}
-            >
-              ×
-            </button>
-          )}
-        </div>
-      </div>
+                                return (
+                                    <div
+                                        key={storey.id}
+                                        style={{
+                                            padding: '6px 10px',
+                                            borderBottom: '1px solid #333',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            backgroundColor: isIsolated ? 'rgba(0, 150, 136, 0.15)' : 'transparent',
+                                        }}
+                                    >
+                                        {/* Checkbox */}
+                                        <input
+                                            type="checkbox"
+                                            checked={isVisible}
+                                            onChange={(e) => handleVisibilityToggle(storey, e.target.checked)}
+                                            style={{ margin: 0, cursor: 'pointer' }}
+                                            title="Toggle visibility"
+                                        />
 
-      {!isMinimized && (
-        <>
-          <div style={{ padding: '6px' }}>
-            <input
-              type="text"
-              placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '4px 8px',
-                border: '1px solid #555',
-                borderRadius: '3px',
-                fontSize: '11px',
-                backgroundColor: '#2a2a2a',
-                color: '#e0e0e0',
-                outline: 'none',
-              }}
-            />
-          </div>
+                                        {/* Name and count */}
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                            <div
+                                                style={{
+                                                    fontSize: '11px',
+                                                    color: isVisible ? '#e0e0e0' : '#666',
+                                                    overflow: 'hidden',
+                                                    textOverflow: 'ellipsis',
+                                                    whiteSpace: 'nowrap',
+                                                }}
+                                                title={storey.name}
+                                            >
+                                                {storey.name}
+                                            </div>
+                                            <div style={{ fontSize: '9px', color: '#555' }}>
+                                                {storey.elementCount} elements
+                                            </div>
+                                        </div>
 
-          <div
-            className="spatial-tree"
-            style={{
-              overflowY: 'auto',
-              padding: '4px',
-              flex: 1,
-            }}
-          >
-            {filteredStructure ? (
-              renderNode(filteredStructure)
-            ) : (
-              <div style={{ padding: '12px', textAlign: 'center', color: '#666', fontSize: '11px' }}>
-                No results
-              </div>
+                                        {/* Isolate button */}
+                                        <button
+                                            onClick={() => handleIsolate(storey)}
+                                            title={isIsolated ? 'Show all (exit solo)' : 'Solo (show only this)'}
+                                            style={{
+                                                background: isIsolated ? 'rgba(0, 150, 136, 0.3)' : 'none',
+                                                border: isIsolated ? '1px solid #00bcd4' : 'none',
+                                                borderRadius: '3px',
+                                                color: isIsolated ? '#00bcd4' : '#888',
+                                                cursor: 'pointer',
+                                                fontSize: '12px',
+                                                padding: '2px 4px',
+                                            }}
+                                        >
+                                            ◉
+                                        </button>
+                                    </div>
+                                )
+                            })
+                        )}
+                    </div>
+                </>
             )}
-          </div>
-        </>
-      )}
-    </div>
-  )
+        </div>
+    )
 }
-
