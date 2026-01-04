@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Door frame -->
+  <rect x="20" y="10" width="60" height="80" fill="none" stroke="#2563eb" stroke-width="3"/>
+  
+  <!-- Door panel -->
+  <rect x="25" y="15" width="50" height="70" fill="#3b82f6" opacity="0.9"/>
+  
+  <!-- Door handle -->
+  <circle cx="65" cy="50" r="4" fill="#1e40af"/>
+  
+  <!-- Architectural perspective lines -->
+  <line x1="20" y1="10" x2="15" y2="5" stroke="#2563eb" stroke-width="2" opacity="0.5"/>
+  <line x1="80" y1="10" x2="85" y2="5" stroke="#2563eb" stroke-width="2" opacity="0.5"/>
+  <line x1="20" y1="90" x2="15" y2="95" stroke="#2563eb" stroke-width="2" opacity="0.5"/>
+  <line x1="80" y1="90" x2="85" y2="95" stroke="#2563eb" stroke-width="2" opacity="0.5"/>
+</svg>
+

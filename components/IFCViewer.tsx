@@ -53,6 +53,7 @@ export default function IFCViewer() {
   const batchProcessorVisibleRef = useRef(false)
   const fragmentsManagerRef = useRef<any>(null) // Fragments manager for update() in render loop
   const triggerRenderRef = useRef<() => void>(() => { }) // Function to trigger a render
+  const isLoadingRef = useRef(false) // Prevent double-loading from React StrictMode
 
   // Spatial structure
   const [spatialStructure, setSpatialStructure] = useState<SpatialNode | null>(null)
@@ -295,6 +296,13 @@ export default function IFCViewer() {
     const file = e.target.files?.[0]
     if (!file) return
 
+    // Prevent double-loading from React StrictMode
+    if (isLoadingRef.current) {
+      console.log('⚠️ Load already in progress, skipping duplicate call')
+      return
+    }
+    isLoadingRef.current = true
+
     setIsLoading(true)
     setLoadingProgress(0)
     setError(null)
@@ -394,6 +402,10 @@ export default function IFCViewer() {
             modelBounds,
             rendererRef.current
           )
+          // Set callback to trigger render when section changes (e.g., flip)
+          sectionPlane.setOnChangeCallback(() => {
+            triggerRenderRef.current()
+          })
           sectionPlaneRef.current = sectionPlane
         }
 
@@ -510,6 +522,7 @@ export default function IFCViewer() {
       setIsLoading(false)
       setLoadingProgress(0)
       setLoadingStage('')
+      isLoadingRef.current = false // Allow new loads
     }
   }
 
@@ -559,6 +572,32 @@ export default function IFCViewer() {
       {/* Top menu - only show when model is loaded */}
       {modelLoaded && (
         <div className="controls">
+          {/* Subtle logo with door opening animation */}
+          <div
+            className="logo-container"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              marginRight: '16px',
+              cursor: 'default',
+            }}
+          >
+            <svg
+              width="28"
+              height="28"
+              viewBox="0 0 100 100"
+              style={{ display: 'block' }}
+            >
+              {/* Door frame */}
+              <rect x="20" y="10" width="60" height="80" fill="none" stroke="#4a5568" strokeWidth="2.5" strokeLinecap="round" />
+
+              {/* Door panel - will rotate on hover (hinge at left edge x=25) */}
+              <g className="door-panel">
+                <rect x="25" y="15" width="50" height="70" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" strokeWidth="2" />
+                <circle cx="70" cy="50" r="3" fill="#3b82f6" opacity="0.4" />
+              </g>
+            </svg>
+          </div>
           <div className="file-inputs">
             <div className="input-group">
               <label htmlFor="ifc-file-input" className="file-input-label">
@@ -663,6 +702,7 @@ export default function IFCViewer() {
           sectionPlane={sectionPlaneRef.current}
           camera={cameraRef.current}
           scene={sceneRef.current}
+          containerRef={containerRef}
         />
 
         {/* Landing UI overlay when no model loaded */}
@@ -1045,6 +1085,20 @@ export default function IFCViewer() {
         @keyframes spin {
             from { transform: rotate(0deg); }
             to { transform: rotate(360deg); }
+        }
+        .logo-container {
+            transition: opacity 0.2s ease;
+            opacity: 0.7;
+        }
+        .logo-container:hover {
+            opacity: 1;
+        }
+        .logo-container:hover .door-panel {
+            transform: translateX(-45px);
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .door-panel {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
       `}</style>
 

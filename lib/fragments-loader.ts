@@ -150,21 +150,42 @@ function extractMeshesFromGroup(group: THREE.Group): THREE.Mesh[] {
   return meshes;
 }
 
+// IFC categories needed for door SVG generation
+const DOOR_SVG_CATEGORIES = new Set([
+  'IFCDOOR',
+  'IFCWALL',
+  'IFCWALLSTANDARDCASE',
+  'IFCCURTAINWALL',
+  'IFCWINDOW',
+  'IFCSLAB',             // Floor/ceiling context
+  'IFCFLOWTERMINAL',     // Electrical devices
+  'IFCLIGHTFIXTURE',
+  'IFCOUTLET',
+  'IFCSWITCHINGDEVICE',
+  'IFCELECTRICALDISTRIBUTIONPOINT',
+  'IFCELECTRICAPPLIANCE',
+])
+
 /**
  * Extract metadata from fragments model using the correct API
  * Uses ItemGeometry API to get world transforms and apply them to meshes
  * This ensures meshes have correct matrixWorld for SVG generation
+ * 
+ * @param fragmentsModel - The loaded fragments model
+ * @param filterCategories - If true, only extract door-related elements (faster)
  */
-async function extractMetadata(fragmentsModel: FragmentsModel): Promise<ElementInfo[]> {
+async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories: boolean = true): Promise<ElementInfo[]> {
   const elements: ElementInfo[] = [];
 
   try {
-    // Get all categories (IFC class names)
-    const categories = await fragmentsModel.getCategories();
+    // Get all categories (IFC class names) and items in parallel
+    const [categories, items, localIdsWithGeometry, itemCategories] = await Promise.all([
+      fragmentsModel.getCategories(),
+      fragmentsModel.getItemsWithGeometry(),
+      fragmentsModel.getItemsIdsWithGeometry(),
+      fragmentsModel.getItemsWithGeometryCategories(),
+    ]);
     console.log(`Found ${categories.length} IFC categories`);
-
-    // Get items with geometry - these are Item objects with getGeometry() method
-    const items = await fragmentsModel.getItemsWithGeometry();
     console.log(`Found ${items.length} items with geometry`);
 
     if (items.length === 0) {
@@ -172,29 +193,34 @@ async function extractMetadata(fragmentsModel: FragmentsModel): Promise<ElementI
       return elements;
     }
 
-    // Get localIds for parallel data fetching
-    const localIdsWithGeometry = await fragmentsModel.getItemsIdsWithGeometry();
+    // Filter to only door-related categories for faster loading
+    let filteredIndices: number[] = [];
+    if (filterCategories) {
+      for (let i = 0; i < itemCategories.length; i++) {
+        const cat = itemCategories[i]?.toUpperCase() || '';
+        if (DOOR_SVG_CATEGORIES.has(cat)) {
+          filteredIndices.push(i);
+        }
+      }
+      console.log(`Filtered to ${filteredIndices.length} door-related elements (from ${items.length})`);
+    } else {
+      filteredIndices = Array.from({ length: items.length }, (_, i) => i);
+    }
 
-    // Get items data for all items at once
-    const itemsData = await fragmentsModel.getItemsData(localIdsWithGeometry, {
-      attributesDefault: true,
-      relationsDefault: { attributes: false, relations: false },
-    });
+    // Get only filtered localIds
+    const filteredLocalIds = filteredIndices.map(i => localIdsWithGeometry[i]);
 
-    // Get GUIDs for all items at once
-    const guids = await fragmentsModel.getGuidsByLocalIds(localIdsWithGeometry);
-
-    // Get categories for all items with geometry
-    const itemCategories = await fragmentsModel.getItemsWithGeometryCategories();
-
-    // Get world-space bounding boxes for all items at once - this is the proper Fragments way!
-    // These boxes are already in world space with correct transforms applied
-    const worldBoxes = await fragmentsModel.getBoxes(localIdsWithGeometry);
+    // Fetch data only for filtered items in parallel
+    const [itemsData, guids, worldBoxes, fragmentElements] = await Promise.all([
+      fragmentsModel.getItemsData(filteredLocalIds, {
+        attributesDefault: true,
+        relationsDefault: { attributes: false, relations: false },
+      }),
+      fragmentsModel.getGuidsByLocalIds(filteredLocalIds),
+      fragmentsModel.getBoxes(filteredLocalIds),
+      (fragmentsModel as any)._getElements(filteredLocalIds),
+    ]);
     console.log(`Got ${worldBoxes.length} world-space bounding boxes`);
-
-    // Get Element objects using the internal API - these have getMeshes()
-    // Cast to any to access the internal _getElements method
-    const fragmentElements = await (fragmentsModel as any)._getElements(localIdsWithGeometry);
     console.log(`Got ${fragmentElements.length} Element objects`);
 
     // Create a map from localId to Element for quick lookup
@@ -203,11 +229,20 @@ async function extractMetadata(fragmentsModel: FragmentsModel): Promise<ElementI
       elementMap.set(element.localId, element);
     });
 
+    // Create localId to filtered index map for quick lookup
+    const localIdToFilteredIndex = new Map<number, number>();
+    filteredLocalIds.forEach((id, index) => {
+      localIdToFilteredIndex.set(id, index);
+    });
+
+    // Get filtered items
+    const filteredItems = filteredIndices.map(i => items[i]);
+
     // Process items in parallel batches for speed
-    const batchSize = 50;
-    for (let batchStart = 0; batchStart < items.length; batchStart += batchSize) {
-      const batchEnd = Math.min(batchStart + batchSize, items.length);
-      const batch = items.slice(batchStart, batchEnd);
+    const batchSize = 100; // Increased batch size since we have fewer items now
+    for (let batchStart = 0; batchStart < filteredItems.length; batchStart += batchSize) {
+      const batchEnd = Math.min(batchStart + batchSize, filteredItems.length);
+      const batch = filteredItems.slice(batchStart, batchEnd);
 
       // Process batch in parallel
       const batchPromises = batch.map(async (item) => {
@@ -215,13 +250,14 @@ async function extractMetadata(fragmentsModel: FragmentsModel): Promise<ElementI
           const localId = await item.getLocalId();
           if (!localId) return null;
 
-          const dataIndex = localIdsWithGeometry.indexOf(localId);
-          if (dataIndex === -1) return null;
+          const dataIndex = localIdToFilteredIndex.get(localId);
+          if (dataIndex === undefined) return null;
 
           const worldBox = worldBoxes[dataIndex];
           const itemData = itemsData[dataIndex];
           const globalId = guids[dataIndex] || undefined;
-          const category = itemCategories[dataIndex] || 'Unknown';
+          const originalIndex = filteredIndices[dataIndex];
+          const category = itemCategories[originalIndex] || 'Unknown';
 
           // Extract type name from category or itemData
           let typeName = category;

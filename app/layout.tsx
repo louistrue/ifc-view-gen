@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'IFC Viewer',
-  description: 'Load and visualize IFC files in Three.js',
+  title: 'Door View Creator',
+  description: 'Create and analyze door views from IFC files',
 }
 
 export default function RootLayout({
