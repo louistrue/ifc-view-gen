@@ -12,7 +12,8 @@ import * as THREE from 'three'
 export interface ElementInfo {
     expressID: number
     ifcType: number
-    typeName: string
+    typeName: string // IFC class name (e.g., "IFCDOOR", "IFCWALL")
+    productTypeName?: string // Product type name from IfcRelDefinesByType (e.g., "Door Type A")
     mesh: THREE.Mesh
     meshes?: THREE.Mesh[] // All meshes for this element
     boundingBox?: THREE.Box3

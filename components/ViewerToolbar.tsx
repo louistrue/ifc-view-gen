@@ -285,7 +285,7 @@ export default function ViewerToolbar({
                 title="Filter by IFC class"
                 style={showTypeFilter ? activeButtonStyle : buttonStyle}
             >
-                Classes
+                Types
             </button>
 
             <div style={{ height: '1px', backgroundColor: '#444', margin: '4px 0' }} />

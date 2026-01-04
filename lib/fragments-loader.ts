@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { IfcImporter, FragmentsModels, FragmentsModel, LodMode } from '@thatopen/fragments';
 import type { ElementInfo, LoadedIFCModel } from './ifc-types';
+import { extractDoorTypes } from './ifc-loader';
 
 // IndexedDB configuration for fragment binary caching
 const DB_NAME = 'Fragments_Binary_Cache';
@@ -186,8 +187,9 @@ const DOOR_SVG_CATEGORIES = new Set([
  * 
  * @param fragmentsModel - The loaded fragments model
  * @param filterCategories - If true, only extract door-related elements (faster)
+ * @param originalFile - The original IFC file for type extraction via web-ifc
  */
-async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories: boolean = true): Promise<ElementInfo[]> {
+async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories: boolean = true, originalFile?: File): Promise<ElementInfo[]> {
   const elements: ElementInfo[] = [];
 
   try {
@@ -223,31 +225,43 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
     // Get only filtered localIds
     const filteredLocalIds = filteredIndices.map(i => localIdsWithGeometry[i]);
 
-    // Only fetch detailed attributes for doors (saves time for walls/windows)
-    const doorLocalIds = filteredLocalIds.filter((_, idx) => {
-      const cat = itemCategories[filteredIndices[idx]]?.toUpperCase() || '';
-      return cat === 'IFCDOOR';
-    });
-
-    // Fetch data for filtered items in parallel
-    // Note: Only fetching detailed itemsData for doors since walls/windows don't need attributes
-    const [doorItemsData, guids, worldBoxes, fragmentElements] = await Promise.all([
-      doorLocalIds.length > 0
-        ? fragmentsModel.getItemsData(doorLocalIds, {
-          attributesDefault: true,
-          relationsDefault: { attributes: false, relations: false },
-        })
-        : Promise.resolve([]),
+    // Fetch basic data for filtered items in parallel
+    const [guids, worldBoxes, fragmentElements] = await Promise.all([
       fragmentsModel.getGuidsByLocalIds(filteredLocalIds),
       fragmentsModel.getBoxes(filteredLocalIds),
       (fragmentsModel as any)._getElements(filteredLocalIds),
     ]);
 
-    // Create map for door data lookup
-    const doorDataMap = new Map<number, any>();
-    doorLocalIds.forEach((id, idx) => {
-      doorDataMap.set(id, doorItemsData[idx]);
-    });
+    // Extract IfcDoorType names using IsTypedBy relation on door elements
+    const productTypeMap = new Map<number, string>();
+
+    try {
+      // Find door indices using itemCategories
+      const doorIndices: number[] = [];
+      for (let i = 0; i < filteredLocalIds.length; i++) {
+        const originalIndex = filteredIndices[i];
+        const category = (itemCategories[originalIndex] || '').toUpperCase();
+        if (category === 'IFCDOOR') {
+          doorIndices.push(i);
+        }
+      }
+      console.log(`Found ${doorIndices.length} IFCDOOR elements`);
+
+      // Use web-ifc to extract door types (Fragments doesn't expose IFCRELDEFINESBYTYPE properly)
+      if (originalFile) {
+        const webIfcTypeMap = await extractDoorTypes(originalFile);
+
+        // Merge into productTypeMap (web-ifc uses expressID, same as localId)
+        for (const [expressId, typeName] of webIfcTypeMap) {
+          productTypeMap.set(expressId, typeName);
+        }
+      } else {
+        console.log('No original file provided, skipping type extraction');
+      }
+    } catch (err) {
+      console.warn('Failed to extract door type names:', err);
+      console.error(err);
+    }
     console.log(`Got ${worldBoxes.length} world-space bounding boxes`);
     console.log(`Got ${fragmentElements.length} Element objects`);
 
@@ -277,24 +291,11 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             const globalId = guids[dataIndex] || undefined;
             const category = itemCategories[originalIndex] || 'Unknown';
 
-            // Only get detailed data for doors
-            const itemData = doorDataMap.get(localId);
+            // IFC class name (e.g., "IFCDOOR")
+            const typeName = category;
 
-            // Extract type name from category or itemData (for doors)
-            let typeName = category;
-            if ((!typeName || typeName === 'Unknown') && itemData) {
-              if (typeof itemData === 'object') {
-                for (const [key, value] of Object.entries(itemData)) {
-                  if (key.toLowerCase().includes('type') && typeof value === 'object' && value !== null) {
-                    const attrValue = (value as any).value;
-                    if (typeof attrValue === 'string' && attrValue.length > 0) {
-                      typeName = attrValue;
-                      break;
-                    }
-                  }
-                }
-              }
-            }
+            // Product type name from IfcRelDefinesByType (e.g., "Door Type A")
+            const productTypeName = productTypeMap.get(localId);
 
             // Get IFC type code
             const ifcType = getIfcTypeCode(typeName);
@@ -330,18 +331,18 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
               console.warn(`No meshes extracted from group for localId ${localId}`);
               return null;
             }
-            
+
             // Verify mesh has valid geometry and debug geometry structure
             let hasValidGeometry = false;
             for (const mesh of meshes) {
               const geo = mesh.geometry;
               const posAttr = geo?.attributes?.position;
-              
+
               // Check for interleaved buffer attributes (Fragments optimization)
               if (posAttr && 'isInterleavedBufferAttribute' in posAttr) {
                 // Interleaved buffer - need to de-interleave for standard operations
                 console.log(`[Fragments] Mesh ${localId}: Found InterleavedBufferAttribute, count=${posAttr.count}`);
-                
+
                 // Create standard BufferAttribute from interleaved data
                 const count = posAttr.count;
                 const newPositions = new Float32Array(count * 3);
@@ -356,7 +357,7 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
                 hasValidGeometry = true;
               }
             }
-            
+
             if (!hasValidGeometry) {
               console.warn(`[Fragments] No valid geometry for localId ${localId}`);
             }
@@ -397,6 +398,7 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
               expressID: localId,
               ifcType,
               typeName,
+              productTypeName,
               mesh: primaryMesh,
               meshes: meshes.length > 0 ? meshes : undefined,
               boundingBox,
@@ -540,7 +542,8 @@ export async function loadIFCModelWithFragments(
   // Extract metadata from the loaded fragments model
   // This creates properly transformed meshes for SVG generation ONLY
   // NOTE: We do NOT add these meshes to the 3D scene - we use fragmentsModel.object instead!
-  const elements = await extractMetadata(fragmentsModel);
+  // Pass the original file for web-ifc type extraction
+  const elements = await extractMetadata(fragmentsModel, true, file);
 
   onProgress?.({ percent: 95, stage: 'Finalizing...' });
 

@@ -34,6 +34,10 @@ export default function DoorPanel({
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set())
   const [isolateFiltered, setIsolateFiltered] = useState(false)
 
+  // Collapsible sections: TYPE expanded by default, STOREY collapsed
+  const [storeyExpanded, setStoreyExpanded] = useState(false)
+  const [typeExpanded, setTypeExpanded] = useState(true)
+
   // Selection state
   const [selectedDoorIds, setSelectedDoorIds] = useState<Set<string>>(new Set())
   const [hoveredDoorId, setHoveredDoorId] = useState<string | null>(null)
@@ -475,38 +479,60 @@ export default function DoorPanel({
           {/* Storey Filter */}
           {availableStoreys.length > 0 && (
             <div className="filter-group">
-              <div className="filter-label">Storey</div>
-              <div className="filter-chips">
-                {availableStoreys.map(([storey, count]) => (
-                  <button
-                    key={storey}
-                    className={`filter-chip ${selectedStoreys.has(storey) ? 'active' : ''}`}
-                    onClick={() => toggleStorey(storey)}
-                  >
-                    {storey}
-                    <span className="chip-count">{count}</span>
-                  </button>
-                ))}
+              <div
+                className="filter-label collapsible"
+                onClick={() => setStoreyExpanded(!storeyExpanded)}
+                style={{ cursor: 'pointer', userSelect: 'none' }}
+              >
+                <span style={{ marginRight: '6px' }}>
+                  {storeyExpanded ? '▼' : '▶'}
+                </span>
+                Storey
               </div>
+              {storeyExpanded && (
+                <div className="filter-chips">
+                  {availableStoreys.map(([storey, count]) => (
+                    <button
+                      key={storey}
+                      className={`filter-chip ${selectedStoreys.has(storey) ? 'active' : ''}`}
+                      onClick={() => toggleStorey(storey)}
+                    >
+                      {storey}
+                      <span className="chip-count">{count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
           {/* Type Filter */}
           {availableTypes.length > 0 && (
             <div className="filter-group">
-              <div className="filter-label">Type</div>
-              <div className="filter-chips">
-                {availableTypes.map(([type, count]) => (
-                  <button
-                    key={type}
-                    className={`filter-chip ${selectedTypes.has(type) ? 'active' : ''}`}
-                    onClick={() => toggleType(type)}
-                  >
-                    {type}
-                    <span className="chip-count">{count}</span>
-                  </button>
-                ))}
+              <div
+                className="filter-label collapsible"
+                onClick={() => setTypeExpanded(!typeExpanded)}
+                style={{ cursor: 'pointer', userSelect: 'none' }}
+              >
+                <span style={{ marginRight: '6px' }}>
+                  {typeExpanded ? '▼' : '▶'}
+                </span>
+                Type
               </div>
+              {typeExpanded && (
+                <div className="filter-chips">
+                  {availableTypes.map(([type, count]) => (
+                    <button
+                      key={type}
+                      className={`filter-chip ${selectedTypes.has(type) ? 'active' : ''}`}
+                      onClick={() => toggleType(type)}
+                    >
+                      {type}
+                      <span className="chip-count">{count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -891,6 +917,16 @@ export default function DoorPanel({
           text-transform: uppercase;
           color: #888;
           letter-spacing: 0.5px;
+        }
+
+        .filter-label.collapsible {
+          display: flex;
+          align-items: center;
+          transition: color 0.2s ease;
+        }
+
+        .filter-label.collapsible:hover {
+          color: #aaa;
         }
 
         .filter-chips {

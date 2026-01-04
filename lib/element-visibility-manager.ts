@@ -192,7 +192,8 @@ export class ElementVisibilityManager {
     }
 
     /**
-     * Filter by IFC type names - hides ALL model elements except matching types
+     * Filter by product type names - hides ALL model elements except matching types
+     * Only filters by productTypeName (from IfcDoorType, etc.) - NOT IFC classes
      */
     async filterByType(typeNames: string[]): Promise<void> {
         this.typeFilters = new Set(typeNames.map(t => t.toLowerCase()))
@@ -202,20 +203,22 @@ export class ElementVisibilityManager {
             await this.cacheAllModelIds()
         }
 
-        // Find elements that match the filter
+        // Find elements that match the filter by productTypeName only
         const visibleIds: number[] = []
         for (const [id, element] of this.elements.entries()) {
-            const typeName = element.typeName.toLowerCase()
-            if (this.typeFilters.has(typeName) && !this.hiddenElements.has(id)) {
+            const productType = (element.productTypeName || '').toLowerCase()
+
+            // Only match against product type name (from IfcDoorType, etc.)
+            if (productType && this.typeFilters.has(productType) && !this.hiddenElements.has(id)) {
                 visibleIds.push(id)
             }
         }
 
-        console.log(`Class filter: showing ${visibleIds.length} elements, hiding ${this.allModelIds.length - visibleIds.length} (total model: ${this.allModelIds.length})`)
+        console.log(`Type filter: showing ${visibleIds.length} elements, hiding ${this.allModelIds.length - visibleIds.length} (total model: ${this.allModelIds.length})`)
 
         // First hide ALL elements in the entire model
         await this.fragmentsModel.setVisible(this.allModelIds, false)
-        
+
         // Then show only the matching elements
         if (visibleIds.length > 0) {
             await this.fragmentsModel.setVisible(visibleIds, true)
@@ -233,12 +236,12 @@ export class ElementVisibilityManager {
 
         // Show all elements using resetVisible()
         await this.fragmentsModel.resetVisible()
-        
+
         // Re-apply any hidden elements
         if (this.hiddenElements.size > 0) {
             await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
         }
-        
+
         await this.applyChanges()
     }
 
@@ -355,7 +358,7 @@ export class ElementVisibilityManager {
      */
     setSelectedElements(localIds: number[]): void {
         console.log(`[Highlight] setSelectedElements called with ${localIds.length} IDs:`, localIds)
-        
+
         // Clear previous selections that are no longer selected
         for (const prevId of this.selectedElements) {
             if (!localIds.includes(prevId)) {
@@ -506,7 +509,7 @@ export class ElementVisibilityManager {
         const obj = this.highlightMeshes.get(localId)
         if (obj && this.scene) {
             this.scene.remove(obj)
-            
+
             // Dispose of all children if it's a group
             obj.traverse((child) => {
                 if (child instanceof THREE.Mesh) {
@@ -523,7 +526,7 @@ export class ElementVisibilityManager {
                     }
                 }
             })
-            
+
             this.highlightMeshes.delete(localId)
         }
     }

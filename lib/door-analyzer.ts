@@ -13,7 +13,7 @@ export interface DoorContext {
     openingDirection: string | null
     doorTypeName: string | null
     storeyName: string | null  // Building storey name from spatial structure
-    
+
     // Detailed geometry from web-ifc (for high-quality SVG rendering)
     detailedGeometry?: {
         doorMeshes: THREE.Mesh[]
@@ -306,8 +306,11 @@ async function getDoorTypeInfo(model: LoadedIFCModel, doorExpressID: number, doo
 
     if (fragmentsModel) {
         // Fragments model path - use already-extracted data (fast, no API calls)
-        // The typeName was already extracted during model loading
-        if (doorElement?.typeName) {
+        // Use productTypeName (from IfcDoorType via IfcRelDefinesByType) - the real type name
+        // Fall back to typeName (IFC class name) if productTypeName not available
+        if (doorElement?.productTypeName) {
+            result.typeName = doorElement.productTypeName;
+        } else if (doorElement?.typeName) {
             result.typeName = doorElement.typeName;
         }
         // Note: Opening direction would require additional API calls to get OperationType
@@ -470,7 +473,7 @@ export async function analyzeDoors(
         // and has been adjusted for model centering in IFCViewer.tsx.
         // Recomputing from mesh.setFromObject would give wrong results because
         // element meshes are separate from the main Fragments group.
-        
+
         if (!door.boundingBox) {
             console.warn(`Door ${door.expressID} has no bounding box, skipping`)
             continue
@@ -544,21 +547,21 @@ export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
             (sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0
         )
         console.log(`[getContextMeshes] Door ${context.doorId}: using DETAILED geometry (${doorMeshes.length} door meshes, ${totalVerts} verts)`)
-        
+
         // Return door meshes + device meshes (not wall - too large for SVG)
         return [...doorMeshes, ...deviceMeshes]
     }
-    
+
     // Fallback to Fragments geometry (simplified)
     const meshes: THREE.Mesh[] = []
     const doorMeshes = collectMeshesFromElement(context.door)
     console.log(`[getContextMeshes] Door ${context.doorId}: using FRAGMENTS geometry (${doorMeshes.length} meshes, simplified)`)
-    
+
     for (const mesh of doorMeshes) {
         const posCount = mesh.geometry?.attributes?.position?.count || 0
         console.log(`  - Mesh: positions=${posCount}`)
     }
-    
+
     meshes.push(...doorMeshes)
 
     for (const device of context.nearbyDevices) {
@@ -624,12 +627,12 @@ export async function loadDetailedGeometry(
 ): Promise<void> {
     // Dynamically import to avoid circular dependencies
     const { extractDetailedGeometry } = await import('./ifc-loader')
-    
+
     // Collect all unique expressIDs we need geometry for
     const doorIDs = new Set<number>()
     const wallIDs = new Set<number>()
     const deviceIDs = new Set<number>()
-    
+
     for (const context of doorContexts) {
         doorIDs.add(context.door.expressID)
         if (context.hostWall) {
@@ -639,13 +642,13 @@ export async function loadDetailedGeometry(
             deviceIDs.add(device.expressID)
         }
     }
-    
+
     console.log(`[loadDetailedGeometry] Extracting geometry for ${doorIDs.size} doors, ${wallIDs.size} walls, ${deviceIDs.size} devices`)
-    
+
     // Extract all geometry in one pass
     const allIDs = [...doorIDs, ...wallIDs, ...deviceIDs]
     const geometryMap = await extractDetailedGeometry(file, allIDs)
-    
+
     // Apply centering offset to all extracted meshes
     for (const meshes of geometryMap.values()) {
         for (const mesh of meshes) {
@@ -654,11 +657,11 @@ export async function loadDetailedGeometry(
             }
         }
     }
-    
+
     // Populate each door context with its geometry
     for (const context of doorContexts) {
         const doorMeshes = geometryMap.get(context.door.expressID) || []
-        const wallMeshes = context.hostWall 
+        const wallMeshes = context.hostWall
             ? (geometryMap.get(context.hostWall.expressID) || [])
             : []
         const deviceMeshes: THREE.Mesh[] = []
@@ -666,23 +669,14 @@ export async function loadDetailedGeometry(
             const meshes = geometryMap.get(device.expressID) || []
             deviceMeshes.push(...meshes)
         }
-        
+
         context.detailedGeometry = {
             doorMeshes,
             wallMeshes,
             deviceMeshes,
         }
-        
-        // Log geometry stats
-        const doorVerts = doorMeshes.reduce((sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0)
-        const wallVerts = wallMeshes.reduce((sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0)
-        const deviceVerts = deviceMeshes.reduce((sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0)
-        
-        if (doorVerts > 100) { // Only log doors with significant geometry
-            console.log(`  Door ${context.doorId}: ${doorVerts} door verts, ${wallVerts} wall verts, ${deviceVerts} device verts`)
-        }
     }
-    
+
     console.log(`[loadDetailedGeometry] Complete`)
 }
 

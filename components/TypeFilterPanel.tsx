@@ -25,22 +25,35 @@ export default function TypeFilterPanel({
   const setVisibleTypes = onFiltersChange
   const isApplying = useRef(false) // Prevent double-calls
 
-  // Get unique IFC types from elements with counts
+  // Get unique product types from elements with counts
+  // Only shows productTypeName from IfcRelDefinesByType - NOT IFC classes
   const typeCategories = useMemo(() => {
     const counts = new Map<string, number>()
+    let elementsWithType = 0
+    let elementsWithoutType = 0
+
     for (const el of elements) {
-      const typeName = el.typeName
-      counts.set(typeName, (counts.get(typeName) || 0) + 1)
+      // Only use product type name (from IfcDoorType, IfcWindowType, etc.)
+      // Skip IFC class names like IFCDOOR, IFCWALL
+      if (el.productTypeName) {
+        counts.set(el.productTypeName, (counts.get(el.productTypeName) || 0) + 1)
+        elementsWithType++
+      } else {
+        elementsWithoutType++
+      }
     }
+
+    console.log(`TypeFilter: ${elementsWithType} elements have type names, ${elementsWithoutType} without`)
+
     // Sort by count descending
     return Array.from(counts.entries())
       .sort((a, b) => b[1] - a[1])
-      .map(([name, count]) => ({ name, count }))
+      .map(([name, count]) => ({ name, count, isProductType: true }))
   }, [elements])
 
   // All type names for reference
-  const allTypeNames = useMemo(() => 
-    new Set(typeCategories.map(t => t.name)), 
+  const allTypeNames = useMemo(() =>
+    new Set(typeCategories.map(t => t.name)),
     [typeCategories]
   )
 
@@ -48,7 +61,7 @@ export default function TypeFilterPanel({
   const filteredTypes = useMemo(() => {
     if (!searchQuery) return typeCategories
     const query = searchQuery.toLowerCase()
-    return typeCategories.filter(t => 
+    return typeCategories.filter(t =>
       t.name.toLowerCase().includes(query)
     )
   }, [typeCategories, searchQuery])
@@ -56,7 +69,7 @@ export default function TypeFilterPanel({
   // Apply filter directly (not via useEffect)
   const applyFilter = async (types: Set<string> | null) => {
     if (!visibilityManager || isApplying.current) return
-    
+
     isApplying.current = true
     try {
       if (types === null) {
@@ -110,14 +123,17 @@ export default function TypeFilterPanel({
     return visibleTypes === null || visibleTypes.has(typeName)
   }
 
-  // Format type name for display (remove "Ifc" prefix)
+  // Format type name for display
+  // For IFC classes: remove "Ifc" prefix
+  // For product types: display as-is
   const formatTypeName = (name: string) => {
-    if (name.startsWith('IFC')) {
-      return name.slice(3).charAt(0) + name.slice(4).toLowerCase()
+    // Check if it's an IFC class name
+    if (name.startsWith('IFC') || name.startsWith('Ifc')) {
+      const stripped = name.startsWith('IFC') ? name.slice(3) : name.slice(3)
+      // Make it more readable: Door, Wall, Window etc.
+      return stripped.charAt(0).toUpperCase() + stripped.slice(1).toLowerCase()
     }
-    if (name.startsWith('Ifc')) {
-      return name.slice(3)
-    }
+    // Product type names - display as-is (these are user-defined in the IFC)
     return name
   }
 
@@ -163,7 +179,7 @@ export default function TypeFilterPanel({
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span style={{ fontSize: '12px', fontWeight: 600, color: '#e0e0e0' }}>
-          IFC Classes
+          Door Types
         </span>
         {onClose && (
           <button
@@ -186,7 +202,7 @@ export default function TypeFilterPanel({
       {/* Search Input */}
       <input
         type="text"
-        placeholder="Search types..."
+        placeholder="Search door types..."
         value={searchQuery}
         onChange={(e) => setSearchQuery(e.target.value)}
         style={{
@@ -260,15 +276,15 @@ export default function TypeFilterPanel({
                   e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.08)'
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = visible && isFiltered 
-                    ? 'rgba(78, 205, 196, 0.15)' 
+                  e.currentTarget.style.backgroundColor = visible && isFiltered
+                    ? 'rgba(78, 205, 196, 0.15)'
                     : 'transparent'
                 }}
               >
                 <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span style={{ 
-                    width: '8px', 
-                    height: '8px', 
+                  <span style={{
+                    width: '8px',
+                    height: '8px',
                     borderRadius: '2px',
                     backgroundColor: visible ? '#4ecdc4' : '#444',
                     border: visible ? 'none' : '1px solid #555',
@@ -276,8 +292,8 @@ export default function TypeFilterPanel({
                   }} />
                   {formatTypeName(type.name)}
                 </span>
-                <span style={{ 
-                  color: '#666', 
+                <span style={{
+                  color: '#666',
                   fontSize: '10px',
                   marginLeft: '8px',
                 }}>
@@ -290,9 +306,9 @@ export default function TypeFilterPanel({
       </div>
 
       {/* Hint */}
-      <div style={{ 
-        fontSize: '10px', 
-        color: '#555', 
+      <div style={{
+        fontSize: '10px',
+        color: '#555',
         textAlign: 'center',
         borderTop: '1px solid #333',
         paddingTop: '6px',
