@@ -68,44 +68,42 @@ export function renderSpaceFloorPlan(
         fontFamily,
     } = opts
 
-    // Get floor polygon - prefer actual polygon, fallback to bounding box
-    let polygon = context.floorPolygon
-    if (!polygon || polygon.length < 3) {
-        // Fallback to bounding box
-        const bbox = context.space.boundingBox
-        if (bbox) {
-            const size = new THREE.Vector3()
-            bbox.getSize(size)
-
-            // Detect Y-up vs Z-up coordinate system
-            // Y-up: Y is vertical (ceiling height ~2-4m), floor plan uses X-Z
-            // Z-up: Z is vertical (ceiling height), floor plan uses X-Y
-            const isYUp = size.y > 1.5 && size.y < 5 && size.z > size.y * 2
-
-            if (isYUp) {
-                // Y-up: floor plan is X-Z plane
-                polygon = [
-                    new THREE.Vector2(bbox.min.x, bbox.min.z),
-                    new THREE.Vector2(bbox.max.x, bbox.min.z),
-                    new THREE.Vector2(bbox.max.x, bbox.max.z),
-                    new THREE.Vector2(bbox.min.x, bbox.max.z),
-                ]
-            } else {
-                // Z-up: floor plan is X-Y plane
-                polygon = [
-                    new THREE.Vector2(bbox.min.x, bbox.min.y),
-                    new THREE.Vector2(bbox.max.x, bbox.min.y),
-                    new THREE.Vector2(bbox.max.x, bbox.max.y),
-                    new THREE.Vector2(bbox.min.x, bbox.max.y),
-                ]
-            }
-        } else {
-            return createErrorSVG(width, height, 'No floor geometry')
-        }
+    // Get bounding box for reference dimensions (always shown as dashed)
+    const bbox = context.space.boundingBox
+    if (!bbox) {
+        return createErrorSVG(width, height, 'No bounding box')
     }
 
-    // Calculate bounds of the space
-    const bounds = calculatePolygonBounds(polygon)
+    const bboxSize = new THREE.Vector3()
+    bbox.getSize(bboxSize)
+
+    // Detect Y-up vs Z-up coordinate system
+    // Y-up: Y is vertical (ceiling height ~2-4m), floor plan uses X-Z
+    // Z-up: Z is vertical (ceiling height), floor plan uses X-Y
+    const isYUp = bboxSize.y > 1.5 && bboxSize.y < 5 && bboxSize.z > bboxSize.y * 2
+
+    // Create bounding box polygon (always rectangular, used for dimensions)
+    const bboxPolygon: THREE.Vector2[] = isYUp ? [
+        new THREE.Vector2(bbox.min.x, bbox.min.z),
+        new THREE.Vector2(bbox.max.x, bbox.min.z),
+        new THREE.Vector2(bbox.max.x, bbox.max.z),
+        new THREE.Vector2(bbox.min.x, bbox.max.z),
+    ] : [
+        new THREE.Vector2(bbox.min.x, bbox.min.y),
+        new THREE.Vector2(bbox.max.x, bbox.min.y),
+        new THREE.Vector2(bbox.max.x, bbox.max.y),
+        new THREE.Vector2(bbox.min.x, bbox.max.y),
+    ]
+
+    // Get real floor polygon from geometry if available
+    let realPolygon = context.floorPolygon
+    const hasRealGeometry = realPolygon && realPolygon.length >= 3
+
+    // If no real geometry, use bounding box for fill
+    const fillPolygon = hasRealGeometry ? realPolygon! : bboxPolygon
+
+    // Calculate bounds from the larger of the two (usually bounding box)
+    const bounds = calculatePolygonBounds(bboxPolygon)
 
     // Calculate scale to fit in viewport with margins
     const worldWidth = bounds.width + margin * 2
@@ -147,22 +145,32 @@ export function renderSpaceFloorPlan(
         svg += `  <rect width="100%" height="${viewHeight}" fill="url(#grid)"/>\n`
     }
 
-    // Draw floor polygon (room fill)
-    const floorPath = polygon.map((p, i) => {
+    // Draw floor fill (use real geometry if available, otherwise bounding box)
+    const fillPath = fillPolygon.map((p, i) => {
         const svgP = toSVG(p)
         return i === 0 ? `M ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}` : `L ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
     }).join(' ') + ' Z'
 
-    svg += `  <path d="${floorPath}" fill="${floorColor}" stroke="none"/>\n`
+    svg += `  <path d="${fillPath}" fill="${floorColor}" stroke="none"/>\n`
 
-    // Draw walls (thick lines around boundary)
-    svg += `  <path d="${floorPath}" fill="none" stroke="${wallColor}" stroke-width="${lineWidth * 3}" stroke-linejoin="miter"/>\n`
+    // Draw bounding box with DASHED lines (always shown for reference/dimensions)
+    const bboxPath = bboxPolygon.map((p, i) => {
+        const svgP = toSVG(p)
+        return i === 0 ? `M ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}` : `L ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
+    }).join(' ') + ' Z'
+
+    svg += `  <path d="${bboxPath}" fill="none" stroke="${wallColor}" stroke-width="${lineWidth}" stroke-dasharray="8,4" stroke-linejoin="miter"/>\n`
+
+    // Draw real geometry outline with SOLID lines (if we have actual geometry)
+    if (hasRealGeometry) {
+        svg += `  <path d="${fillPath}" fill="none" stroke="${wallColor}" stroke-width="${lineWidth * 2}" stroke-linejoin="miter"/>\n`
+    }
 
     // Draw doors
     if (showDoors && context.boundaryDoors.length > 0) {
         svg += `  <g id="doors">\n`
         for (const door of context.boundaryDoors) {
-            svg += renderDoorSymbol(door, toSVG, scale, doorColor, lineWidth, bounds, polygon)
+            svg += renderDoorSymbol(door, toSVG, scale, doorColor, lineWidth, bounds, fillPolygon)
         }
         svg += `  </g>\n`
     }
@@ -171,7 +179,7 @@ export function renderSpaceFloorPlan(
     if (showWindows && context.boundaryWindows.length > 0) {
         svg += `  <g id="windows">\n`
         for (const window of context.boundaryWindows) {
-            svg += renderWindowSymbol(window, toSVG, scale, windowColor, lineWidth, bounds, polygon)
+            svg += renderWindowSymbol(window, toSVG, scale, windowColor, lineWidth, bounds, fillPolygon)
         }
         svg += `  </g>\n`
     }

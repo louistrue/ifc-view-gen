@@ -295,23 +295,7 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             // Get IFC type code
             const ifcType = getIfcTypeCode(typeName);
 
-            // OPTIMIZATION: For IFCSPACE elements, skip all geometry operations entirely.
-            // IfcSpace elements are spatial containers that don't need mesh geometry
-            // for space analysis - they only need the bounding box which we already have.
-            // This also avoids RangeError crashes in the fragments worker.
-            if (category.toUpperCase() === 'IFCSPACE') {
-              const elementInfo: ElementInfo = {
-                expressID: localId,
-                ifcType,
-                typeName,
-                productTypeName,
-                mesh: undefined as any, // IFCSPACE doesn't need geometry
-                meshes: undefined,
-                boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
-                globalId,
-              };
-              return elementInfo;
-            }
+            const isSpace = category.toUpperCase() === 'IFCSPACE';
 
             // Get geometry with transforms using ItemGeometry API
             // This can throw for elements with malformed geometry data
@@ -338,27 +322,28 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
                 console.warn(`[Fragments] getGeometry failed for localId ${localId}:`, geoApiError);
               }
               // For IFCSPACE, continue without geometry - we can still use the bounding box
-              if (category.toUpperCase() !== 'IFCSPACE') {
+              if (!isSpace) {
                 return null;
               }
             }
 
-            // For IFCSPACE without geometry, create element with just bounding box
-            if (!geometry && category.toUpperCase() === 'IFCSPACE') {
-              const elementInfo: ElementInfo = {
-                expressID: localId,
-                ifcType: getIfcTypeCode(typeName),
-                typeName,
-                productTypeName,
-                mesh: undefined as any, // IFCSPACE may not have geometry
-                meshes: undefined,
-                boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
-                globalId,
-              };
-              return elementInfo;
+            // For elements without geometry (especially IFCSPACE), create element with just bounding box
+            if (!geometry) {
+              if (isSpace) {
+                const elementInfo: ElementInfo = {
+                  expressID: localId,
+                  ifcType,
+                  typeName,
+                  productTypeName,
+                  mesh: undefined as any,
+                  meshes: undefined,
+                  boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
+                  globalId,
+                };
+                return elementInfo;
+              }
+              return null;
             }
-
-            if (!geometry) return null;
 
             // Get Element object for getMeshes() - direct array access
             const element = fragmentElements[dataIndex];
@@ -378,33 +363,44 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
                   e.message.includes('Float32Array') ||
                   e.message.includes('out-of-bounds') ||
                   e.message.includes('out-of-range') ||
-                  e.message.includes('multiple of')
+                  e.message.includes('multiple of') ||
+                  e.message.includes('out of memory')
                 ));
 
               if (isBufferError) {
-                // Silently skip elements with buffer errors - they have no valid geometry
                 console.debug(`[Fragments] Skipping localId ${localId} (${category}): geometry buffer error`);
               } else {
                 console.warn(`getMeshes failed for localId ${localId}:`, e);
+              }
+              // For IFCSPACE, create element with bounding box only
+              if (isSpace) {
+                return {
+                  expressID: localId,
+                  ifcType,
+                  typeName,
+                  productTypeName,
+                  mesh: undefined as any,
+                  meshes: undefined,
+                  boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
+                  globalId,
+                } as ElementInfo;
               }
               return null;
             }
 
             if (!meshGroup) {
-              // No mesh group is common for spaces that are spatial containers only
-              if (category.toUpperCase() === 'IFCSPACE') {
-                // For IFCSPACE without mesh group, create element with just bounding box
-                const elementInfo: ElementInfo = {
+              // No mesh group - for IFCSPACE, create element with bounding box only
+              if (isSpace) {
+                return {
                   expressID: localId,
-                  ifcType: getIfcTypeCode(typeName),
+                  ifcType,
                   typeName,
                   productTypeName,
-                  mesh: undefined as any, // IFCSPACE may not have geometry
+                  mesh: undefined as any,
                   meshes: undefined,
                   boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
                   globalId,
-                };
-                return elementInfo;
+                } as ElementInfo;
               }
               console.warn(`No mesh group for localId ${localId}`);
               return null;
@@ -414,20 +410,18 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             const meshes = extractMeshesFromGroup(meshGroup);
 
             if (meshes.length === 0) {
-              // Empty mesh list is normal for IFCSPACE elements without geometry
-              if (category.toUpperCase() === 'IFCSPACE') {
-                // For IFCSPACE without meshes, create element with just bounding box
-                const elementInfo: ElementInfo = {
+              // Empty mesh list - for IFCSPACE, create element with bounding box only
+              if (isSpace) {
+                return {
                   expressID: localId,
-                  ifcType: getIfcTypeCode(typeName),
+                  ifcType,
                   typeName,
                   productTypeName,
-                  mesh: undefined as any, // IFCSPACE may not have geometry
+                  mesh: undefined as any,
                   meshes: undefined,
                   boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
                   globalId,
-                };
-                return elementInfo;
+                } as ElementInfo;
               }
               console.warn(`No meshes extracted from group for localId ${localId}`);
               return null;
@@ -477,19 +471,18 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             }
 
             if (!hasValidGeometry) {
-              if (category.toUpperCase() === 'IFCSPACE') {
+              if (isSpace) {
                 // For IFCSPACE without valid geometry, create element with just bounding box
-                const elementInfo: ElementInfo = {
+                return {
                   expressID: localId,
-                  ifcType: getIfcTypeCode(typeName),
+                  ifcType,
                   typeName,
                   productTypeName,
-                  mesh: undefined as any, // IFCSPACE may not have geometry
+                  mesh: undefined as any,
                   meshes: undefined,
                   boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
                   globalId,
-                };
-                return elementInfo;
+                } as ElementInfo;
               }
               console.warn(`[Fragments] No valid geometry for localId ${localId}`);
             }
