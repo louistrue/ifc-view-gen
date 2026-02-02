@@ -295,6 +295,24 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             // Get IFC type code
             const ifcType = getIfcTypeCode(typeName);
 
+            // OPTIMIZATION: For IFCSPACE elements, skip all geometry operations entirely.
+            // IfcSpace elements are spatial containers that don't need mesh geometry
+            // for space analysis - they only need the bounding box which we already have.
+            // This also avoids RangeError crashes in the fragments worker.
+            if (category.toUpperCase() === 'IFCSPACE') {
+              const elementInfo: ElementInfo = {
+                expressID: localId,
+                ifcType,
+                typeName,
+                productTypeName,
+                mesh: undefined as any, // IFCSPACE doesn't need geometry
+                meshes: undefined,
+                boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
+                globalId,
+              };
+              return elementInfo;
+            }
+
             // Get geometry with transforms using ItemGeometry API
             // This can throw for elements with malformed geometry data
             let geometry;
