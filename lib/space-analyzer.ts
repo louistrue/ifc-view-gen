@@ -170,8 +170,12 @@ export async function analyzeSpaces(
     model: LoadedIFCModel,
     spatialStructure?: SpatialNode | null
 ): Promise<SpaceContext[]> {
+    console.log('[SpaceAnalyzer] Starting space analysis...')
+    console.log('[SpaceAnalyzer] Total elements in model:', model.elements.length)
+
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure || null)
+    console.log('[SpaceAnalyzer] Storey map entries:', storeyMap.size)
 
     // Separate elements by type
     const spaces: ElementInfo[] = []
@@ -180,8 +184,13 @@ export async function analyzeSpaces(
     const windows: ElementInfo[] = []
     const furniture: ElementInfo[] = []
 
+    // Log unique type names for debugging
+    const uniqueTypes = new Set<string>()
+
     // Process all elements
     for (const element of model.elements) {
+        uniqueTypes.add(element.typeName)
+
         if (isSpaceType(element.typeName)) {
             spaces.push(element)
         } else if (isWallType(element.typeName)) {
@@ -194,6 +203,14 @@ export async function analyzeSpaces(
             furniture.push(element)
         }
     }
+
+    console.log('[SpaceAnalyzer] Unique element types found:', Array.from(uniqueTypes).sort())
+    console.log('[SpaceAnalyzer] Element counts:')
+    console.log('  - Spaces (IFCSPACE):', spaces.length)
+    console.log('  - Walls:', walls.length)
+    console.log('  - Doors:', doors.length)
+    console.log('  - Windows:', windows.length)
+    console.log('  - Furniture:', furniture.length)
 
     // Analyze each space
     const spaceContexts: SpaceContext[] = []
@@ -210,6 +227,12 @@ export async function analyzeSpaces(
         if (context) {
             spaceContexts.push(context)
         }
+    }
+
+    console.log('[SpaceAnalyzer] Analysis complete:')
+    console.log('  - Total space contexts created:', spaceContexts.length)
+    if (spaceContexts.length > 0) {
+        console.log('  - First space:', spaceContexts[0].spaceName, '| Area:', spaceContexts[0].space.grossFloorArea?.toFixed(2), 'm²')
     }
 
     return spaceContexts

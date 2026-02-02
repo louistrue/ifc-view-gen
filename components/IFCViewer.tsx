@@ -495,6 +495,8 @@ export default function IFCViewer() {
       // Re-analyze spaces if Arch model is loaded
       if (loadedModelRef.current) {
         setLoadingStage('Analyzing spaces...')
+        console.log('[IFCViewer] Starting space analysis...')
+        console.log('[IFCViewer] Model has', loadedModelRef.current.elements.length, 'elements')
 
         // Pass spatial structure to extract storey names for spaces
         const contexts = await analyzeSpaces(
@@ -502,9 +504,12 @@ export default function IFCViewer() {
           spatialStructureRef.current  // Use ref for immediate access
         )
 
+        console.log('[IFCViewer] Space analysis returned', contexts.length, 'spaces')
         setSpaceContexts(contexts)
 
-        if (loadedModelRef.current.elements.length > 0) {
+        // Show panel if we have spaces OR if we have any elements (to show "no spaces found" message)
+        if (contexts.length > 0 || loadedModelRef.current.elements.length > 0) {
+          console.log('[IFCViewer] Setting showBatchProcessor to true')
           setShowBatchProcessor(true)
           batchProcessorVisibleRef.current = true
           // Update viewport when batch processor appears
@@ -864,16 +869,28 @@ export default function IFCViewer() {
           </div>
         )}
 
-        {showBatchProcessor && spaceContexts.length > 0 && (
+        {showBatchProcessor && (
           <div className="batch-panel">
-            <SpacePanel
-              spaceContexts={spaceContexts}
-              visibilityManager={visibilityManagerRef.current}
-              navigationManager={navigationManagerRef.current}
-              onComplete={() => {
-                // Optional callback when export completes
-              }}
-            />
+            {spaceContexts.length > 0 ? (
+              <SpacePanel
+                spaceContexts={spaceContexts}
+                visibilityManager={visibilityManagerRef.current}
+                navigationManager={navigationManagerRef.current}
+                onComplete={() => {
+                  // Optional callback when export completes
+                }}
+              />
+            ) : (
+              <div style={{ padding: '20px', color: '#888', textAlign: 'center' }}>
+                <h3 style={{ color: '#fff', marginBottom: '12px' }}>No Spaces Found</h3>
+                <p style={{ fontSize: '13px', lineHeight: '1.5' }}>
+                  This IFC file does not contain IFCSPACE elements.
+                  <br /><br />
+                  Spaces (rooms) must be defined in the IFC model
+                  to generate floor plans.
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>
