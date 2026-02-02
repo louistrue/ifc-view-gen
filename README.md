@@ -231,7 +231,7 @@ Requires WebGL 2.0 and WebAssembly support.
 
 ## License
 
-This project is private. All rights reserved.
+AGPL-3
 
 ## Acknowledgments
 
