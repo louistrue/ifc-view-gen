@@ -273,15 +273,31 @@ function analyzeSpace(
     const storeyName = storeyMap.get(space.expressID) || null
 
     // Convert element to SpaceInfo
+    // NOTE: IFC files can be Y-up (Y is vertical) or Z-up (Z is vertical)
+    // For floor plans, we need the horizontal plane: X and Z for Y-up, X and Y for Z-up
+    // We detect this by checking if Y dimension is typical ceiling height (2-4m)
+    const isYUp = size.y > 1.5 && size.y < 5 && size.z > size.y * 2
+
+    const horizontalWidth = size.x
+    const horizontalDepth = isYUp ? size.z : size.y
+    const verticalHeight = isYUp ? size.y : size.z
+
     const spaceInfo: SpaceInfo = {
         ...space,
         longName: space.productTypeName || undefined,
         objectType: space.typeName,
         centerPoint: center,
-        // Calculate approximate area from bounding box if not available
-        grossFloorArea: size.x * size.y,
-        height: size.z,
-        boundingBox2D: {
+        // Calculate approximate area from bounding box using horizontal plane
+        grossFloorArea: horizontalWidth * horizontalDepth,
+        height: verticalHeight,
+        boundingBox2D: isYUp ? {
+            // Y-up: floor plan is X-Z plane
+            min: new THREE.Vector2(bbox.min.x, bbox.min.z),
+            max: new THREE.Vector2(bbox.max.x, bbox.max.z),
+            width: size.x,
+            depth: size.z,
+        } : {
+            // Z-up: floor plan is X-Y plane
             min: new THREE.Vector2(bbox.min.x, bbox.min.y),
             max: new THREE.Vector2(bbox.max.x, bbox.max.y),
             width: size.x,
@@ -384,12 +400,31 @@ function extractFloorPolygon(space: ElementInfo): THREE.Vector2[] {
     // Method 2: Fallback to bounding box rectangle
     const bbox = space.boundingBox
     if (bbox) {
-        return [
-            new THREE.Vector2(bbox.min.x, bbox.min.y),
-            new THREE.Vector2(bbox.max.x, bbox.min.y),
-            new THREE.Vector2(bbox.max.x, bbox.max.y),
-            new THREE.Vector2(bbox.min.x, bbox.max.y),
-        ]
+        const size = new THREE.Vector3()
+        bbox.getSize(size)
+
+        // Detect Y-up vs Z-up coordinate system
+        // Y-up: Y is vertical (ceiling height), floor plan uses X-Z
+        // Z-up: Z is vertical (ceiling height), floor plan uses X-Y
+        const isYUp = size.y > 1.5 && size.y < 5 && size.z > size.y * 2
+
+        if (isYUp) {
+            // Y-up: floor plan is X-Z plane
+            return [
+                new THREE.Vector2(bbox.min.x, bbox.min.z),
+                new THREE.Vector2(bbox.max.x, bbox.min.z),
+                new THREE.Vector2(bbox.max.x, bbox.max.z),
+                new THREE.Vector2(bbox.min.x, bbox.max.z),
+            ]
+        } else {
+            // Z-up: floor plan is X-Y plane
+            return [
+                new THREE.Vector2(bbox.min.x, bbox.min.y),
+                new THREE.Vector2(bbox.max.x, bbox.min.y),
+                new THREE.Vector2(bbox.max.x, bbox.max.y),
+                new THREE.Vector2(bbox.min.x, bbox.max.y),
+            ]
+        }
     }
 
     return []

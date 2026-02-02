@@ -74,12 +74,31 @@ export function renderSpaceFloorPlan(
         // Fallback to bounding box
         const bbox = context.space.boundingBox
         if (bbox) {
-            polygon = [
-                new THREE.Vector2(bbox.min.x, bbox.min.y),
-                new THREE.Vector2(bbox.max.x, bbox.min.y),
-                new THREE.Vector2(bbox.max.x, bbox.max.y),
-                new THREE.Vector2(bbox.min.x, bbox.max.y),
-            ]
+            const size = new THREE.Vector3()
+            bbox.getSize(size)
+
+            // Detect Y-up vs Z-up coordinate system
+            // Y-up: Y is vertical (ceiling height ~2-4m), floor plan uses X-Z
+            // Z-up: Z is vertical (ceiling height), floor plan uses X-Y
+            const isYUp = size.y > 1.5 && size.y < 5 && size.z > size.y * 2
+
+            if (isYUp) {
+                // Y-up: floor plan is X-Z plane
+                polygon = [
+                    new THREE.Vector2(bbox.min.x, bbox.min.z),
+                    new THREE.Vector2(bbox.max.x, bbox.min.z),
+                    new THREE.Vector2(bbox.max.x, bbox.max.z),
+                    new THREE.Vector2(bbox.min.x, bbox.max.z),
+                ]
+            } else {
+                // Z-up: floor plan is X-Y plane
+                polygon = [
+                    new THREE.Vector2(bbox.min.x, bbox.min.y),
+                    new THREE.Vector2(bbox.max.x, bbox.min.y),
+                    new THREE.Vector2(bbox.max.x, bbox.max.y),
+                    new THREE.Vector2(bbox.min.x, bbox.max.y),
+                ]
+            }
         } else {
             return createErrorSVG(width, height, 'No floor geometry')
         }
