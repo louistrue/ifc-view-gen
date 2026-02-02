@@ -26,3 +26,44 @@ export interface LoadedIFCModel {
     modelID: number
     api: any // IfcAPI instance
 }
+
+/**
+ * Checks if an element type represents a space/room
+ */
+export function isSpaceType(typeName: string): boolean {
+    const upper = typeName.toUpperCase()
+    return upper.includes('SPACE') ||
+        upper === 'IFCSPACE' ||
+        upper.startsWith('IFCSPACE')
+}
+
+/**
+ * Checks if an element type represents a wall
+ */
+export function isWallType(typeName: string): boolean {
+    const upper = typeName.toUpperCase()
+    return upper.includes('WALL') ||
+        upper === 'IFCWALL' ||
+        upper === 'IFCWALLSTANDARDCASE' ||
+        upper.startsWith('IFCWALL')
+}
+
+/**
+ * Checks if an element type represents a door
+ */
+export function isDoorType(typeName: string): boolean {
+    const upper = typeName.toUpperCase()
+    return upper.includes('DOOR') ||
+        upper === 'IFCDOOR' ||
+        upper.startsWith('IFCDOOR')
+}
+
+/**
+ * Checks if an element type represents a window
+ */
+export function isWindowType(typeName: string): boolean {
+    const upper = typeName.toUpperCase()
+    return upper.includes('WINDOW') ||
+        upper === 'IFCWINDOW' ||
+        upper.startsWith('IFCWINDOW')
+}

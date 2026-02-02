@@ -1,25 +1,84 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { put } from '@vercel/blob'
 
-// Hardcoded Airtable configuration - update after running setup script
+// Airtable configuration from environment
 const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || '' // Set after running setup
-const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Doors'
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || ''
+const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Spaces'
 
 const AIRTABLE_API_BASE = 'https://api.airtable.com/v0'
 
-interface DoorData {
-    doorId: string
-    doorType?: string
-    openingDirection?: string
+/**
+ * Space data for Airtable export
+ */
+interface SpaceData {
+    spaceId: string
+    spaceName?: string
+    spaceType?: string
+    spaceFunction?: string
+    storeyName?: string
+
+    // Quantities
+    grossFloorArea?: number
+    netFloorArea?: number
+    grossVolume?: number
+    height?: number
+    perimeter?: number
+
+    // Dimensions
+    width?: number
+    depth?: number
+
+    // Counts
+    doorCount?: number
+    windowCount?: number
+
+    // Model source
     modelSource?: string
-    frontView?: string // base64 or URL
-    backView?: string
-    topView?: string
+
+    // SVG views (base64 data URLs)
+    floorPlanView?: string
 }
 
-async function findOrCreateDoorRecord(doorId: string): Promise<{ recordId: string; exists: boolean }> {
+/**
+ * Upload base64 data URL to Vercel Blob storage
+ */
+async function uploadToBlob(dataUrl: string | undefined, spaceId: string, viewType: string): Promise<string | undefined> {
+    if (!dataUrl || !dataUrl.startsWith('data:')) return dataUrl
+
+    if (!process.env.BLOB_READ_WRITE_TOKEN) {
+        console.warn('BLOB_READ_WRITE_TOKEN not configured, skipping image upload')
+        return undefined
+    }
+
+    try {
+        // Parse base64
+        const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/)
+        if (!matches || matches.length !== 3) return undefined
+
+        const contentType = matches[1]
+        const buffer = Buffer.from(matches[2], 'base64')
+        const extension = contentType.split('/')[1] || 'bin'
+        const filename = `spaces/${spaceId}/${viewType}-${Date.now()}.${extension}`
+
+        const blob = await put(filename, buffer, {
+            access: 'public',
+            contentType,
+        })
+
+        return blob.url
+    } catch (error) {
+        console.error(`Failed to upload ${viewType} for ${spaceId}:`, error)
+        return undefined
+    }
+}
+
+/**
+ * Find or create a space record in Airtable
+ */
+async function findOrCreateSpaceRecord(spaceId: string): Promise<{ recordId: string; exists: boolean }> {
     // Search for existing record
-    const searchUrl = `${AIRTABLE_API_BASE}/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}?filterByFormula={Door ID}="${doorId}"`
+    const searchUrl = `${AIRTABLE_API_BASE}/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}?filterByFormula={Space ID}="${spaceId}"`
 
     const searchResponse = await fetch(searchUrl, {
         headers: {
@@ -47,7 +106,7 @@ async function findOrCreateDoorRecord(doorId: string): Promise<{ recordId: strin
         },
         body: JSON.stringify({
             fields: {
-                'Door ID': doorId,
+                'Space ID': spaceId,
                 'Created At': new Date().toISOString(),
             },
         }),
@@ -62,54 +121,34 @@ async function findOrCreateDoorRecord(doorId: string): Promise<{ recordId: strin
     return { recordId: createData.id, exists: false }
 }
 
-import { put } from '@vercel/blob'
-
-// Helper to upload base64 images to Vercel Blob
-async function uploadToBlob(dataUrl: string | undefined, doorId: string, viewType: string): Promise<string | undefined> {
-    if (!dataUrl || !dataUrl.startsWith('data:')) return dataUrl
-
-    if (!process.env.BLOB_READ_WRITE_TOKEN) {
-        console.warn('BLOB_READ_WRITE_TOKEN not configured, skipping image upload')
-        return undefined
-    }
-
-    try {
-        // Parse base64
-        const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/)
-        if (!matches || matches.length !== 3) return undefined
-
-        const contentType = matches[1]
-        const buffer = Buffer.from(matches[2], 'base64')
-        const extension = contentType.split('/')[1] || 'bin'
-        const filename = `doors/${doorId}/${viewType}-${Date.now()}.${extension}`
-
-        const blob = await put(filename, buffer, {
-            access: 'public',
-            contentType,
-        })
-
-        return blob.url
-    } catch (error) {
-        console.error(`Failed to upload ${viewType} for ${doorId}:`, error)
-        return undefined
-    }
-}
-
-async function updateDoorRecord(recordId: string, data: DoorData): Promise<void> {
+/**
+ * Update a space record in Airtable
+ */
+async function updateSpaceRecord(recordId: string, data: SpaceData): Promise<void> {
     const fields: Record<string, unknown> = {}
 
-    if (data.doorType) fields['Door Type'] = data.doorType
-    if (data.openingDirection) fields['Opening Direction'] = data.openingDirection
+    // Map data fields to Airtable fields
+    if (data.spaceName) fields['Space Name'] = data.spaceName
+    if (data.spaceType) fields['Space Type'] = data.spaceType
+    if (data.spaceFunction) fields['Space Function'] = data.spaceFunction
+    if (data.storeyName) fields['Storey'] = data.storeyName
     if (data.modelSource) fields['Model Source'] = data.modelSource
 
-    // Upload images if present
-    const frontUrl = await uploadToBlob(data.frontView, data.doorId, 'front')
-    const backUrl = await uploadToBlob(data.backView, data.doorId, 'back')
-    const topUrl = await uploadToBlob(data.topView, data.doorId, 'top')
+    // Numeric fields
+    if (data.grossFloorArea !== undefined) fields['Gross Floor Area (m²)'] = data.grossFloorArea
+    if (data.netFloorArea !== undefined) fields['Net Floor Area (m²)'] = data.netFloorArea
+    if (data.grossVolume !== undefined) fields['Gross Volume (m³)'] = data.grossVolume
+    if (data.height !== undefined) fields['Height (m)'] = data.height
+    if (data.perimeter !== undefined) fields['Perimeter (m)'] = data.perimeter
+    if (data.width !== undefined) fields['Width (m)'] = data.width
+    if (data.depth !== undefined) fields['Depth (m)'] = data.depth
+    if (data.doorCount !== undefined) fields['Door Count'] = data.doorCount
+    if (data.windowCount !== undefined) fields['Window Count'] = data.windowCount
 
-    if (frontUrl) fields['Front View'] = [{ url: frontUrl }]
-    if (backUrl) fields['Back View'] = [{ url: backUrl }]
-    if (topUrl) fields['Top View'] = [{ url: topUrl }]
+    // Upload images if present
+    const floorPlanUrl = await uploadToBlob(data.floorPlanView, data.spaceId, 'floor-plan')
+
+    if (floorPlanUrl) fields['Floor Plan View'] = [{ url: floorPlanUrl }]
 
     const updateResponse = await fetch(`${AIRTABLE_API_BASE}/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}/${recordId}`, {
         method: 'PATCH',
@@ -143,28 +182,28 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        const body = await request.json() as DoorData
+        const body = await request.json() as SpaceData
 
-        if (!body.doorId) {
+        if (!body.spaceId) {
             return NextResponse.json(
-                { error: 'doorId is required' },
+                { error: 'spaceId is required' },
                 { status: 400 }
             )
         }
 
-        // Find or create the door record
-        const { recordId, exists } = await findOrCreateDoorRecord(body.doorId)
+        // Find or create the space record
+        const { recordId, exists } = await findOrCreateSpaceRecord(body.spaceId)
 
-        // Update the record with the door data
-        await updateDoorRecord(recordId, body)
+        // Update the record with the space data
+        await updateSpaceRecord(recordId, body)
 
         return NextResponse.json({
             success: true,
             recordId,
             created: !exists,
             message: exists
-                ? `Updated existing door record: ${body.doorId}`
-                : `Created new door record: ${body.doorId}`,
+                ? `Updated existing space record: ${body.spaceId}`
+                : `Created new space record: ${body.spaceId}`,
         })
 
     } catch (error) {

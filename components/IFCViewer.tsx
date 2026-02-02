@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
-import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
-import type { DoorContext } from '@/lib/door-analyzer'
-import DoorPanel from './DoorPanel'
+import { analyzeSpaces } from '@/lib/space-analyzer'
+import type { SpaceContext } from '@/lib/ifc-space-types'
+import SpacePanel from './SpacePanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
@@ -36,7 +36,7 @@ export default function IFCViewer() {
   const [loadingProgress, setLoadingProgress] = useState(0)
   const [loadingStage, setLoadingStage] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
-  const [doorContexts, setDoorContexts] = useState<DoorContext[]>([])
+  const [spaceContexts, setSpaceContexts] = useState<SpaceContext[]>([])
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
 
   // File names for display
@@ -287,7 +287,7 @@ export default function IFCViewer() {
     setShowBatchProcessor(false)
 
     if (type === 'arch') {
-      setDoorContexts([])
+      setSpaceContexts([])
       setArchFileName(file.name)
     } else {
       setElecFileName(file.name)
@@ -492,40 +492,17 @@ export default function IFCViewer() {
         }
       }
 
-      // Re-analyze doors if Arch model is loaded
+      // Re-analyze spaces if Arch model is loaded
       if (loadedModelRef.current) {
-        setLoadingStage('Analyzing doors...')
+        setLoadingStage('Analyzing spaces...')
 
-        // Extract OperationTypes from web-ifc for swing arc rendering
-        let operationTypeMap: Map<number, string> | undefined
-        if (archFileRef.current) {
-          try {
-            const { extractDoorOperationTypes } = await import('@/lib/ifc-loader')
-            operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
-          } catch (err) {
-            console.warn('Failed to extract OperationTypes, swing arcs will not be shown:', err)
-          }
-        }
-
-        // Pass spatial structure to extract storey names for doors
-        const contexts = await analyzeDoors(
+        // Pass spatial structure to extract storey names for spaces
+        const contexts = await analyzeSpaces(
           loadedModelRef.current,
-          electricalModelRef.current || undefined,
-          spatialStructureRef.current,  // Use ref for immediate access
-          operationTypeMap  // Pass OperationType map for swing arc rendering
+          spatialStructureRef.current  // Use ref for immediate access
         )
 
-        // Load detailed geometry from web-ifc for high-quality SVG generation
-        if (archFileRef.current && contexts.length > 0) {
-          setLoadingStage('Extracting detailed geometry...')
-          try {
-            await loadDetailedGeometry(contexts, archFileRef.current, modelCenterOffsetRef.current)
-          } catch (err) {
-            console.warn('Failed to load detailed geometry, SVG will use simplified rendering:', err)
-          }
-        }
-
-        setDoorContexts(contexts)
+        setSpaceContexts(contexts)
 
         if (loadedModelRef.current.elements.length > 0) {
           setShowBatchProcessor(true)
@@ -599,14 +576,11 @@ export default function IFCViewer() {
               viewBox="0 0 100 100"
               style={{ display: 'block' }}
             >
-              {/* Door frame */}
-              <rect x="20" y="10" width="60" height="80" fill="none" stroke="#4a5568" strokeWidth="2.5" strokeLinecap="round" />
-
-              {/* Door panel - will rotate on hover (hinge at left edge x=25) */}
-              <g className="door-panel">
-                <rect x="25" y="15" width="50" height="70" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" strokeWidth="2" />
-                <circle cx="70" cy="50" r="3" fill="#3b82f6" opacity="0.4" />
-              </g>
+              {/* Floor plan icon */}
+              <rect x="10" y="10" width="80" height="80" fill="none" stroke="#4a5568" strokeWidth="2.5" strokeLinecap="round" />
+              <line x1="10" y1="50" x2="90" y2="50" stroke="#10b981" strokeWidth="2" />
+              <line x1="50" y1="10" x2="50" y2="90" stroke="#10b981" strokeWidth="2" />
+              <rect x="15" y="15" width="30" height="30" fill="#10b981" opacity="0.15" />
             </svg>
           </div>
           <div className="file-inputs">
@@ -640,9 +614,9 @@ export default function IFCViewer() {
           </div>
 
           {error && <div className="error-message">{error}</div>}
-          {doorContexts.length > 0 && (
+          {spaceContexts.length > 0 && (
             <div className="door-count">
-              Found {doorContexts.length} door{doorContexts.length !== 1 ? 's' : ''}
+              Found {spaceContexts.length} space{spaceContexts.length !== 1 ? 's' : ''}
             </div>
           )}
         </div>
@@ -728,13 +702,14 @@ export default function IFCViewer() {
                   height="40"
                   viewBox="0 0 24 24"
                   fill="none"
-                  stroke="rgba(59, 130, 246, 0.6)"
+                  stroke="rgba(16, 185, 129, 0.6)"
                   strokeWidth="1.5"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 >
-                  <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                  <polyline points="9 22 9 12 15 12 15 22" />
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <line x1="12" y1="3" x2="12" y2="21" />
                 </svg>
               </div>
               <h2
@@ -746,7 +721,7 @@ export default function IFCViewer() {
                   fontFamily: 'system-ui, -apple-system, sans-serif',
                 }}
               >
-                Door View Generator
+                Space Floor Plan Generator
               </h2>
               <p
                 style={{
@@ -758,7 +733,7 @@ export default function IFCViewer() {
                   lineHeight: '1.6',
                 }}
               >
-                Generate professional SVG door views from IFC building models.
+                Generate professional SVG floor plans from IFC building models.
                 Upload an architectural IFC file to get started.
               </p>
             </div>
@@ -839,7 +814,7 @@ export default function IFCViewer() {
               <div style={{ width: '40px', height: '1px', backgroundColor: '#333', marginTop: '16px' }} />
               <div style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#666' }}>2</div>
-                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>Find Doors</div>
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>Find Spaces</div>
               </div>
               <div style={{ width: '40px', height: '1px', backgroundColor: '#333', marginTop: '16px' }} />
               <div style={{ textAlign: 'center' }}>
@@ -889,10 +864,10 @@ export default function IFCViewer() {
           </div>
         )}
 
-        {showBatchProcessor && doorContexts.length > 0 && (
+        {showBatchProcessor && spaceContexts.length > 0 && (
           <div className="batch-panel">
-            <DoorPanel
-              doorContexts={doorContexts}
+            <SpacePanel
+              spaceContexts={spaceContexts}
               visibilityManager={visibilityManagerRef.current}
               navigationManager={navigationManagerRef.current}
               onComplete={() => {
