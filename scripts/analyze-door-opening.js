@@ -8,7 +8,14 @@ async function analyzeDoors() {
     // Initialize WASM
     await ifcApi.Init();
 
-    const filePath = path.join(__dirname, '../Flu21_A_AR_51_ARM_0000_A-AR-0000-0001_251119.ifc');
+    // Get IFC file path from command line argument
+    const filePath = process.argv[2];
+
+    if (!filePath) {
+        console.error('Usage: node analyze-door-opening.js <path-to-ifc-file>');
+        console.error('Example: node analyze-door-opening.js ./model.ifc');
+        process.exit(1);
+    }
 
     if (!fs.existsSync(filePath)) {
         console.error(`File not found: ${filePath}`);

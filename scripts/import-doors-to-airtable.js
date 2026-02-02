@@ -180,12 +180,13 @@ async function main() {
     console.log('🚀 IFC Door Import to Airtable\n');
     console.log('='.repeat(50) + '\n');
 
-    // Get IFC file path from command line or use default
-    let filePath = process.argv[2];
+    // Get IFC file path from command line argument
+    const filePath = process.argv[2];
 
     if (!filePath) {
-        // Default to the IFC file in the project root
-        filePath = path.join(__dirname, '../Flu21_A_AR_51_ARM_0000_A-AR-0000-0001_251119.ifc');
+        console.error('❌ Usage: node import-doors-to-airtable.js <path-to-ifc-file>');
+        console.error('   Example: node import-doors-to-airtable.js ./model.ifc');
+        process.exit(1);
     }
 
     if (!fs.existsSync(filePath)) {
