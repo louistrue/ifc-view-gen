@@ -153,6 +153,8 @@ function extractMeshesFromGroup(group: THREE.Group): THREE.Mesh[] {
 
 // IFC categories needed for door SVG generation
 const DOOR_SVG_CATEGORIES = new Set([
+  // Spaces (rooms) - CRITICAL for space analysis
+  'IFCSPACE',
   // Doors and openings
   'IFCDOOR',
   'IFCWINDOW',
@@ -294,25 +296,98 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             const ifcType = getIfcTypeCode(typeName);
 
             // Get geometry with transforms using ItemGeometry API
-            const geometry = await item.getGeometry();
-            if (!geometry) return null;
+            // This can throw for elements with malformed geometry data
+            let geometry;
+            let transforms: THREE.Matrix4[] = [];
+            try {
+              geometry = await item.getGeometry();
+              if (geometry) {
+                // Get world transform matrices - these are the key to correct SVG rendering!
+                transforms = await geometry.getTransform() || [];
+              }
+            } catch (geoApiError) {
+              // Geometry API can fail with RangeError for malformed buffer data
+              const isBufferError = geoApiError instanceof RangeError ||
+                (geoApiError instanceof Error && (
+                  geoApiError.message.includes('Float32Array') ||
+                  geoApiError.message.includes('out-of-bounds') ||
+                  geoApiError.message.includes('out-of-range')
+                ));
 
-            // Get world transform matrices - these are the key to correct SVG rendering!
-            const transforms = await geometry.getTransform();
+              if (isBufferError) {
+                console.debug(`[Fragments] Skipping localId ${localId} (${category}): getGeometry buffer error`);
+              } else {
+                console.warn(`[Fragments] getGeometry failed for localId ${localId}:`, geoApiError);
+              }
+              // For IFCSPACE, continue without geometry - we can still use the bounding box
+              if (category.toUpperCase() !== 'IFCSPACE') {
+                return null;
+              }
+            }
+
+            // For IFCSPACE without geometry, create element with just bounding box
+            if (!geometry && category.toUpperCase() === 'IFCSPACE') {
+              const elementInfo: ElementInfo = {
+                expressID: localId,
+                ifcType: getIfcTypeCode(typeName),
+                typeName,
+                productTypeName,
+                mesh: undefined as any, // IFCSPACE may not have geometry
+                meshes: undefined,
+                boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
+                globalId,
+              };
+              return elementInfo;
+            }
+
+            if (!geometry) return null;
 
             // Get Element object for getMeshes() - direct array access
             const element = fragmentElements[dataIndex];
             if (!element) return null;
 
             // Get meshes from Element.getMeshes()
+            // This can fail with RangeError for elements with malformed geometry (common with IFCSPACE)
             let meshGroup: THREE.Group | null = null;
             try {
               meshGroup = await element.getMeshes();
             } catch (e) {
-              console.warn(`getMeshes failed for localId ${localId}:`, e);
+              // RangeError can occur when the fragments worker tries to construct
+              // Float32Array buffers from malformed geometry data. This is common
+              // for IFCSPACE elements which may have no geometry or corrupt data.
+              const isBufferError = e instanceof RangeError ||
+                (e instanceof Error && (
+                  e.message.includes('Float32Array') ||
+                  e.message.includes('out-of-bounds') ||
+                  e.message.includes('out-of-range') ||
+                  e.message.includes('multiple of')
+                ));
+
+              if (isBufferError) {
+                // Silently skip elements with buffer errors - they have no valid geometry
+                console.debug(`[Fragments] Skipping localId ${localId} (${category}): geometry buffer error`);
+              } else {
+                console.warn(`getMeshes failed for localId ${localId}:`, e);
+              }
+              return null;
             }
 
             if (!meshGroup) {
+              // No mesh group is common for spaces that are spatial containers only
+              if (category.toUpperCase() === 'IFCSPACE') {
+                // For IFCSPACE without mesh group, create element with just bounding box
+                const elementInfo: ElementInfo = {
+                  expressID: localId,
+                  ifcType: getIfcTypeCode(typeName),
+                  typeName,
+                  productTypeName,
+                  mesh: undefined as any, // IFCSPACE may not have geometry
+                  meshes: undefined,
+                  boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
+                  globalId,
+                };
+                return elementInfo;
+              }
               console.warn(`No mesh group for localId ${localId}`);
               return null;
             }
@@ -321,6 +396,21 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             const meshes = extractMeshesFromGroup(meshGroup);
 
             if (meshes.length === 0) {
+              // Empty mesh list is normal for IFCSPACE elements without geometry
+              if (category.toUpperCase() === 'IFCSPACE') {
+                // For IFCSPACE without meshes, create element with just bounding box
+                const elementInfo: ElementInfo = {
+                  expressID: localId,
+                  ifcType: getIfcTypeCode(typeName),
+                  typeName,
+                  productTypeName,
+                  mesh: undefined as any, // IFCSPACE may not have geometry
+                  meshes: undefined,
+                  boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
+                  globalId,
+                };
+                return elementInfo;
+              }
               console.warn(`No meshes extracted from group for localId ${localId}`);
               return null;
             }
@@ -328,29 +418,61 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             // Verify mesh has valid geometry and debug geometry structure
             let hasValidGeometry = false;
             for (const mesh of meshes) {
-              const geo = mesh.geometry;
-              const posAttr = geo?.attributes?.position;
+              try {
+                const geo = mesh.geometry;
+                const posAttr = geo?.attributes?.position;
 
-              // Check for interleaved buffer attributes (Fragments optimization)
-              if (posAttr && 'isInterleavedBufferAttribute' in posAttr) {
-                // Interleaved buffer - need to de-interleave for standard operations
+                // Check for interleaved buffer attributes (Fragments optimization)
+                if (posAttr && 'isInterleavedBufferAttribute' in posAttr) {
+                  // Interleaved buffer - need to de-interleave for standard operations
+                  const count = posAttr.count;
 
-                // Create standard BufferAttribute from interleaved data
-                const count = posAttr.count;
-                const newPositions = new Float32Array(count * 3);
-                for (let v = 0; v < count; v++) {
-                  newPositions[v * 3] = posAttr.getX(v);
-                  newPositions[v * 3 + 1] = posAttr.getY(v);
-                  newPositions[v * 3 + 2] = posAttr.getZ(v);
+                  // Validate count before creating buffer
+                  if (count <= 0 || !Number.isFinite(count)) {
+                    console.debug(`[Fragments] Skipping mesh with invalid vertex count: ${count}`);
+                    continue;
+                  }
+
+                  // Create standard BufferAttribute from interleaved data with bounds checking
+                  const newPositions = new Float32Array(count * 3);
+                  for (let v = 0; v < count; v++) {
+                    try {
+                      newPositions[v * 3] = posAttr.getX(v);
+                      newPositions[v * 3 + 1] = posAttr.getY(v);
+                      newPositions[v * 3 + 2] = posAttr.getZ(v);
+                    } catch (accessError) {
+                      // Buffer access failed - likely malformed data
+                      console.debug(`[Fragments] Buffer access error at vertex ${v}/${count}`);
+                      break;
+                    }
+                  }
+                  geo.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
+                  hasValidGeometry = true;
+                } else if (posAttr?.count > 0) {
+                  hasValidGeometry = true;
                 }
-                geo.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
-                hasValidGeometry = true;
-              } else if (posAttr?.count > 0) {
-                hasValidGeometry = true;
+              } catch (geoError) {
+                // Skip meshes with geometry errors
+                console.debug(`[Fragments] Geometry processing error for mesh:`, geoError);
+                continue;
               }
             }
 
             if (!hasValidGeometry) {
+              if (category.toUpperCase() === 'IFCSPACE') {
+                // For IFCSPACE without valid geometry, create element with just bounding box
+                const elementInfo: ElementInfo = {
+                  expressID: localId,
+                  ifcType: getIfcTypeCode(typeName),
+                  typeName,
+                  productTypeName,
+                  mesh: undefined as any, // IFCSPACE may not have geometry
+                  meshes: undefined,
+                  boundingBox: worldBox && !worldBox.isEmpty() ? worldBox : undefined,
+                  globalId,
+                };
+                return elementInfo;
+              }
               console.warn(`[Fragments] No valid geometry for localId ${localId}`);
             }
 
