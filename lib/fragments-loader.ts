@@ -180,6 +180,11 @@ const DOOR_SVG_CATEGORIES = new Set([
   'IFCJUNCTIONBOX',
   'IFCCABLECARRIERSEGMENT',
   'IFCCABLESEGMENT',
+  // Furniture
+  'IFCFURNISHINGELEMENT',
+  'IFCFURNITURE',
+  // Additional building elements that might contain furniture-like objects
+  'IFCBUILDINGELEMENTPROXY',  // Often used for miscellaneous elements
 ])
 
 /**

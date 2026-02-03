@@ -27,6 +27,39 @@ const DEFAULT_OPTIONS: Required<SpaceSVGRenderOptions> = {
     fontFamily: 'Arial, sans-serif',
 }
 
+// Distinct, non-realistic color palette for different IFC types
+const TYPE_COLOR_PALETTE = [
+    { fill: '#e91e63', stroke: '#ad1457' }, // Pink
+    { fill: '#9c27b0', stroke: '#6a1b9a' }, // Purple
+    { fill: '#673ab7', stroke: '#4527a0' }, // Deep Purple
+    { fill: '#3f51b5', stroke: '#283593' }, // Indigo
+    { fill: '#2196f3', stroke: '#1565c0' }, // Blue
+    { fill: '#00bcd4', stroke: '#00838f' }, // Cyan
+    { fill: '#009688', stroke: '#00695c' }, // Teal
+    { fill: '#4caf50', stroke: '#2e7d32' }, // Green
+    { fill: '#8bc34a', stroke: '#558b2f' }, // Light Green
+    { fill: '#cddc39', stroke: '#9e9d24' }, // Lime
+    { fill: '#ffeb3b', stroke: '#f9a825' }, // Yellow
+    { fill: '#ff9800', stroke: '#ef6c00' }, // Orange
+    { fill: '#ff5722', stroke: '#d84315' }, // Deep Orange
+    { fill: '#607d8b', stroke: '#37474f' }, // Blue Grey
+]
+
+// Global color map for consistent colors across spaces
+const typeColorMap = new Map<string, { fill: string; stroke: string }>()
+let colorIndex = 0
+
+/**
+ * Get a distinct color for an IFC type
+ */
+function getTypeColor(typeName: string): { fill: string; stroke: string } {
+    if (!typeColorMap.has(typeName)) {
+        typeColorMap.set(typeName, TYPE_COLOR_PALETTE[colorIndex % TYPE_COLOR_PALETTE.length])
+        colorIndex++
+    }
+    return typeColorMap.get(typeName)!
+}
+
 interface Bounds2D {
     minX: number
     maxX: number
@@ -37,11 +70,14 @@ interface Bounds2D {
 }
 
 /**
- * Render a floor plan SVG for a single space
+ * Render a floor plan SVG for a single space with all interior elements
+ * This is the new version that matches the test script output exactly
  */
 export function renderSpaceFloorPlan(
     context: SpaceContext,
-    options: SpaceSVGRenderOptions = {}
+    options: SpaceSVGRenderOptions = {},
+    elementsInSpace?: Map<string, ElementInfo[]>,
+    lengthUnitScale: number = 1
 ): string {
     const opts = { ...DEFAULT_OPTIONS, ...options }
     const {
@@ -53,159 +89,265 @@ export function renderSpaceFloorPlan(
         showDoors,
         showWindows,
         showRoomLabel,
-        showGrid,
-        gridSize,
-        floorColor,
-        wallColor,
-        wallFillColor,
-        doorColor,
-        windowColor,
-        dimensionColor,
-        labelColor,
         backgroundColor,
-        lineWidth,
         fontSize,
         fontFamily,
     } = opts
 
-    // Get bounding box for reference dimensions (always shown as dashed)
-    const bbox = context.space.boundingBox
-    if (!bbox) {
-        return createErrorSVG(width, height, 'No bounding box')
+    // Get profile polygon (required)
+    const profilePoints = context.floorPolygon
+    if (!profilePoints || profilePoints.length < 3) {
+        return createErrorSVG(width, height, 'No valid profile polygon')
     }
 
-    const bboxSize = new THREE.Vector3()
-    bbox.getSize(bboxSize)
+    // Get bounding box for reference (optional)
+    const bbox = context.space.boundingBox
+    const bbox2D = context.space.boundingBox2D
 
-    // Detect Y-up vs Z-up coordinate system
-    // Y-up: Y is vertical (ceiling height ~2-4m), floor plan uses X-Z
-    // Z-up: Z is vertical (ceiling height), floor plan uses X-Y
-    const isYUp = bboxSize.y > 1.5 && bboxSize.y < 5 && bboxSize.z > bboxSize.y * 2
+    // Calculate bounds from ONLY profile points (room extent only, not elements)
+    let minX = Infinity, maxX = -Infinity
+    let minY = Infinity, maxY = -Infinity
 
-    // Create bounding box polygon (always rectangular, used for dimensions)
-    const bboxPolygon: THREE.Vector2[] = isYUp ? [
-        new THREE.Vector2(bbox.min.x, bbox.min.z),
-        new THREE.Vector2(bbox.max.x, bbox.min.z),
-        new THREE.Vector2(bbox.max.x, bbox.max.z),
-        new THREE.Vector2(bbox.min.x, bbox.max.z),
-    ] : [
-        new THREE.Vector2(bbox.min.x, bbox.min.y),
-        new THREE.Vector2(bbox.max.x, bbox.min.y),
-        new THREE.Vector2(bbox.max.x, bbox.max.y),
-        new THREE.Vector2(bbox.min.x, bbox.max.y),
-    ]
+    for (const point of profilePoints) {
+        minX = Math.min(minX, point.x)
+        maxX = Math.max(maxX, point.x)
+        minY = Math.min(minY, point.y)
+        maxY = Math.max(maxY, point.y)
+    }
 
-    // Get real floor polygon from geometry if available
-    let realPolygon = context.floorPolygon
-    const hasRealGeometry = realPolygon && realPolygon.length >= 3
+    // Debug: Log profile bounds vs bbox2D to identify coordinate issues
+    const profileWidth = maxX - minX
+    const profileHeight = maxY - minY
+    if (bbox2D) {
+        console.log(`[renderSpaceFloorPlan] Space ${context.spaceId}:`)
+        console.log(`  Profile bounds: X[${minX.toFixed(2)}, ${maxX.toFixed(2)}] Y[${minY.toFixed(2)}, ${maxY.toFixed(2)}]`)
+        console.log(`  Profile dimensions: ${profileWidth.toFixed(2)} × ${profileHeight.toFixed(2)}`)
+        console.log(`  BBox2D dimensions: ${bbox2D.width.toFixed(2)} × ${bbox2D.depth.toFixed(2)}`)
+        console.log(`  BBox2D bounds: X[${bbox2D.min.x.toFixed(2)}, ${bbox2D.max.x.toFixed(2)}] Y[${bbox2D.min.y.toFixed(2)}, ${bbox2D.max.y.toFixed(2)}]`)
+        if (Math.abs(profileWidth - bbox2D.width) > 0.1 || Math.abs(profileHeight - bbox2D.depth) > 0.1) {
+            console.warn(`  WARNING: Profile dimensions don't match bbox2D! This may cause distortion.`)
+        }
+    }
 
-    // If no real geometry, use bounding box for fill
-    const fillPolygon = hasRealGeometry ? realPolygon! : bboxPolygon
+    // Add small padding around profile (5% of dimensions)
+    const padX = (maxX - minX) * 0.05
+    const padY = (maxY - minY) * 0.05
+    minX -= padX
+    maxX += padX
+    minY -= padY
+    maxY += padY
 
-    // Calculate bounds from the larger of the two (usually bounding box)
-    const bounds = calculatePolygonBounds(bboxPolygon)
+    const worldWidth = maxX - minX
+    const worldHeight = maxY - minY
+    const scale = Math.min(
+        (width - margin * 2) / worldWidth,
+        (height - margin * 2) / worldHeight
+    ) * 0.9
 
-    // Calculate scale to fit in viewport with margins
-    const worldWidth = bounds.width + margin * 2
-    const worldHeight = bounds.height + margin * 2
+    const offsetX = (width - worldWidth * scale) / 2
+    const offsetY = (height - worldHeight * scale) / 2
 
-    // Reserve space for labels at bottom
-    const labelReserve = showRoomLabel || showArea ? 60 : 0
-    const viewHeight = height - labelReserve
-
-    const scaleX = width / worldWidth
-    const scaleY = viewHeight / worldHeight
-    const scale = Math.min(scaleX, scaleY) * 0.9 // 90% to leave some padding
-
-    // Center offset
-    const scaledWidth = bounds.width * scale
-    const scaledHeight = bounds.height * scale
-    const offsetX = (width - scaledWidth) / 2
-    const offsetY = (viewHeight - scaledHeight) / 2
-
-    // Transform function: world coords to SVG coords
     const toSVG = (p: THREE.Vector2): { x: number; y: number } => ({
-        x: (p.x - bounds.minX) * scale + offsetX,
-        y: viewHeight - ((p.y - bounds.minY) * scale + offsetY), // Flip Y
+        x: (p.x - minX) * scale + offsetX,
+        y: height - ((p.y - minY) * scale + offsetY), // Flip Y
     })
 
-    // Start building SVG
+    // Build profile path for clipPath
+    const clipProfilePath = profilePoints.map((p, i) => {
+        const svgP = toSVG(p)
+        return i === 0 ? `M ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}` : `L ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
+    }).join(' ') + ' Z'
+
+    // Build SVG with clipPath to cut elements at room boundary
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <defs>
-    <pattern id="grid" width="${gridSize * scale}" height="${gridSize * scale}" patternUnits="userSpaceOnUse">
-      <path d="M ${gridSize * scale} 0 L 0 0 0 ${gridSize * scale}" fill="none" stroke="#ddd" stroke-width="0.5"/>
-    </pattern>
+    <style>
+      .bbox { fill: none; stroke: #ff0000; stroke-width: 2; stroke-dasharray: 8,4; opacity: 0.7; }
+      .profile { fill: #e3f2fd; stroke: #1976d2; stroke-width: 3; }
+      .label { font-family: ${fontFamily}; font-size: ${fontSize}px; fill: #333; }
+    </style>
+    <clipPath id="roomClip">
+      <path d="${clipProfilePath}"/>
+    </clipPath>
   </defs>
   <rect width="100%" height="100%" fill="${backgroundColor}"/>
+  
+  <!-- Bounding box (dashed red) -->
 `
 
-    // Optional grid
-    if (showGrid) {
-        svg += `  <rect width="100%" height="${viewHeight}" fill="url(#grid)"/>\n`
+    if (bbox2D) {
+        const bboxPoints = [
+            new THREE.Vector2(bbox2D.min.x, bbox2D.min.y),
+            new THREE.Vector2(bbox2D.max.x, bbox2D.min.y),
+            new THREE.Vector2(bbox2D.max.x, bbox2D.max.y),
+            new THREE.Vector2(bbox2D.min.x, bbox2D.max.y),
+        ]
+        const bboxPath = bboxPoints.map((p, i) => {
+            const svgP = toSVG(p)
+            return i === 0 ? `M ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}` : `L ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
+        }).join(' ') + ' Z'
+        svg += `  <path d="${bboxPath}" class="bbox"/>\n`
     }
 
-    // Draw floor fill (use real geometry if available, otherwise bounding box)
-    const fillPath = fillPolygon.map((p, i) => {
+    // Profile outline (solid blue)
+    const profilePath = profilePoints.map((p, i) => {
         const svgP = toSVG(p)
         return i === 0 ? `M ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}` : `L ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
     }).join(' ') + ' Z'
+    svg += `  <path d="${profilePath}" class="profile"/>\n`
 
-    svg += `  <path d="${fillPath}" fill="${floorColor}" stroke="none"/>\n`
+    // Render interior elements - clipped to room boundary
+    // Wrap in group with clipPath to cut elements at room outline
+    svg += `  <g clip-path="url(#roomClip)">\n`
 
-    // Draw bounding box with DASHED lines (always shown for reference/dimensions)
-    const bboxPath = bboxPolygon.map((p, i) => {
-        const svgP = toSVG(p)
-        return i === 0 ? `M ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}` : `L ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
-    }).join(' ') + ' Z'
+    if (elementsInSpace && elementsInSpace instanceof Map) {
+        // Sort types by count (render most common first, they'll be in the background)
+        const sortedTypes = Array.from(elementsInSpace.entries())
+            .filter(([, elems]) => elems.length > 0)
+            .sort((a, b) => b[1].length - a[1].length)
 
-    svg += `  <path d="${bboxPath}" fill="none" stroke="${wallColor}" stroke-width="${lineWidth}" stroke-dasharray="8,4" stroke-linejoin="miter"/>\n`
+        for (const [typeName, typeElements] of sortedTypes) {
+            const color = getTypeColor(typeName)
 
-    // Draw real geometry outline with SOLID lines (if we have actual geometry)
-    if (hasRealGeometry) {
-        svg += `  <path d="${fillPath}" fill="none" stroke="${wallColor}" stroke-width="${lineWidth * 2}" stroke-linejoin="miter"/>\n`
-    }
+            // Slabs and coverings should be outline only (no fill)
+            const isSlabType = typeName.toUpperCase().includes('SLAB') ||
+                typeName.toUpperCase().includes('FLOOR') ||
+                typeName.toUpperCase().includes('ROOF') ||
+                typeName.toUpperCase().includes('COVERING')
 
-    // Draw doors
-    if (showDoors && context.boundaryDoors.length > 0) {
-        svg += `  <g id="doors">\n`
-        for (const door of context.boundaryDoors) {
-            svg += renderDoorSymbol(door, toSVG, scale, doorColor, lineWidth, bounds, fillPolygon)
+            // Filter and limit elements
+            const elementsToRender = typeElements
+                .filter(elem => {
+                    if (!elem.boundingBox) return false
+                    const bbox = elem.boundingBox
+                    const size = new THREE.Vector3()
+                    bbox.getSize(size)
+                    const w = Math.abs(size.x)
+                    const h = Math.abs(size.y)
+                    const area = w * h
+                    return area > 0.3 // Minimum area threshold
+                })
+                .slice(0, 100) // Limit per type to keep SVG manageable
+
+            for (const elem of elementsToRender) {
+                if (elem.boundingBox) {
+                    const bbox = elem.boundingBox
+                    const size = new THREE.Vector3()
+                    bbox.getSize(size)
+
+                    // Extract 2D bounds from the 3D bbox and scale to match profile coordinates
+                    // Profile coordinates are in IFC native units (e.g., mm), element bboxes are in meters
+                    // Scale element bboxes by lengthUnitScale to match profile units
+                    const ySize = Math.abs(size.y)
+                    const zSize = Math.abs(size.z)
+                    const isYUp = ySize < zSize // Y-up if Y range is smaller than Z range
+                    const min2D = isYUp
+                        ? new THREE.Vector2(bbox.min.x * lengthUnitScale, bbox.min.z * lengthUnitScale)
+                        : new THREE.Vector2(bbox.min.x * lengthUnitScale, bbox.min.y * lengthUnitScale)
+                    const max2D = isYUp
+                        ? new THREE.Vector2(bbox.max.x * lengthUnitScale, bbox.max.z * lengthUnitScale)
+                        : new THREE.Vector2(bbox.max.x * lengthUnitScale, bbox.max.y * lengthUnitScale)
+
+                    const minP = toSVG(min2D)
+                    const maxP = toSVG(max2D)
+                    const w = Math.abs(maxP.x - minP.x)
+                    const h = Math.abs(maxP.y - minP.y)
+                    if (w > 1 && h > 1) {
+                        if (isSlabType) {
+                            // Slabs: outline only, no fill
+                            svg += `    <rect x="${Math.min(minP.x, maxP.x).toFixed(2)}" y="${Math.min(minP.y, maxP.y).toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="none" stroke="${color.stroke}" stroke-width="2" stroke-dasharray="4,2" opacity="0.8"/>\n`
+                        } else {
+                            // Other elements: filled
+                            svg += `    <rect x="${Math.min(minP.x, maxP.x).toFixed(2)}" y="${Math.min(minP.y, maxP.y).toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="${color.fill}" stroke="${color.stroke}" stroke-width="1" opacity="0.7"/>\n`
+                        }
+                    }
+                }
+            }
         }
-        svg += `  </g>\n`
     }
 
-    // Draw windows
-    if (showWindows && context.boundaryWindows.length > 0) {
-        svg += `  <g id="windows">\n`
-        for (const window of context.boundaryWindows) {
-            svg += renderWindowSymbol(window, toSVG, scale, windowColor, lineWidth, bounds, fillPolygon)
+    svg += `  </g>\n`
+
+    // Labels - Use room number format like test script: space-{expressID}-{name}
+    const roomNumber = `space-${context.space.expressID}-${context.spaceName.replace(/[^a-zA-Z0-9]/g, '_')}`
+    svg += `  <text x="${width / 2}" y="30" text-anchor="middle" class="label" font-weight="bold">${escapeXml(roomNumber)}</text>\n`
+
+    // Use real profile dimensions converted to meters
+    const dimWidth = profileWidth / lengthUnitScale
+    const dimHeight = profileHeight / lengthUnitScale
+    svg += `  <text x="${width / 2}" y="55" text-anchor="middle" class="label" font-size="14">Dimensions: ${dimWidth.toFixed(2)} × ${dimHeight.toFixed(2)} m</text>\n`
+
+    // Compact horizontal legend at bottom with fixed spacing
+    const legendY = height - 25
+    let legendX = 20
+    const legendFontSize = 10
+    const charWidth = 7  // More accurate for sans-serif
+    const iconWidth = 14
+    const iconTextGap = 8
+    const itemGap = 20
+
+    // Outline legend items
+    svg += `  <rect x="${legendX}" y="${legendY - 8}" width="${iconWidth}" height="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1"/>\n`
+    svg += `  <text x="${legendX + iconWidth + iconTextGap}" y="${legendY}" class="label" font-size="${legendFontSize}" fill="#333">Room</text>\n`
+    legendX += iconWidth + iconTextGap + (4 * charWidth) + itemGap // "Room" = 4 chars
+
+    if (bbox2D) {
+        svg += `  <rect x="${legendX}" y="${legendY - 8}" width="${iconWidth}" height="8" fill="none" stroke="#ff0000" stroke-width="1" stroke-dasharray="3,1"/>\n`
+        svg += `  <text x="${legendX + iconWidth + iconTextGap}" y="${legendY}" class="label" font-size="${legendFontSize}" fill="#333">BBox</text>\n`
+        legendX += iconWidth + iconTextGap + (4 * charWidth) + itemGap // "BBox" = 4 chars
+    }
+
+    // Dynamic legend for element types - horizontal, compact
+    if (elementsInSpace && elementsInSpace instanceof Map) {
+        const maxLegendItems = 6 // Limit legend items
+        let itemCount = 0
+
+        // Sort by count and show most common types
+        const sortedTypes = Array.from(elementsInSpace.entries())
+            .filter(([, elems]) => elems.length > 0)
+            .sort((a, b) => b[1].length - a[1].length)
+
+        for (const [typeName, typeElements] of sortedTypes) {
+            if (itemCount >= maxLegendItems) break
+
+            const color = getTypeColor(typeName)
+            const count = typeElements.filter(e => {
+                if (!e.boundingBox) return false
+                const bbox = e.boundingBox
+                const size = new THREE.Vector3()
+                bbox.getSize(size)
+                const w = Math.abs(size.x)
+                const h = Math.abs(size.y)
+                return w * h > 0.3
+            }).length
+
+            if (count > 0) {
+                // Shorten type names
+                const shortName = typeName.replace('StandardCase', '').replace('Element', '')
+                const labelText = `${shortName}(${count})`
+                const textWidth = labelText.length * charWidth
+
+                // Check if this item fits
+                if (legendX + iconWidth + iconTextGap + textWidth > width - 20) break
+
+                // Check if this is a slab/covering type (outline only)
+                const isOutlineType = typeName.toUpperCase().includes('SLAB') ||
+                    typeName.toUpperCase().includes('FLOOR') ||
+                    typeName.toUpperCase().includes('COVERING')
+                if (isOutlineType) {
+                    svg += `  <rect x="${legendX}" y="${legendY - 8}" width="${iconWidth}" height="8" fill="none" stroke="${color.stroke}" stroke-width="1" stroke-dasharray="2,1"/>\n`
+                } else {
+                    svg += `  <rect x="${legendX}" y="${legendY - 8}" width="${iconWidth}" height="8" fill="${color.fill}" stroke="${color.stroke}" stroke-width="0.5"/>\n`
+                }
+                svg += `  <text x="${legendX + iconWidth + iconTextGap}" y="${legendY}" class="label" font-size="9" fill="#333">${escapeXml(labelText)}</text>\n`
+                legendX += iconWidth + iconTextGap + textWidth + itemGap
+                itemCount++
+            }
         }
-        svg += `  </g>\n`
     }
 
-    // Draw dimensions
-    if (showDimensions) {
-        svg += renderDimensions(bounds, toSVG, scale, dimensionColor, fontSize, fontFamily, viewHeight)
-    }
-
-    // Add room label and area at bottom
-    if (showRoomLabel || showArea) {
-        const centerX = width / 2
-        let currentY = viewHeight + 25
-
-        if (showRoomLabel) {
-            svg += `  <text x="${centerX}" y="${currentY}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize + 2}" font-weight="bold" fill="${labelColor}">${escapeXml(context.spaceName)}</text>\n`
-            currentY += fontSize + 8
-        }
-
-        if (showArea && context.space.grossFloorArea) {
-            const area = context.space.grossFloorArea.toFixed(2)
-            svg += `  <text x="${centerX}" y="${currentY}" text-anchor="middle" dominant-baseline="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="${dimensionColor}">${area} m²</text>\n`
-        }
-    }
-
-    svg += '</svg>'
+    svg += `</svg>`
     return svg
 }
 

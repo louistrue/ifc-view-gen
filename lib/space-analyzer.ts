@@ -2,6 +2,8 @@ import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
 import type { SpaceInfo, SpaceContext, SpaceFilterOptions } from './ifc-space-types'
 import type { SpatialNode } from './spatial-structure'
+import { extractSpaceProfileOutlines, extractLengthUnitScale } from './ifc-loader'
+import type { IfcAPI } from 'web-ifc'
 
 // ============================================
 // TYPE CHECKING FUNCTIONS
@@ -165,10 +167,14 @@ function buildStoreyMap(spatialNode: SpatialNode | null, map: StoreyMap = new Ma
 
 /**
  * Analyze all spaces in the model and find their context
+ * @param model - The loaded IFC model (may not have api/modelID if loaded via fragments)
+ * @param spatialStructure - Optional spatial structure tree
+ * @param originalFile - Optional original IFC file (needed if model.api is not available)
  */
 export async function analyzeSpaces(
     model: LoadedIFCModel,
-    spatialStructure?: SpatialNode | null
+    spatialStructure?: SpatialNode | null,
+    originalFile?: File
 ): Promise<SpaceContext[]> {
     console.log('[SpaceAnalyzer] Starting space analysis...')
     console.log('[SpaceAnalyzer] Total elements in model:', model.elements.length)
@@ -212,6 +218,66 @@ export async function analyzeSpaces(
     console.log('  - Windows:', windows.length)
     console.log('  - Furniture:', furniture.length)
 
+    // Extract profile outlines for all spaces (if model is still open)
+    const spaceProfiles = new Map<number, THREE.Vector2[]>()
+    try {
+        console.log('[SpaceAnalyzer] Extracting space profile outlines...')
+
+        // If model doesn't have API (fragments loader), temporarily open IFC file
+        let tempApi: IfcAPI | null = null
+        let tempModelID: number | null = null
+        let apiToUse = model.api
+        let modelIDToUse = model.modelID
+
+        if (!apiToUse && originalFile) {
+            console.log('[SpaceAnalyzer] Model API not available, temporarily opening IFC file for profile extraction...')
+            try {
+                const { loadIFCModelWithMetadata } = await import('./ifc-loader')
+                const tempModel = await loadIFCModelWithMetadata(originalFile)
+                tempApi = tempModel.api
+                tempModelID = tempModel.modelID
+                apiToUse = tempApi
+                modelIDToUse = tempModelID
+            } catch (error) {
+                console.warn('[SpaceAnalyzer] Failed to open IFC file for profile extraction:', error)
+            }
+        }
+
+        if (apiToUse && modelIDToUse !== undefined) {
+            for (const spaceElement of spaces) {
+                try {
+                    const profile = await extractSpaceProfileOutlines(
+                        apiToUse,
+                        modelIDToUse,
+                        spaceElement.expressID
+                    )
+                    if (profile && profile.length >= 3) {
+                        spaceProfiles.set(spaceElement.expressID, profile)
+                        console.log(`[SpaceAnalyzer] Extracted ${profile.length}-point profile for space ${spaceElement.expressID}`)
+                    }
+                } catch (error) {
+                    // Profile extraction failed, will fall back to mesh/bounding box
+                    console.warn(`[SpaceAnalyzer] Failed to extract profile for space ${spaceElement.expressID}:`, error)
+                }
+            }
+            console.log(`[SpaceAnalyzer] Extracted ${spaceProfiles.size} space profiles`)
+
+            // Clean up temporary API if we opened it
+            if (tempApi && tempModelID !== null) {
+                try {
+                    tempApi.CloseModel(tempModelID)
+                    console.log('[SpaceAnalyzer] Closed temporary IFC model')
+                } catch (error) {
+                    console.warn('[SpaceAnalyzer] Error closing temporary model:', error)
+                }
+            }
+        } else {
+            console.warn('[SpaceAnalyzer] No API available for profile extraction, using fallback methods')
+        }
+    } catch (error) {
+        console.warn('[SpaceAnalyzer] Profile extraction failed (model may be closed), using fallback methods:', error)
+    }
+
     // Analyze each space
     const spaceContexts: SpaceContext[] = []
 
@@ -222,7 +288,8 @@ export async function analyzeSpaces(
             doors,
             windows,
             furniture,
-            storeyMap
+            storeyMap,
+            spaceProfiles.get(spaceElement.expressID)
         )
         if (context) {
             spaceContexts.push(context)
@@ -248,7 +315,8 @@ function analyzeSpace(
     doors: ElementInfo[],
     windows: ElementInfo[],
     furniture: ElementInfo[],
-    storeyMap: StoreyMap
+    storeyMap: StoreyMap,
+    profileOutline?: THREE.Vector2[]
 ): SpaceContext | null {
     // Get space bounding box
     const bbox = space.boundingBox || calculateBoundingBox(space)
@@ -267,7 +335,8 @@ function analyzeSpace(
     const containedElements = findContainedElements(space, furniture)
 
     // Extract floor polygon from space geometry
-    const floorPolygon = extractFloorPolygon(space)
+    // Priority: 1) Profile outline (real geometry), 2) Mesh extraction, 3) Bounding box
+    const floorPolygon = profileOutline || extractFloorPolygon(space)
 
     // Get storey name from spatial structure
     const storeyName = storeyMap.get(space.expressID) || null
@@ -591,6 +660,292 @@ function removeDuplicatePoints(points: THREE.Vector2[]): THREE.Vector2[] {
 // ============================================
 // MESH COLLECTION FOR SVG RENDERING
 // ============================================
+
+/**
+ * Extract space height range from ObjectPlacement using IFC Z coordinate
+ * IFC files are natively Z-up, so height is always Z coordinate
+ */
+function extractSpaceHeightRange(
+    api: IfcAPI,
+    modelID: number,
+    space: ElementInfo,
+    lengthUnitScale: number
+): { minHeight: number; maxHeight: number } | null {
+    try {
+        const spaceEntity = api.GetLine(modelID, space.expressID)
+        if (!spaceEntity) return null
+
+        const objectPlacementRef = (spaceEntity as any).ObjectPlacement
+        if (objectPlacementRef?.value) {
+            const placement = api.GetLine(modelID, objectPlacementRef.value)
+            if (placement?.RelativePlacement?.value) {
+                const axisPlacement = api.GetLine(modelID, (placement as any).RelativePlacement.value)
+                if (axisPlacement?.Location?.value) {
+                    const location = api.GetLine(modelID, (axisPlacement as any).Location.value)
+                    if (location?.Coordinates) {
+                        const coords = (location as any).Coordinates
+                        let coordArray: number[] = []
+                        if (Array.isArray(coords)) {
+                            coordArray = coords.map((c: any) => {
+                                if (typeof c === 'number') return c
+                                if (c && typeof c === 'object' && '_representationValue' in c) {
+                                    return typeof c._representationValue === 'number' ? c._representationValue : parseFloat(c._representationValue || '0')
+                                }
+                                return parseFloat(c || '0')
+                            })
+                        }
+
+                        if (coordArray.length >= 3) {
+                            // IFC files are natively Z-up, so height is always Z coordinate (coordArray[2])
+                            // Even though web-ifc converts to Y-up internally, ObjectPlacement is read directly from IFC
+                            // Need to scale by lengthUnitScale to match element coordinates
+                            const spaceZ = coordArray[2] * lengthUnitScale
+                            // Typical room height is 2.5-4m (scaled to model units)
+                            const typicalHeight = 3.0 * lengthUnitScale
+                            return {
+                                minHeight: spaceZ,
+                                maxHeight: spaceZ + typicalHeight
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        // Couldn't get placement, return null
+    }
+    return null
+}
+
+/**
+ * Check if an element's bounding box intersects (is partially inside) a space polygon
+ */
+function isElementInSpace(
+    elementBbox: { min: THREE.Vector2; max: THREE.Vector2 },
+    spacePolygon: THREE.Vector2[],
+    spaceBbox: { min: THREE.Vector2; max: THREE.Vector2 }
+): boolean {
+    if (!elementBbox || !spaceBbox) return false
+
+    // Quick bounding box check first - if bboxes don't overlap, element can't be in space
+    if (elementBbox.max.x < spaceBbox.min.x || elementBbox.min.x > spaceBbox.max.x ||
+        elementBbox.max.y < spaceBbox.min.y || elementBbox.min.y > spaceBbox.max.y) {
+        return false
+    }
+
+    // Get element bbox corners
+    const corners = [
+        new THREE.Vector2(elementBbox.min.x, elementBbox.min.y), // bottom-left
+        new THREE.Vector2(elementBbox.max.x, elementBbox.min.y), // bottom-right
+        new THREE.Vector2(elementBbox.max.x, elementBbox.max.y), // top-right
+        new THREE.Vector2(elementBbox.min.x, elementBbox.max.y)  // top-left
+    ]
+
+    // Check if any corner of element bbox is inside the polygon
+    const hasCornerInside = corners.some(corner => pointInPolygon(corner, spacePolygon))
+    if (hasCornerInside) return true
+
+    // Check if any edge of element bbox intersects any edge of polygon
+    const elementEdges = [
+        [corners[0], corners[1]], // bottom edge
+        [corners[1], corners[2]], // right edge
+        [corners[2], corners[3]], // top edge
+        [corners[3], corners[0]]  // left edge
+    ]
+
+    // Check intersection with polygon edges
+    for (let i = 0; i < elementEdges.length; i++) {
+        const edge1 = elementEdges[i]
+        for (let j = 0, k = spacePolygon.length - 1; j < spacePolygon.length; k = j++) {
+            const edge2 = [spacePolygon[k], spacePolygon[j]]
+            if (segmentsIntersect(edge1[0], edge1[1], edge2[0], edge2[1])) {
+                return true
+            }
+        }
+    }
+
+    // Check if element bbox completely contains the polygon (all polygon points inside bbox)
+    const allPolygonPointsInside = spacePolygon.every(point =>
+        point.x >= elementBbox.min.x && point.x <= elementBbox.max.x &&
+        point.y >= elementBbox.min.y && point.y <= elementBbox.max.y
+    )
+    if (allPolygonPointsInside && spacePolygon.length > 0) {
+        return true
+    }
+
+    return false
+}
+
+/**
+ * Check if two line segments intersect
+ */
+function segmentsIntersect(p1: THREE.Vector2, p2: THREE.Vector2, p3: THREE.Vector2, p4: THREE.Vector2): boolean {
+    const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x)
+    if (Math.abs(d) < 1e-10) return false // Parallel lines
+
+    const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d
+    const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d
+
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1
+}
+
+/**
+ * Point-in-polygon test using ray casting algorithm
+ */
+function pointInPolygon(point: THREE.Vector2, polygon: THREE.Vector2[]): boolean {
+    let inside = false
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].x, yi = polygon[i].y
+        const xj = polygon[j].x, yj = polygon[j].y
+
+        const intersect = ((yi > point.y) !== (yj > point.y)) &&
+            (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)
+        if (intersect) inside = !inside
+    }
+    return inside
+}
+
+/**
+ * Get all elements inside a space, filtered by height and polygon intersection
+ * Returns elements grouped by IFC type name
+ */
+export function getElementsInSpace(
+    spaceContext: SpaceContext,
+    allElements: ElementInfo[],
+    api: IfcAPI | null,
+    modelID: number,
+    lengthUnitScale: number,
+    isYUpCoordinateSystem: boolean
+): Map<string, ElementInfo[]> {
+    const result = new Map<string, ElementInfo[]>()
+
+    if (!spaceContext.floorPolygon || spaceContext.floorPolygon.length < 3) {
+        return result // No valid polygon, return empty
+    }
+
+    const spacePolygon = spaceContext.floorPolygon
+
+    // Calculate space bounding box for quick rejection
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const point of spacePolygon) {
+        minX = Math.min(minX, point.x)
+        maxX = Math.max(maxX, point.x)
+        minY = Math.min(minY, point.y)
+        maxY = Math.max(maxY, point.y)
+    }
+    const spaceBbox = {
+        min: new THREE.Vector2(minX, minY),
+        max: new THREE.Vector2(maxX, maxY)
+    }
+
+    // Get space height range (may be null if API not available)
+    const spaceHeightRange = api && modelID >= 0
+        ? extractSpaceHeightRange(api, modelID, spaceContext.space, lengthUnitScale)
+        : null
+
+    // Debug: Log element filtering
+    console.log(`[getElementsInSpace] Space ${spaceContext.spaceId} (expressID: ${spaceContext.space.expressID}):`)
+    console.log(`  Total elements to check: ${allElements.length}`)
+    console.log(`  Space polygon points: ${spacePolygon.length}`)
+    console.log(`  Space height range:`, spaceHeightRange)
+
+    // Debug: Log element type distribution
+    const typeCounts = new Map<string, number>()
+    for (const element of allElements) {
+        if (isSpaceType(element.typeName)) continue
+        const type = element.typeName || 'Unknown'
+        typeCounts.set(type, (typeCounts.get(type) || 0) + 1)
+    }
+    console.log(`  Element types in model:`, Array.from(typeCounts.entries()).map(([t, c]) => `${t}(${c})`).join(', '))
+
+    let checkedCount = 0
+    let skippedNoBbox = 0
+    let skippedHeight = 0
+    let skippedPolygon = 0
+    let furnitureCount = 0
+
+    // Filter elements
+    for (const element of allElements) {
+        // Skip spaces themselves
+        if (isSpaceType(element.typeName)) continue
+
+        // Skip if no bounding box
+        if (!element.boundingBox) {
+            skippedNoBbox++
+            continue
+        }
+
+        checkedCount++
+
+        // Convert element 3D bounding box to 2D floor plan coordinates
+        const bbox3D = element.boundingBox
+        let bbox2D: { min: THREE.Vector2; max: THREE.Vector2 } | null = null
+        let heightRange: { minHeight: number; maxHeight: number } | null = null
+
+        if (isYUpCoordinateSystem) {
+            // Y-up: floor plan is X-Z plane, Y is height
+            bbox2D = {
+                min: new THREE.Vector2(bbox3D.min.x * lengthUnitScale, bbox3D.min.z * lengthUnitScale),
+                max: new THREE.Vector2(bbox3D.max.x * lengthUnitScale, bbox3D.max.z * lengthUnitScale)
+            }
+            heightRange = {
+                minHeight: bbox3D.min.y * lengthUnitScale,
+                maxHeight: bbox3D.max.y * lengthUnitScale
+            }
+        } else {
+            // Z-up: floor plan is X-Y plane, Z is height
+            bbox2D = {
+                min: new THREE.Vector2(bbox3D.min.x * lengthUnitScale, bbox3D.min.y * lengthUnitScale),
+                max: new THREE.Vector2(bbox3D.max.x * lengthUnitScale, bbox3D.max.y * lengthUnitScale)
+            }
+            heightRange = {
+                minHeight: bbox3D.min.z * lengthUnitScale,
+                maxHeight: bbox3D.max.z * lengthUnitScale
+            }
+        }
+
+        // HEIGHT FILTER: Only include elements that overlap vertically with the space
+        if (spaceHeightRange && heightRange) {
+            const heightOverlap = !(
+                heightRange.maxHeight < spaceHeightRange.minHeight - 0.5 || // element below space
+                heightRange.minHeight > spaceHeightRange.maxHeight + 0.5    // element above space
+            )
+            if (!heightOverlap) {
+                skippedHeight++
+                continue // Skip elements not on this floor
+            }
+        }
+
+        // SPATIAL FILTER: Check if element intersects space polygon
+        if (!isElementInSpace(bbox2D, spacePolygon, spaceBbox)) {
+            skippedPolygon++
+            continue
+        }
+
+        // Add to result grouped by type
+        const typeName = element.typeName || 'Unknown'
+        if (!result.has(typeName)) {
+            result.set(typeName, [])
+        }
+        result.get(typeName)!.push(element)
+
+        // Count furniture
+        if (typeName.toUpperCase().includes('FURNISHING') || typeName.toUpperCase().includes('FURNITURE')) {
+            furnitureCount++
+        }
+    }
+
+    // Debug: Log filtering results
+    console.log(`  Elements checked: ${checkedCount}`)
+    console.log(`  Skipped (no bbox): ${skippedNoBbox}`)
+    console.log(`  Skipped (height): ${skippedHeight}`)
+    console.log(`  Skipped (polygon): ${skippedPolygon}`)
+    console.log(`  Elements in space: ${Array.from(result.values()).reduce((sum, arr) => sum + arr.length, 0)}`)
+    console.log(`  Furniture elements: ${furnitureCount}`)
+    console.log(`  Element types: ${Array.from(result.keys()).join(', ')}`)
+
+    return result
+}
 
 /**
  * Get all meshes for a space context for SVG rendering

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import type { SpaceContext } from '@/lib/ifc-space-types'
-import { filterSpaces } from '@/lib/space-analyzer'
+import { filterSpaces, getElementsInSpace } from '@/lib/space-analyzer'
 import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
 import type { NavigationManager } from '@/lib/navigation-manager'
 import JSZip from 'jszip'
@@ -14,6 +14,13 @@ interface SpacePanelProps {
     visibilityManager: ElementVisibilityManager | null
     navigationManager: NavigationManager | null
     modelSource?: string
+    modelMetadata?: {
+        api: any
+        modelID: number
+        elements: any[]
+        lengthUnitScale: number
+        isYUp: boolean
+    } | null
     onComplete?: () => void
 }
 
@@ -26,6 +33,7 @@ export default function SpacePanel({
     visibilityManager,
     navigationManager,
     modelSource,
+    modelMetadata,
     onComplete,
 }: SpacePanelProps) {
     // Filter state
@@ -261,12 +269,23 @@ export default function SpacePanel({
     // Show single space preview
     const showSingleSpace = useCallback(async (context: SpaceContext) => {
         try {
-            const svg = renderSpaceFloorPlan(context, options)
+            let elementsInSpace: Map<string, any[]> | undefined
+            if (modelMetadata) {
+                elementsInSpace = getElementsInSpace(
+                    context,
+                    modelMetadata.elements,
+                    modelMetadata.api,
+                    modelMetadata.modelID,
+                    modelMetadata.lengthUnitScale,
+                    modelMetadata.isYUp
+                )
+            }
+            const svg = renderSpaceFloorPlan(context, options, elementsInSpace, modelMetadata?.lengthUnitScale || 1)
             setModalImage({ svg, spaceId: context.spaceId, view: 'Floor Plan' })
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to render SVG')
         }
-    }, [options])
+    }, [options, modelMetadata])
 
     // Download ZIP
     const performDownload = useCallback(async () => {
@@ -290,7 +309,18 @@ export default function SpacePanel({
                 setCurrentIndex(i + 1)
 
                 try {
-                    const { floorPlan } = await renderSpaceViews(context, options)
+                    let elementsInSpace: Map<string, any[]> | undefined
+                    if (modelMetadata) {
+                        elementsInSpace = getElementsInSpace(
+                            context,
+                            modelMetadata.elements,
+                            modelMetadata.api,
+                            modelMetadata.modelID,
+                            modelMetadata.lengthUnitScale,
+                            modelMetadata.isYUp
+                        )
+                    }
+                    const floorPlan = renderSpaceFloorPlan(context, options, elementsInSpace, modelMetadata?.lengthUnitScale || 1)
                     const safeName = context.spaceName.replace(/[^a-zA-Z0-9-_]/g, '_')
                     zip.file(`${safeName}_${context.spaceId}_floor_plan.svg`, floorPlan)
                     setProgress(((i + 1) / total) * 100)
@@ -317,7 +347,7 @@ export default function SpacePanel({
         } finally {
             setPendingAction(null)
         }
-    }, [spacesToProcess, options, onComplete])
+    }, [spacesToProcess, options, modelMetadata, onComplete])
 
     // Upload to Airtable
     const performUpload = useCallback(async () => {
@@ -341,7 +371,18 @@ export default function SpacePanel({
             setAirtableStatus(prev => ({ ...prev, [space.spaceId]: 'sending' }))
 
             try {
-                const { floorPlan } = await renderSpaceViews(space, options)
+                let elementsInSpace: Map<string, any[]> | undefined
+                if (modelMetadata) {
+                    elementsInSpace = getElementsInSpace(
+                        space,
+                        modelMetadata.elements,
+                        modelMetadata.api,
+                        modelMetadata.modelID,
+                        modelMetadata.lengthUnitScale,
+                        modelMetadata.isYUp
+                    )
+                }
+                const floorPlan = renderSpaceFloorPlan(space, options, elementsInSpace, modelMetadata?.lengthUnitScale || 1)
                 const svgToDataUrl = (svg: string) =>
                     `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
 
@@ -394,7 +435,7 @@ export default function SpacePanel({
             setIsProcessing(false)
             setPendingAction(null)
         }
-    }, [spacesToProcess, options, modelSource, onComplete])
+    }, [spacesToProcess, options, modelSource, modelMetadata, onComplete])
 
     const initiateAction = (action: 'download' | 'upload') => {
         if (spacesToProcess.length > 10) {

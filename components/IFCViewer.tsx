@@ -5,6 +5,7 @@ import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { analyzeSpaces } from '@/lib/space-analyzer'
 import type { SpaceContext } from '@/lib/ifc-space-types'
+import { extractLengthUnitScale } from '@/lib/ifc-loader'
 import SpacePanel from './SpacePanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, type SpatialNode } from '@/lib/spatial-structure'
@@ -38,6 +39,13 @@ export default function IFCViewer() {
   const [error, setError] = useState<string | null>(null)
   const [spaceContexts, setSpaceContexts] = useState<SpaceContext[]>([])
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
+  const [modelMetadata, setModelMetadata] = useState<{
+    api: any
+    modelID: number
+    elements: any[]
+    lengthUnitScale: number
+    isYUp: boolean
+  } | null>(null)
 
   // File names for display
   const [archFileName, setArchFileName] = useState<string>('')
@@ -498,10 +506,50 @@ export default function IFCViewer() {
         console.log('[IFCViewer] Starting space analysis...')
         console.log('[IFCViewer] Model has', loadedModelRef.current.elements.length, 'elements')
 
+        // Extract length unit scale (may need to temporarily open file if API not available)
+        let lengthUnitScale = 1.0
+        if (loadedModelRef.current.api && loadedModelRef.current.modelID !== undefined) {
+          lengthUnitScale = extractLengthUnitScale(loadedModelRef.current.api, loadedModelRef.current.modelID)
+        } else if (archFileRef.current) {
+          // Temporarily open file to extract unit scale
+          try {
+            const { loadIFCModelWithMetadata } = await import('@/lib/ifc-loader')
+            const tempModel = await loadIFCModelWithMetadata(archFileRef.current)
+            lengthUnitScale = extractLengthUnitScale(tempModel.api, tempModel.modelID)
+            tempModel.api.CloseModel(tempModel.modelID)
+          } catch (error) {
+            console.warn('[IFCViewer] Failed to extract length unit scale:', error)
+          }
+        }
+        console.log('[IFCViewer] Length unit scale:', lengthUnitScale)
+
+        // Determine coordinate system (Y-up vs Z-up) by comparing Y and Z ranges
+        // Use the group that was added to the scene (which is centered)
+        const modelGroup = modelGroupRef.current || loadedModelRef.current.group
+        const bbox = new THREE.Box3().setFromObject(modelGroup)
+        const size = bbox.getSize(new THREE.Vector3())
+        const yRange = Math.abs(size.y)
+        const zRange = Math.abs(size.z)
+        const isYUp = yRange < zRange
+        console.log('[IFCViewer] Coordinate system:', isYUp ? 'Y-up' : 'Z-up', `(Y range: ${yRange.toFixed(2)}, Z range: ${zRange.toFixed(2)})`)
+
+        // Store model metadata for SpacePanel
+        // Note: api/modelID may be undefined if using fragments loader
+        // SpacePanel will need to temporarily open the file if needed
+        setModelMetadata({
+          api: loadedModelRef.current.api || null,
+          modelID: loadedModelRef.current.modelID !== undefined ? loadedModelRef.current.modelID : -1,
+          elements: loadedModelRef.current.elements,
+          lengthUnitScale,
+          isYUp,
+        })
+
         // Pass spatial structure to extract storey names for spaces
+        // Also pass the original file in case API is not available (fragments loader)
         const contexts = await analyzeSpaces(
           loadedModelRef.current,
-          spatialStructureRef.current  // Use ref for immediate access
+          spatialStructureRef.current,  // Use ref for immediate access
+          archFileRef.current || undefined  // Pass file for profile extraction if needed
         )
 
         console.log('[IFCViewer] Space analysis returned', contexts.length, 'spaces')
@@ -876,6 +924,7 @@ export default function IFCViewer() {
                 spaceContexts={spaceContexts}
                 visibilityManager={visibilityManagerRef.current}
                 navigationManager={navigationManagerRef.current}
+                modelMetadata={modelMetadata}
                 onComplete={() => {
                   // Optional callback when export completes
                 }}
