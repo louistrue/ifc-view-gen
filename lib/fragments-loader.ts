@@ -151,7 +151,7 @@ function extractMeshesFromGroup(group: THREE.Group): THREE.Mesh[] {
   return meshes;
 }
 
-// IFC categories needed for door SVG generation
+// IFC categories needed for door SVG generation and room analysis
 const DOOR_SVG_CATEGORIES = new Set([
   // Doors and openings
   'IFCDOOR',
@@ -161,6 +161,8 @@ const DOOR_SVG_CATEGORIES = new Set([
   'IFCWALL',
   'IFCWALLSTANDARDCASE',
   'IFCCURTAINWALL',
+  // Rooms/Spaces - CRITICAL for room outline extraction
+  'IFCSPACE',
   // Context
   'IFCSLAB',
   // Electrical devices (all types)
@@ -192,6 +194,14 @@ const DOOR_SVG_CATEGORIES = new Set([
 async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories: boolean = true, originalFile?: File): Promise<ElementInfo[]> {
   const elements: ElementInfo[] = [];
 
+  // Diagnostic counters for space/room geometry
+  const diagnostics = {
+    spacesFound: 0,
+    spacesWithGeometry: 0,
+    spacesWithMeshes: 0,
+    spacesMeshErrors: [] as string[],
+  };
+
   try {
     // Get all categories (IFC class names) and items in parallel
     const [categories, items, localIdsWithGeometry, itemCategories] = await Promise.all([
@@ -200,6 +210,10 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
       fragmentsModel.getItemsIdsWithGeometry(),
       fragmentsModel.getItemsWithGeometryCategories(),
     ]);
+
+    console.log('[FragmentsLoader] Starting metadata extraction...');
+    console.log('[FragmentsLoader] Total items with geometry:', items.length);
+    console.log('[FragmentsLoader] Categories found:', Array.from(new Set(itemCategories)).join(', '));
 
     if (items.length === 0) {
       console.warn('No items with geometry found in fragments model');
@@ -286,6 +300,12 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
 
             // IFC class name (e.g., "IFCDOOR")
             const typeName = category;
+            const isSpace = typeName.toUpperCase() === 'IFCSPACE';
+
+            // Track space diagnostics
+            if (isSpace) {
+              diagnostics.spacesFound++;
+            }
 
             // Product type name from IfcRelDefinesByType (e.g., "Door Type A")
             const productTypeName = productTypeMap.get(localId);
@@ -295,24 +315,45 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
 
             // Get geometry with transforms using ItemGeometry API
             const geometry = await item.getGeometry();
-            if (!geometry) return null;
+            if (!geometry) {
+              if (isSpace) {
+                diagnostics.spacesMeshErrors.push(`Space ${localId}: no geometry from getGeometry()`);
+              }
+              return null;
+            }
+
+            if (isSpace) {
+              diagnostics.spacesWithGeometry++;
+            }
 
             // Get world transform matrices - these are the key to correct SVG rendering!
             const transforms = await geometry.getTransform();
 
             // Get Element object for getMeshes() - direct array access
             const element = fragmentElements[dataIndex];
-            if (!element) return null;
+            if (!element) {
+              if (isSpace) {
+                diagnostics.spacesMeshErrors.push(`Space ${localId}: no element object`);
+              }
+              return null;
+            }
 
             // Get meshes from Element.getMeshes()
             let meshGroup: THREE.Group | null = null;
             try {
               meshGroup = await element.getMeshes();
             } catch (e) {
+              const errorMsg = e instanceof Error ? e.message : String(e);
+              if (isSpace) {
+                diagnostics.spacesMeshErrors.push(`Space ${localId}: getMeshes error - ${errorMsg}`);
+              }
               console.warn(`getMeshes failed for localId ${localId}:`, e);
             }
 
             if (!meshGroup) {
+              if (isSpace) {
+                diagnostics.spacesMeshErrors.push(`Space ${localId}: getMeshes returned null`);
+              }
               console.warn(`No mesh group for localId ${localId}`);
               return null;
             }
@@ -321,8 +362,22 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             const meshes = extractMeshesFromGroup(meshGroup);
 
             if (meshes.length === 0) {
+              if (isSpace) {
+                diagnostics.spacesMeshErrors.push(`Space ${localId}: no meshes extracted from group`);
+              }
               console.warn(`No meshes extracted from group for localId ${localId}`);
               return null;
+            }
+
+            // Log space mesh details for diagnostics
+            if (isSpace) {
+              diagnostics.spacesWithMeshes++;
+              const totalVerts = meshes.reduce((sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0);
+              console.log(`[FragmentsLoader] IFCSPACE ${localId} extracted: ${meshes.length} meshes, ${totalVerts} total vertices`);
+              if (worldBox) {
+                const size = worldBox.getSize(new THREE.Vector3());
+                console.log(`[FragmentsLoader] IFCSPACE ${localId} bounding box: ${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(2)}m`);
+              }
             }
 
             // Verify mesh has valid geometry and debug geometry structure
@@ -419,6 +474,17 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
       });
     }
 
+
+    // Log space/room geometry extraction summary
+    console.log('[FragmentsLoader] === SPACE/ROOM GEOMETRY EXTRACTION SUMMARY ===');
+    console.log(`[FragmentsLoader] Spaces found in model: ${diagnostics.spacesFound}`);
+    console.log(`[FragmentsLoader] Spaces with geometry: ${diagnostics.spacesWithGeometry}`);
+    console.log(`[FragmentsLoader] Spaces with meshes extracted: ${diagnostics.spacesWithMeshes}`);
+    if (diagnostics.spacesMeshErrors.length > 0) {
+      console.warn('[FragmentsLoader] Space mesh extraction errors:');
+      diagnostics.spacesMeshErrors.forEach(err => console.warn(`  - ${err}`));
+    }
+    console.log('[FragmentsLoader] =============================================');
 
   } catch (error) {
     console.error('Failed to extract metadata from fragments:', error);

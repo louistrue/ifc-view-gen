@@ -5,6 +5,7 @@ import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
+import { analyzeSpaces, createRoomOutline3D, type SpaceContext } from '@/lib/space-analyzer'
 import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, type SpatialNode } from '@/lib/spatial-structure'
@@ -37,6 +38,8 @@ export default function IFCViewer() {
   const [loadingStage, setLoadingStage] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [doorContexts, setDoorContexts] = useState<DoorContext[]>([])
+  const [spaceContexts, setSpaceContexts] = useState<SpaceContext[]>([])
+  const roomOutlinesGroupRef = useRef<THREE.Group | null>(null)
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
 
   // File names for display
@@ -311,7 +314,22 @@ export default function IFCViewer() {
           modelGroupRef.current = null
         }
 
+        // Remove previous room outlines
+        if (roomOutlinesGroupRef.current && sceneRef.current) {
+          sceneRef.current.remove(roomOutlinesGroupRef.current)
+          roomOutlinesGroupRef.current.traverse((child) => {
+            if (child instanceof THREE.Line || child instanceof THREE.LineLoop) {
+              child.geometry.dispose()
+              if (child.material instanceof THREE.Material) {
+                child.material.dispose()
+              }
+            }
+          })
+          roomOutlinesGroupRef.current = null
+        }
+
         loadedModelRef.current = null
+        setSpaceContexts([])
 
         // Load model using fragments (10x faster!)
         setLoadingStage('Starting...')
@@ -526,6 +544,44 @@ export default function IFCViewer() {
         }
 
         setDoorContexts(contexts)
+
+        // Analyze spaces/rooms for room outline visualization
+        setLoadingStage('Analyzing rooms...')
+        const spaces = analyzeSpaces(
+          loadedModelRef.current.elements,
+          spatialStructureRef.current
+        )
+        setSpaceContexts(spaces)
+
+        // Add room outlines to the 3D scene
+        if (spaces.length > 0 && sceneRef.current) {
+          // Remove previous room outlines
+          if (roomOutlinesGroupRef.current) {
+            sceneRef.current.remove(roomOutlinesGroupRef.current)
+            roomOutlinesGroupRef.current = null
+          }
+
+          // Create new group for room outlines
+          const roomOutlinesGroup = new THREE.Group()
+          roomOutlinesGroup.name = 'RoomOutlines'
+
+          for (const space of spaces) {
+            try {
+              const outline = createRoomOutline3D(space, {
+                color: space.outlineSource === 'geometry' ? 0x4CAF50 : 0x2196F3,
+                linewidth: 2,
+                height: 0.02 // Slight offset above floor
+              })
+              roomOutlinesGroup.add(outline)
+            } catch (err) {
+              console.warn(`Failed to create room outline for space ${space.space.expressID}:`, err)
+            }
+          }
+
+          sceneRef.current.add(roomOutlinesGroup)
+          roomOutlinesGroupRef.current = roomOutlinesGroup
+          console.log(`[IFCViewer] Added ${spaces.length} room outlines to scene (${spaces.filter(s => s.outlineSource === 'geometry').length} from geometry, ${spaces.filter(s => s.outlineSource === 'boundingBox').length} from bounding box)`)
+        }
 
         if (loadedModelRef.current.elements.length > 0) {
           setShowBatchProcessor(true)
