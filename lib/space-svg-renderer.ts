@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { SpaceContext, SpaceSVGRenderOptions } from './ifc-space-types'
 import type { ElementInfo } from './ifc-types'
+import { convexHull2D } from './space-analyzer'
 
 const DEFAULT_OPTIONS: Required<SpaceSVGRenderOptions> = {
     width: 800,
@@ -67,6 +68,51 @@ interface Bounds2D {
     maxY: number
     width: number
     height: number
+}
+
+/**
+ * Project mesh geometry onto the floor plan (2D projection)
+ * Returns a convex hull of projected vertices, or null if projection fails
+ */
+function projectMeshToFloorPlan(
+    meshes: THREE.Mesh[] | undefined,
+    mesh: THREE.Mesh | undefined,
+    lengthUnitScale: number,
+    isYUp: boolean
+): THREE.Vector2[] | null {
+    const allMeshes = meshes || (mesh ? [mesh] : [])
+    if (allMeshes.length === 0) return null
+
+    const points: THREE.Vector2[] = []
+
+    for (const m of allMeshes) {
+        const geometry = m.geometry
+        if (!geometry) continue
+
+        const position = geometry.getAttribute('position')
+        if (!position) continue
+
+        for (let i = 0; i < position.count; i++) {
+            const vertex = new THREE.Vector3(
+                position.getX(i),
+                position.getY(i),
+                position.getZ(i)
+            )
+            // Apply mesh world transform
+            vertex.applyMatrix4(m.matrixWorld)
+
+            // Project to 2D and scale
+            const x2d = vertex.x * lengthUnitScale
+            const y2d = isYUp
+                ? vertex.z * lengthUnitScale  // Y-up: floor is XZ
+                : vertex.y * lengthUnitScale  // Z-up: floor is XY
+
+            points.push(new THREE.Vector2(x2d, y2d))
+        }
+    }
+
+    if (points.length < 3) return null
+    return convexHull2D(points)
 }
 
 /**
@@ -197,6 +243,18 @@ export function renderSpaceFloorPlan(
     }).join(' ') + ' Z'
     svg += `  <path d="${profilePath}" class="profile"/>\n`
 
+    // Detect coordinate system once (Y-up vs Z-up)
+    // Y-up: Y is vertical, floor plan uses X-Z
+    // Z-up: Z is vertical, floor plan uses X-Y
+    let isYUp = false
+    if (bbox) {
+        const bboxSize = new THREE.Vector3()
+        bbox.getSize(bboxSize)
+        const ySize = Math.abs(bboxSize.y)
+        const zSize = Math.abs(bboxSize.z)
+        isYUp = ySize < zSize // Y-up if Y range is smaller than Z range
+    }
+
     // Render interior elements - clipped to room boundary
     // Wrap in group with clipPath to cut elements at room outline
     svg += `  <g clip-path="url(#roomClip)">\n`
@@ -216,6 +274,10 @@ export function renderSpaceFloorPlan(
                 typeName.toUpperCase().includes('ROOF') ||
                 typeName.toUpperCase().includes('COVERING')
 
+            // Furniture should have a distinctive style
+            const isFurnitureType = typeName.toUpperCase().includes('FURNISH') ||
+                typeName.toUpperCase().includes('FURNITURE')
+
             // Filter and limit elements
             const elementsToRender = typeElements
                 .filter(elem => {
@@ -231,6 +293,30 @@ export function renderSpaceFloorPlan(
                 .slice(0, 100) // Limit per type to keep SVG manageable
 
             for (const elem of elementsToRender) {
+                // Try geometry projection for furniture
+                if (isFurnitureType) {
+                    const projectedPolygon = projectMeshToFloorPlan(
+                        elem.meshes,
+                        elem.mesh,
+                        lengthUnitScale,
+                        isYUp
+                    )
+
+                    if (projectedPolygon && projectedPolygon.length >= 3) {
+                        // Render as polygon using actual geometry
+                        const pathData = projectedPolygon.map((p, i) => {
+                            const svgP = toSVG(p)
+                            return i === 0
+                                ? `M ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
+                                : `L ${svgP.x.toFixed(2)} ${svgP.y.toFixed(2)}`
+                        }).join(' ') + ' Z'
+
+                        svg += `    <path d="${pathData}" fill="${color.fill}" stroke="${color.stroke}" stroke-width="1" opacity="0.7"/>\n`
+                        continue
+                    }
+                }
+
+                // Fallback to bounding box for non-furniture or if projection fails
                 if (elem.boundingBox) {
                     const bbox = elem.boundingBox
                     const size = new THREE.Vector3()
@@ -239,9 +325,6 @@ export function renderSpaceFloorPlan(
                     // Extract 2D bounds from the 3D bbox and scale to match profile coordinates
                     // Profile coordinates are in IFC native units (e.g., mm), element bboxes are in meters
                     // Scale element bboxes by lengthUnitScale to match profile units
-                    const ySize = Math.abs(size.y)
-                    const zSize = Math.abs(size.z)
-                    const isYUp = ySize < zSize // Y-up if Y range is smaller than Z range
                     const min2D = isYUp
                         ? new THREE.Vector2(bbox.min.x * lengthUnitScale, bbox.min.z * lengthUnitScale)
                         : new THREE.Vector2(bbox.min.x * lengthUnitScale, bbox.min.y * lengthUnitScale)

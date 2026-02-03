@@ -602,7 +602,7 @@ function calculateBoundingBox(element: ElementInfo): THREE.Box3 | null {
 /**
  * Convex hull algorithm for 2D points (Graham scan)
  */
-function convexHull2D(points: THREE.Vector2[]): THREE.Vector2[] {
+export function convexHull2D(points: THREE.Vector2[]): THREE.Vector2[] {
     if (points.length < 3) return points
 
     // Remove duplicate points
@@ -642,7 +642,7 @@ function convexHull2D(points: THREE.Vector2[]): THREE.Vector2[] {
     return lower.concat(upper)
 }
 
-function removeDuplicatePoints(points: THREE.Vector2[]): THREE.Vector2[] {
+export function removeDuplicatePoints(points: THREE.Vector2[]): THREE.Vector2[] {
     const seen = new Set<string>()
     const unique: THREE.Vector2[] = []
 
