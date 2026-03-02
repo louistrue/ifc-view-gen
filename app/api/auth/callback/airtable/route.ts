@@ -119,6 +119,8 @@ export async function GET(request: NextRequest) {
     // Fetch the list of bases the user authorized — pure OAuth, no env vars needed
     let baseId: string | null = null;
     let baseName: string | null = null;
+    let tableName: string | null = null;
+
     try {
       const basesRes = await fetch('https://api.airtable.com/v0/meta/bases', {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -127,9 +129,28 @@ export async function GET(request: NextRequest) {
         const basesData = await basesRes.json();
         const firstBase = basesData.bases?.[0];
         if (firstBase) {
-          baseId = firstBase.id;
-          baseName = firstBase.name;  // display name only — NOT the table name
+          baseId  = firstBase.id;
+          baseName = firstBase.name;
           console.log(`Auto-discovered base: "${baseName}" (${baseId})`);
+
+          // Also discover the first table in that base
+          try {
+            const tablesRes = await fetch(`https://api.airtable.com/v0/meta/bases/${baseId}/tables`, {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (tablesRes.ok) {
+              const tablesData = await tablesRes.json();
+              const firstTable = tablesData.tables?.[0];
+              if (firstTable) {
+                tableName = firstTable.name;
+                console.log(`Auto-discovered table: "${tableName}"`);
+              }
+            } else {
+              console.warn('Could not fetch tables:', await tablesRes.text());
+            }
+          } catch (e) {
+            console.warn('Failed to fetch tables for base:', e);
+          }
         }
       } else {
         console.warn('Could not fetch bases:', await basesRes.text());
@@ -138,15 +159,16 @@ export async function GET(request: NextRequest) {
       console.warn('Failed to fetch authorized bases:', e);
     }
 
-    // Store the access token + discovered base in the session
+    // Store the access token + discovered base in the session.
+    // ALWAYS overwrite every field — never leave stale data from a previous session.
     // airtableBaseName  = the Airtable base display name (for the UI link)
-    // airtableTableName = the table within that base where door records live
+    // airtableTableName = the actual first table in that base (or fallback 'Doors')
     const session = await getIronSession<SessionData>(await cookies(), sessionOptions);
     session.airtableAccessToken = accessToken;
-    session.isAuthenticated = true;
-    if (baseId)   session.airtableBaseId   = baseId;
-    if (baseName) session.airtableBaseName = baseName;
-    session.airtableTableName = 'Doors';   // table name is always "Doors" in this app
+    session.isAuthenticated     = true;
+    session.airtableBaseId      = baseId   ?? undefined;
+    session.airtableBaseName    = baseName ?? undefined;
+    session.airtableTableName   = tableName ?? 'Doors';
     await session.save();
 
     console.log('OAuth flow completed successfully');
