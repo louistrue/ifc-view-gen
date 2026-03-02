@@ -15,7 +15,7 @@ interface AirtableAuthStatus {
   hasBaseId: boolean
   baseId: string | null
   baseName: string | null
-  tableName: string
+  tableName: string | null
 }
 
 interface DoorPanelProps {

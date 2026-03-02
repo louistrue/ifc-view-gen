@@ -3,8 +3,8 @@ import { SessionOptions } from 'iron-session';
 export interface SessionData {
   airtableAccessToken?: string;
   airtableBaseId?: string;
-  airtableBaseName?: string;   // display name of the authorized base
-  airtableTableName?: string;  // table name within the base (e.g. "Doors")
+  airtableBaseName?: string;  // display name of the authorized base (for UI link)
+  airtableTableName?: string; // first table in the base (auto-discovered via OAuth)
   isAuthenticated: boolean;
 }
 

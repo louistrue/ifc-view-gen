@@ -33,7 +33,7 @@ interface AirtableAuthStatus {
   hasBaseId: boolean
   baseId: string | null
   baseName: string | null
-  tableName: string
+  tableName: string | null
 }
 
 export default function BatchProcessor({ doorContexts, onComplete, modelSource }: BatchProcessorProps) {

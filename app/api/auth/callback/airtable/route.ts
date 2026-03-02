@@ -117,8 +117,9 @@ export async function GET(request: NextRequest) {
     const accessToken = tokenData.access_token;
 
     // Fetch the list of bases the user authorized — pure OAuth, no env vars needed
-    let baseId: string | null = null;
-    let baseName: string | null = null;
+    // Discover the base and first table — pure OAuth, no env vars needed
+    let baseId:    string | null = null;
+    let baseName:  string | null = null;
     let tableName: string | null = null;
 
     try {
@@ -129,11 +130,11 @@ export async function GET(request: NextRequest) {
         const basesData = await basesRes.json();
         const firstBase = basesData.bases?.[0];
         if (firstBase) {
-          baseId  = firstBase.id;
+          baseId   = firstBase.id;
           baseName = firstBase.name;
           console.log(`Auto-discovered base: "${baseName}" (${baseId})`);
 
-          // Also discover the first table in that base
+          // Discover the first table name
           try {
             const tablesRes = await fetch(`https://api.airtable.com/v0/meta/bases/${baseId}/tables`, {
               headers: { Authorization: `Bearer ${accessToken}` },
@@ -159,16 +160,13 @@ export async function GET(request: NextRequest) {
       console.warn('Failed to fetch authorized bases:', e);
     }
 
-    // Store the access token + discovered base in the session.
-    // ALWAYS overwrite every field — never leave stale data from a previous session.
-    // airtableBaseName  = the Airtable base display name (for the UI link)
-    // airtableTableName = the actual first table in that base (or fallback 'Doors')
+    // ALWAYS overwrite every session field — never leave stale data from a previous session.
     const session = await getIronSession<SessionData>(await cookies(), sessionOptions);
     session.airtableAccessToken = accessToken;
     session.isAuthenticated     = true;
-    session.airtableBaseId      = baseId   ?? undefined;
-    session.airtableBaseName    = baseName ?? undefined;
-    session.airtableTableName   = tableName ?? 'Doors';
+    session.airtableBaseId      = baseId    ?? undefined;
+    session.airtableBaseName    = baseName  ?? undefined;
+    session.airtableTableName   = tableName ?? undefined;
     await session.save();
 
     console.log('OAuth flow completed successfully');

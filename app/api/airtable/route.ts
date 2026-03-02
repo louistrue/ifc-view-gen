@@ -2,73 +2,39 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getIronSession } from 'iron-session'
 import { cookies } from 'next/headers'
 import { sessionOptions, SessionData } from '@/lib/session'
+import { put } from '@vercel/blob'
 
 const AIRTABLE_API_BASE = 'https://api.airtable.com/v0'
+
+// ─── Hardcoded Airtable field names ────────────────────────────────────────
+// Your Airtable table must contain columns with exactly these names.
+const FIELDS = {
+  doorId:           'Door ID',
+  frontView:        'Front View',
+  backView:         'Back View',
+  topView:          'Top View',
+  doorType:         'Door Type',
+  openingDirection: 'Opening Direction',
+  modelSource:      'Model Source',
+} as const
+// ───────────────────────────────────────────────────────────────────────────
 
 interface DoorData {
     doorId: string
     doorType?: string
     openingDirection?: string
     modelSource?: string
-    frontView?: string // base64 or URL
+    frontView?: string  // base64 or URL
     backView?: string
     topView?: string
 }
 
-async function findOrCreateDoorRecord(
-    doorId: string,
-    token: string,
-    baseId: string,
-    tableName: string
-): Promise<{ recordId: string; exists: boolean }> {
-    // Search for existing record
-    const searchUrl = `${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}?filterByFormula={Door ID}="${doorId}"`
-
-    const searchResponse = await fetch(searchUrl, {
-        headers: {
-            'Authorization': `Bearer ${token}`,
-        },
-    })
-
-    if (!searchResponse.ok) {
-        const error = await searchResponse.text()
-        throw new Error(`Failed to search Airtable: ${error}`)
-    }
-
-    const searchData = await searchResponse.json()
-
-    if (searchData.records && searchData.records.length > 0) {
-        return { recordId: searchData.records[0].id, exists: true }
-    }
-
-    // Create new record if not found
-    const createResponse = await fetch(`${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            fields: {
-                'Door ID': doorId,
-                'Created At': new Date().toISOString(),
-            },
-        }),
-    })
-
-    if (!createResponse.ok) {
-        const error = await createResponse.text()
-        throw new Error(`Failed to create Airtable record: ${error}`)
-    }
-
-    const createData = await createResponse.json()
-    return { recordId: createData.id, exists: false }
-}
-
-import { put } from '@vercel/blob'
-
 // Helper to upload base64 images to Vercel Blob
-async function uploadToBlob(dataUrl: string | undefined, doorId: string, viewType: string): Promise<string | undefined> {
+async function uploadToBlob(
+    dataUrl: string | undefined,
+    doorId: string,
+    viewType: string
+): Promise<string | undefined> {
     if (!dataUrl || !dataUrl.startsWith('data:')) return dataUrl
 
     if (!process.env.BLOB_READ_WRITE_TOKEN) {
@@ -77,7 +43,6 @@ async function uploadToBlob(dataUrl: string | undefined, doorId: string, viewTyp
     }
 
     try {
-        // Parse base64
         const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/)
         if (!matches || matches.length !== 3) return undefined
 
@@ -86,16 +51,57 @@ async function uploadToBlob(dataUrl: string | undefined, doorId: string, viewTyp
         const extension = contentType.split('/')[1] || 'bin'
         const filename = `doors/${doorId}/${viewType}-${Date.now()}.${extension}`
 
-        const blob = await put(filename, buffer, {
-            access: 'public',
-            contentType,
-        })
-
+        const blob = await put(filename, buffer, { access: 'public', contentType })
         return blob.url
     } catch (error) {
         console.error(`Failed to upload ${viewType} for ${doorId}:`, error)
         return undefined
     }
+}
+
+async function findOrCreateDoorRecord(
+    doorId: string,
+    token: string,
+    baseId: string,
+    tableName: string
+): Promise<{ recordId: string; exists: boolean }> {
+    const tableUrl = `${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}`
+
+    // Search for existing record by Door ID
+    const searchUrl = `${tableUrl}?filterByFormula={${FIELDS.doorId}}="${doorId}"`
+    const searchRes = await fetch(searchUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+    })
+
+    if (!searchRes.ok) {
+        const error = await searchRes.text()
+        throw new Error(`Failed to search Airtable: ${error}`)
+    }
+
+    const searchData = await searchRes.json()
+    if (searchData.records?.length > 0) {
+        return { recordId: searchData.records[0].id, exists: true }
+    }
+
+    // Create new record
+    const createRes = await fetch(tableUrl, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            fields: { [FIELDS.doorId]: doorId },
+        }),
+    })
+
+    if (!createRes.ok) {
+        const error = await createRes.text()
+        throw new Error(`Failed to create Airtable record: ${error}`)
+    }
+
+    const createData = await createRes.json()
+    return { recordId: createData.id, exists: false }
 }
 
 async function updateDoorRecord(
@@ -107,42 +113,38 @@ async function updateDoorRecord(
 ): Promise<void> {
     const fields: Record<string, unknown> = {}
 
-    if (data.doorType) fields['Door Type'] = data.doorType
-    if (data.openingDirection) fields['Opening Direction'] = data.openingDirection
-    if (data.modelSource) fields['Model Source'] = data.modelSource
+    if (data.doorType)         fields[FIELDS.doorType]         = data.doorType
+    if (data.openingDirection) fields[FIELDS.openingDirection] = data.openingDirection
+    if (data.modelSource)      fields[FIELDS.modelSource]      = data.modelSource
 
-    // Upload images if present
     const frontUrl = await uploadToBlob(data.frontView, data.doorId, 'front')
-    const backUrl = await uploadToBlob(data.backView, data.doorId, 'back')
-    const topUrl = await uploadToBlob(data.topView, data.doorId, 'top')
+    const backUrl  = await uploadToBlob(data.backView,  data.doorId, 'back')
+    const topUrl   = await uploadToBlob(data.topView,   data.doorId, 'top')
 
-    if (frontUrl) fields['Front View'] = [{ url: frontUrl }]
-    if (backUrl) fields['Back View'] = [{ url: backUrl }]
-    if (topUrl) fields['Top View'] = [{ url: topUrl }]
+    if (frontUrl) fields[FIELDS.frontView] = [{ url: frontUrl }]
+    if (backUrl)  fields[FIELDS.backView]  = [{ url: backUrl }]
+    if (topUrl)   fields[FIELDS.topView]   = [{ url: topUrl }]
 
-    const updateResponse = await fetch(`${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}/${recordId}`, {
-        method: 'PATCH',
-        headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ fields }),
-    })
+    const updateRes = await fetch(
+        `${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}/${recordId}`,
+        {
+            method: 'PATCH',
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ fields }),
+        }
+    )
 
-    if (!updateResponse.ok) {
-        const error = await updateResponse.text()
+    if (!updateRes.ok) {
+        const error = await updateRes.text()
         throw new Error(`Failed to update Airtable record: ${error}`)
     }
 }
 
-interface AirtableRequestBody extends DoorData {
-    baseId?: string
-    tableName?: string
-}
-
 export async function POST(request: NextRequest) {
     try {
-        // Get session data
         const session = await getIronSession<SessionData>(await cookies(), sessionOptions)
 
         if (!session.isAuthenticated || !session.airtableAccessToken) {
@@ -152,38 +154,26 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        const token = session.airtableAccessToken
-
-        const body = await request.json() as AirtableRequestBody
+        const body = await request.json() as DoorData
 
         if (!body.doorId) {
+            return NextResponse.json({ error: 'doorId is required' }, { status: 400 })
+        }
+
+        const baseId    = session.airtableBaseId
+        const tableName = session.airtableTableName
+
+        if (!baseId || !tableName) {
             return NextResponse.json(
-                { error: 'doorId is required' },
+                { error: 'No Airtable base/table found in session. Please reconnect via OAuth.' },
                 { status: 400 }
             )
         }
 
-        // baseId and tableName come exclusively from the OAuth session
-        const baseId = session.airtableBaseId
-        const tableName = session.airtableTableName || 'Doors'
-
-        if (!baseId) {
-            return NextResponse.json(
-                { error: 'No Airtable base found in session. Please reconnect via OAuth.' },
-                { status: 400 }
-            )
-        }
-
-        // Find or create the door record
         const { recordId, exists } = await findOrCreateDoorRecord(
-            body.doorId,
-            token,
-            baseId,
-            tableName
+            body.doorId, session.airtableAccessToken, baseId, tableName
         )
-
-        // Update the record with the door data
-        await updateDoorRecord(recordId, body, token, baseId, tableName)
+        await updateDoorRecord(recordId, body, session.airtableAccessToken, baseId, tableName)
 
         return NextResponse.json({
             success: true,
@@ -193,7 +183,6 @@ export async function POST(request: NextRequest) {
                 ? `Updated existing door record: ${body.doorId}`
                 : `Created new door record: ${body.doorId}`,
         })
-
     } catch (error) {
         console.error('Airtable API error:', error)
         return NextResponse.json(
@@ -203,15 +192,14 @@ export async function POST(request: NextRequest) {
     }
 }
 
-// GET endpoint to check authentication status
 export async function GET() {
     const session = await getIronSession<SessionData>(await cookies(), sessionOptions)
 
     return NextResponse.json({
         isAuthenticated: session.isAuthenticated || false,
-        hasBaseId: !!session.airtableBaseId,
-        baseId: session.airtableBaseId || null,
-        baseName: session.airtableBaseName || null,   // display name of the authorized base
-        tableName: session.airtableTableName || 'Doors',
+        hasBaseId:  !!session.airtableBaseId,
+        baseId:     session.airtableBaseId  || null,
+        baseName:   session.airtableBaseName || null,
+        tableName:  session.airtableTableName || null,
     })
 }
