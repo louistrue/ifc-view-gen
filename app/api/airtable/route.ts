@@ -211,6 +211,7 @@ export async function GET() {
         isAuthenticated: session.isAuthenticated || false,
         hasBaseId: !!session.airtableBaseId,
         baseId: session.airtableBaseId || null,
+        baseName: session.airtableBaseName || null,   // display name of the authorized base
         tableName: session.airtableTableName || 'Doors',
     })
 }

@@ -32,6 +32,7 @@ interface AirtableAuthStatus {
   isAuthenticated: boolean
   hasBaseId: boolean
   baseId: string | null
+  baseName: string | null
   tableName: string
 }
 
@@ -90,7 +91,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     fetch('/api/airtable')
       .then(res => res.json())
       .then(data => setAuthStatus(data))
-      .catch(() => setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, tableName: 'Doors' }))
+      .catch(() => setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, baseName: null, tableName: 'Doors' }))
   }, [])
 
   useEffect(() => {
@@ -359,7 +360,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     try {
       const response = await fetch('/api/auth/logout', { method: 'POST' })
       if (response.ok) {
-        setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, tableName: 'Doors' })
+        setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, baseName: null, tableName: 'Doors' })
       }
     } catch {
       setError('Failed to disconnect from Airtable')
@@ -399,10 +400,10 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
                   target="_blank"
                   rel="noopener noreferrer"
                   className="airtable-link"
-                  title={`Open ${authStatus.tableName} in Airtable`}
+                  title={`Open base in Airtable → table: ${authStatus.tableName}`}
                 >
                   <Link2 size={14} />
-                  {authStatus.tableName}
+                  {authStatus.baseName || authStatus.baseId}
                   <ExternalLink size={12} />
                 </a>
               )}

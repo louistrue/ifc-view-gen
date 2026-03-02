@@ -14,6 +14,7 @@ interface AirtableAuthStatus {
   isAuthenticated: boolean
   hasBaseId: boolean
   baseId: string | null
+  baseName: string | null
   tableName: string
 }
 
@@ -141,7 +142,7 @@ export default function DoorPanel({
     fetch('/api/airtable')
       .then(res => res.json())
       .then(data => setAuthStatus(data))
-      .catch(() => setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, tableName: 'Doors' }))
+      .catch(() => setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, baseName: null, tableName: 'Doors' }))
   }, [])
 
   useEffect(() => {
@@ -178,7 +179,7 @@ export default function DoorPanel({
     try {
       const response = await fetch('/api/auth/logout', { method: 'POST' })
       if (response.ok) {
-        setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, tableName: 'Doors' })
+        setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, baseName: null, tableName: 'Doors' })
       }
     } catch {
       setError('Failed to disconnect from Airtable')
@@ -552,10 +553,10 @@ export default function DoorPanel({
                         target="_blank"
                         rel="noopener noreferrer"
                         className="settings-link"
-                        title={`Open ${authStatus.tableName} in Airtable`}
+                        title={`Open base in Airtable → table: ${authStatus.tableName}`}
                       >
                         <Link2 size={13} />
-                        <span>{authStatus.tableName}</span>
+                        <span>{authStatus.baseName || authStatus.baseId}</span>
                         <ExternalLink size={11} />
                       </a>
                     )}

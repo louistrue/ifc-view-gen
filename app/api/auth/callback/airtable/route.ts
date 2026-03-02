@@ -128,8 +128,8 @@ export async function GET(request: NextRequest) {
         const firstBase = basesData.bases?.[0];
         if (firstBase) {
           baseId = firstBase.id;
-          baseName = firstBase.name;
-          console.log(`Auto-discovered base: ${baseName} (${baseId})`);
+          baseName = firstBase.name;  // display name only — NOT the table name
+          console.log(`Auto-discovered base: "${baseName}" (${baseId})`);
         }
       } else {
         console.warn('Could not fetch bases:', await basesRes.text());
@@ -139,11 +139,14 @@ export async function GET(request: NextRequest) {
     }
 
     // Store the access token + discovered base in the session
+    // airtableBaseName  = the Airtable base display name (for the UI link)
+    // airtableTableName = the table within that base where door records live
     const session = await getIronSession<SessionData>(await cookies(), sessionOptions);
     session.airtableAccessToken = accessToken;
     session.isAuthenticated = true;
-    if (baseId) session.airtableBaseId = baseId;
-    session.airtableTableName = baseName || 'Doors';
+    if (baseId)   session.airtableBaseId   = baseId;
+    if (baseName) session.airtableBaseName = baseName;
+    session.airtableTableName = 'Doors';   // table name is always "Doors" in this app
     await session.save();
 
     console.log('OAuth flow completed successfully');
