@@ -233,6 +233,17 @@ Requires WebGL 2.0 and WebAssembly support.
 
 AGPL-3
 
+## Contact
+
+**bimdo GmbH**
+Hirschmattstrasse 33
+6003 Luzern
+Schweiz
+E-Mail: team@bimdo.ch
+
+**LTplus AG**
+[www.lt.plus](https://www.lt.plus)
+
 ## Acknowledgments
 
 - [IFC.js](https://ifcjs.github.io/info/) - The IFC.js ecosystem
