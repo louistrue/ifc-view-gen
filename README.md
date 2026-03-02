@@ -1,5 +1,7 @@
 # IFC Element View Generator
 
+A collaboration between [bimdo GmbH](https://www.bimdo.ch) and [LTplus AG](https://www.lt.plus).
+
 A Next.js web application for loading, visualizing, and exporting professional technical drawings from IFC (Industry Foundation Classes) building models. Built with Three.js and web-ifc for high-performance BIM visualization.
 
 ## Features
@@ -232,11 +234,6 @@ Requires WebGL 2.0 and WebAssembly support.
 ## License
 
 AGPL-3
-
-## Contact
-
-- **bimdo GmbH** — [www.bimdo.ch](https://www.bimdo.ch)
-- **LTplus AG** — [www.lt.plus](https://www.lt.plus)
 
 ## Acknowledgments
 
