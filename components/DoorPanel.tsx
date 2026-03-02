@@ -85,26 +85,40 @@ export default function DoorPanel({
     fontFamily: 'Arial',
   })
 
-  // Extract unique storeys and types
+  // Build additive facet counts: each facet is constrained by the other active facet(s).
   const availableStoreys = useMemo(() => {
+    const doorsForStoreyFacet = filterDoors(doorContexts, {
+      doorTypes: Array.from(selectedTypes),
+    })
     const storeys = new Map<string, number>()
-    doorContexts.forEach(door => {
+    doorsForStoreyFacet.forEach(door => {
       if (door.storeyName) {
         storeys.set(door.storeyName, (storeys.get(door.storeyName) || 0) + 1)
       }
     })
+    // Keep selected storeys visible even if they currently have 0 matching doors.
+    selectedStoreys.forEach(storey => {
+      if (!storeys.has(storey)) storeys.set(storey, 0)
+    })
     return Array.from(storeys.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [doorContexts])
+  }, [doorContexts, selectedTypes, selectedStoreys])
 
   const availableTypes = useMemo(() => {
+    const doorsForTypeFacet = filterDoors(doorContexts, {
+      storeys: Array.from(selectedStoreys),
+    })
     const types = new Map<string, number>()
-    doorContexts.forEach(door => {
+    doorsForTypeFacet.forEach(door => {
       if (door.doorTypeName) {
         types.set(door.doorTypeName, (types.get(door.doorTypeName) || 0) + 1)
       }
     })
+    // Keep selected types visible even if they currently have 0 matching doors.
+    selectedTypes.forEach(type => {
+      if (!types.has(type)) types.set(type, 0)
+    })
     return Array.from(types.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [doorContexts])
+  }, [doorContexts, selectedStoreys, selectedTypes])
 
   // Apply filters
   const filteredDoors = useMemo(() => {
@@ -374,7 +388,7 @@ export default function DoorPanel({
     doorsToProcess.forEach(d => { newStatus[d.doorId] = 'idle' })
     setAirtableStatus(newStatus)
 
-    const CONCURRENCY = 3
+    const CONCURRENCY = 2
     const total = doorsToProcess.length
     let failed = 0
 
@@ -391,9 +405,19 @@ export default function DoorPanel({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             doorId: door.doorId,
-            doorType: door.doorTypeName || undefined,
+            doorType: door.csetStandardCH?.informationType || door.doorTypeName || undefined,
+            alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
+            informationType: door.csetStandardCH?.informationType ?? undefined,
+            massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
+            massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
+            massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
+            massRohhoehe: door.csetStandardCH?.massRohhoehe ?? undefined,
+            massAussenrahmenBreite: door.csetStandardCH?.massAussenrahmenBreite ?? undefined,
+            massAussenrahmenHoehe: door.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
+            feuerwiderstand: door.csetStandardCH?.feuerwiderstand ?? undefined,
+            bauschalldaemmmass: door.csetStandardCH?.bauschalldaemmmass ?? undefined,
             frontView: svgToDataUrl(front),
             backView: svgToDataUrl(back),
             topView: svgToDataUrl(plan),

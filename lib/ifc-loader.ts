@@ -1,4 +1,4 @@
-import { IfcAPI, IFCDOOR, IFCWALL, IFCWALLSTANDARDCASE, IFCRELDEFINESBYTYPE, IFCDOORTYPE } from 'web-ifc'
+import { IfcAPI, IFCDOOR, IFCWALL, IFCWALLSTANDARDCASE, IFCRELDEFINESBYTYPE, IFCRELDEFINESBYPROPERTIES, IFCDOORTYPE } from 'web-ifc'
 import * as WebIFC from 'web-ifc'
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
@@ -201,6 +201,215 @@ export async function extractDoorOperationTypes(file: File): Promise<Map<number,
 
 
         return operationTypeMap
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+export interface DoorCsetStandardCHData {
+    alTuernummer: string | null
+    informationType: string | null
+    massDurchgangsbreite: number | null
+    massDurchgangshoehe: number | null
+    massRohbreite: number | null
+    massRohhoehe: number | null
+    massAussenrahmenBreite: number | null
+    massAussenrahmenHoehe: number | null
+    symbolFluchtweg: string | null
+    gebaeude: string | null
+    feuerwiderstand: string | null
+    bauschalldaemmmass: string | null
+}
+
+function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
+    return {
+        alTuernummer: null,
+        informationType: null,
+        massDurchgangsbreite: null,
+        massDurchgangshoehe: null,
+        massRohbreite: null,
+        massRohhoehe: null,
+        massAussenrahmenBreite: null,
+        massAussenrahmenHoehe: null,
+        symbolFluchtweg: null,
+        gebaeude: null,
+        feuerwiderstand: null,
+        bauschalldaemmmass: null,
+    }
+}
+
+function unwrapIfcValue(raw: any): any {
+    if (raw && typeof raw === 'object' && 'value' in raw) return raw.value
+    return raw
+}
+
+function normalizeIfcName(name: string): string {
+    return name
+        .toLowerCase()
+        .replace(/ä/g, 'ae')
+        .replace(/ö/g, 'oe')
+        .replace(/ü/g, 'ue')
+        .replace(/ß/g, 'ss')
+        .replace(/[^a-z0-9]/g, '')
+}
+
+function parseIfcNumber(raw: any): number | null {
+    const unwrapped = unwrapIfcValue(raw)
+    if (typeof unwrapped === 'number' && Number.isFinite(unwrapped)) return unwrapped
+    if (typeof unwrapped === 'string') {
+        const parsed = Number.parseFloat(unwrapped.replace(',', '.').trim())
+        return Number.isFinite(parsed) ? parsed : null
+    }
+    return null
+}
+
+function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nominalValue: any): void {
+    const normalized = normalizeIfcName(propName)
+    if (normalized === 'al00tuernummer' || normalized === 'tuernummer') {
+        const value = unwrapIfcValue(nominalValue)
+        if (typeof value === 'string' && value.trim()) {
+            target.alTuernummer = value.trim()
+        }
+        return
+    }
+    if (normalized === 'informationtype') {
+        const value = unwrapIfcValue(nominalValue)
+        if (typeof value === 'string' && value.trim()) {
+            target.informationType = value.trim()
+        }
+        return
+    }
+    if (normalized === 'massdurchgangsbreite') {
+        target.massDurchgangsbreite = parseIfcNumber(nominalValue)
+        return
+    }
+    if (normalized === 'massdurchgangshoehe') {
+        target.massDurchgangshoehe = parseIfcNumber(nominalValue)
+        return
+    }
+    if (normalized === 'massrohbreite' || normalized === 'massrohebreite') {
+        target.massRohbreite = parseIfcNumber(nominalValue)
+        return
+    }
+    if (normalized === 'massrohhoehe' || normalized === 'massrohehoehe') {
+        target.massRohhoehe = parseIfcNumber(nominalValue)
+        return
+    }
+    if (normalized === 'massaussenrahmenbreite') {
+        target.massAussenrahmenBreite = parseIfcNumber(nominalValue)
+        return
+    }
+    if (normalized === 'massaussenrahmenhoehe') {
+        target.massAussenrahmenHoehe = parseIfcNumber(nominalValue)
+        return
+    }
+    if (normalized === 'symbolfluchtweg') {
+        const value = unwrapIfcValue(nominalValue)
+        if (typeof value === 'string' && value.trim()) target.symbolFluchtweg = value.trim()
+        return
+    }
+    if (normalized === 'gebaude' || normalized === 'gebaeude') {
+        const value = unwrapIfcValue(nominalValue)
+        if (typeof value === 'string' && value.trim()) target.gebaeude = value.trim()
+        return
+    }
+    if (normalized === 'feuerwiderstand') {
+        const value = unwrapIfcValue(nominalValue)
+        if (typeof value === 'string' && value.trim()) target.feuerwiderstand = value.trim()
+        return
+    }
+    if (normalized === 'bauschalldammmass' || normalized === 'bauschalldaemmmass') {
+        const value = unwrapIfcValue(nominalValue)
+        if (typeof value === 'string' && value.trim()) target.bauschalldaemmmass = value.trim()
+    }
+}
+
+/**
+ * Extract Cset_StandardCH values for each door occurrence from IFC.
+ * Supports direct door properties and properties assigned to door types.
+ */
+export async function extractDoorCsetStandardCH(file: File): Promise<Map<number, DoorCsetStandardCHData>> {
+    const api = await initializeIFCAPI()
+    const result = new Map<number, DoorCsetStandardCHData>()
+
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for Cset_StandardCH extraction')
+        return result
+    }
+
+    try {
+        const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
+        const doorSet = new Set<number>()
+        for (let i = 0; i < doorIds.size(); i++) {
+            doorSet.add(doorIds.get(i))
+        }
+
+        // Build type -> doors map (to propagate type-level psets)
+        const typeToDoors = new Map<number, number[]>()
+        const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+        for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
+            const rel = api.GetLine(modelID, relDefinesByTypeIds.get(i))
+            if (!rel?.RelatingType?.value || !Array.isArray(rel?.RelatedObjects)) continue
+            const typeId = rel.RelatingType.value as number
+            for (const obj of rel.RelatedObjects) {
+                const doorId = obj?.value
+                if (typeof doorId !== 'number' || !doorSet.has(doorId)) continue
+                const arr = typeToDoors.get(typeId) || []
+                arr.push(doorId)
+                typeToDoors.set(typeId, arr)
+            }
+        }
+
+        const relDefinesByPropsIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES)
+        for (let i = 0; i < relDefinesByPropsIds.size(); i++) {
+            const rel = api.GetLine(modelID, relDefinesByPropsIds.get(i))
+            const relatingPropDefId = rel?.RelatingPropertyDefinition?.value
+            if (typeof relatingPropDefId !== 'number') continue
+
+            const pset = api.GetLine(modelID, relatingPropDefId)
+            const psetName = String(unwrapIfcValue(pset?.Name) || '')
+            const normalizedPsetName = normalizeIfcName(psetName)
+            const isRelevantPset =
+                normalizedPsetName === 'csetstandardch'
+                || normalizedPsetName.startsWith('al00')
+                || normalizedPsetName.startsWith('in01')
+            if (!isRelevantPset) continue
+
+            const hasProperties = Array.isArray(pset?.HasProperties) ? pset.HasProperties : []
+            const targetDoorIds = new Set<number>()
+            const relatedObjects = Array.isArray(rel?.RelatedObjects) ? rel.RelatedObjects : []
+            for (const obj of relatedObjects) {
+                const objId = obj?.value
+                if (typeof objId !== 'number') continue
+                if (doorSet.has(objId)) {
+                    targetDoorIds.add(objId)
+                } else {
+                    const doorsForType = typeToDoors.get(objId)
+                    if (doorsForType) doorsForType.forEach((id) => targetDoorIds.add(id))
+                }
+            }
+
+            if (targetDoorIds.size === 0) continue
+
+            for (const doorId of targetDoorIds) {
+                const existing = result.get(doorId) || emptyDoorCsetStandardCHData()
+                for (const propRef of hasProperties) {
+                    const propId = propRef?.value
+                    if (typeof propId !== 'number') continue
+                    const prop = api.GetLine(modelID, propId)
+                    const propName = String(unwrapIfcValue(prop?.Name) || '')
+                    if (!propName) continue
+                    applyCsetProperty(existing, propName, prop?.NominalValue)
+                }
+                result.set(doorId, existing)
+            }
+        }
+
+        return result
     } finally {
         api.CloseModel(modelID)
     }

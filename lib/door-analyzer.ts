@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
 import * as WebIFC from 'web-ifc'
+import type { DoorCsetStandardCHData } from './ifc-loader'
 
 export interface DoorContext {
     door: ElementInfo
@@ -13,6 +14,20 @@ export interface DoorContext {
     openingDirection: string | null
     doorTypeName: string | null
     storeyName: string | null  // Building storey name from spatial structure
+    csetStandardCH?: {
+        alTuernummer: string | null
+        informationType: string | null
+        massDurchgangsbreite: number | null
+        massDurchgangshoehe: number | null
+        massRohbreite: number | null
+        massRohhoehe: number | null
+        massAussenrahmenBreite: number | null
+        massAussenrahmenHoehe: number | null
+        symbolFluchtweg: string | null
+        gebaeude: string | null
+        feuerwiderstand: string | null
+        bauschalldaemmmass: string | null
+    }
 
     // Detailed geometry from web-ifc (for high-quality SVG rendering)
     detailedGeometry?: {
@@ -20,6 +35,219 @@ export interface DoorContext {
         wallMeshes: THREE.Mesh[]
         deviceMeshes: THREE.Mesh[]
     }
+}
+
+function unwrapIfcValue(raw: unknown): unknown {
+    if (raw && typeof raw === 'object' && 'value' in (raw as Record<string, unknown>)) {
+        return (raw as { value?: unknown }).value
+    }
+    return raw
+}
+
+function normalizeIfcPropName(name: string): string {
+    return name
+        .toLowerCase()
+        .replace(/ä/g, 'ae')
+        .replace(/ö/g, 'oe')
+        .replace(/ü/g, 'ue')
+        .replace(/ß/g, 'ss')
+        .replace(/[^a-z0-9]/g, '')
+}
+
+function parseIfcNumber(value: unknown): number | null {
+    const raw = unwrapIfcValue(value)
+    if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+    if (typeof raw === 'string') {
+        const normalized = raw.replace(',', '.').trim()
+        const parsed = Number.parseFloat(normalized)
+        return Number.isFinite(parsed) ? parsed : null
+    }
+    return null
+}
+
+type CsetStandardCH = {
+    alTuernummer: string | null
+    informationType: string | null
+    massDurchgangsbreite: number | null
+    massDurchgangshoehe: number | null
+    massRohbreite: number | null
+    massRohhoehe: number | null
+    massAussenrahmenBreite: number | null
+    massAussenrahmenHoehe: number | null
+    symbolFluchtweg: string | null
+    gebaeude: string | null
+    feuerwiderstand: string | null
+    bauschalldaemmmass: string | null
+}
+
+function emptyCsetStandardCH(): CsetStandardCH {
+    return {
+        alTuernummer: null,
+        informationType: null,
+        massDurchgangsbreite: null,
+        massDurchgangshoehe: null,
+        massRohbreite: null,
+        massRohhoehe: null,
+        massAussenrahmenBreite: null,
+        massAussenrahmenHoehe: null,
+        symbolFluchtweg: null,
+        gebaeude: null,
+        feuerwiderstand: null,
+        bauschalldaemmmass: null,
+    }
+}
+
+function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue: unknown) {
+    const normalized = normalizeIfcPropName(propertyName)
+
+    if (normalized === 'al00tuernummer' || normalized === 'tuernummer') {
+        const value = unwrapIfcValue(rawValue)
+        if (typeof value === 'string' && value.trim()) {
+            target.alTuernummer = value.trim()
+        }
+    } else if (normalized === 'informationtype') {
+        const value = unwrapIfcValue(rawValue)
+        if (typeof value === 'string' && value.trim()) {
+            target.informationType = value.trim()
+        }
+    } else if (normalized === 'massdurchgangsbreite') {
+        target.massDurchgangsbreite = parseIfcNumber(rawValue)
+    } else if (normalized === 'massdurchgangshoehe') {
+        target.massDurchgangshoehe = parseIfcNumber(rawValue)
+    } else if (normalized === 'massrohbreite' || normalized === 'massrohebreite') {
+        target.massRohbreite = parseIfcNumber(rawValue)
+    } else if (normalized === 'massrohhoehe' || normalized === 'massrohehoehe') {
+        target.massRohhoehe = parseIfcNumber(rawValue)
+    } else if (normalized === 'massaussenrahmenbreite') {
+        target.massAussenrahmenBreite = parseIfcNumber(rawValue)
+    } else if (normalized === 'massaussenrahmenhoehe') {
+        target.massAussenrahmenHoehe = parseIfcNumber(rawValue)
+    } else if (normalized === 'symbolfluchtweg') {
+        const value = unwrapIfcValue(rawValue)
+        if (typeof value === 'string' && value.trim()) target.symbolFluchtweg = value.trim()
+    } else if (normalized === 'gebaude' || normalized === 'gebaeude') {
+        const value = unwrapIfcValue(rawValue)
+        if (typeof value === 'string' && value.trim()) target.gebaeude = value.trim()
+    } else if (normalized === 'feuerwiderstand') {
+        const value = unwrapIfcValue(rawValue)
+        if (typeof value === 'string' && value.trim()) target.feuerwiderstand = value.trim()
+    } else if (normalized === 'bauschalldammmass' || normalized === 'bauschalldaemmmass') {
+        const value = unwrapIfcValue(rawValue)
+        if (typeof value === 'string' && value.trim()) target.bauschalldaemmmass = value.trim()
+    }
+}
+
+function hasCsetValues(data: CsetStandardCH): boolean {
+    return data.alTuernummer !== null
+        || data.informationType !== null
+        || data.massDurchgangsbreite !== null
+        || data.massDurchgangshoehe !== null
+        || data.massRohbreite !== null
+        || data.massRohhoehe !== null
+        || data.massAussenrahmenBreite !== null
+        || data.massAussenrahmenHoehe !== null
+        || data.symbolFluchtweg !== null
+        || data.gebaeude !== null
+        || data.feuerwiderstand !== null
+        || data.bauschalldaemmmass !== null
+}
+
+async function getDoorCsetStandardCH(
+    model: LoadedIFCModel,
+    doorExpressID: number
+): Promise<CsetStandardCH | null> {
+    const result = emptyCsetStandardCH()
+    const fragmentsModel = (model as any).fragmentsModel
+
+    if (fragmentsModel) {
+        try {
+            const doorData = await fragmentsModel.getItemsData([doorExpressID], {
+                attributesDefault: true,
+                relations: {
+                    IsDefinedBy: {
+                        attributes: true,
+                        relations: {
+                            RelatingPropertyDefinition: {
+                                attributes: true,
+                                relations: {
+                                    HasProperties: { attributes: true, relations: false },
+                                },
+                            },
+                        },
+                    },
+                },
+                relationsDefault: { attributes: false, relations: false },
+            })
+
+            const data = doorData?.[0] as Record<string, unknown> | undefined
+            const isDefinedBy = data?.IsDefinedBy
+            if (Array.isArray(isDefinedBy)) {
+                for (const rel of isDefinedBy) {
+                    const relObj = rel as Record<string, unknown> | null
+                    const pset = relObj?.RelatingPropertyDefinition as Record<string, unknown> | undefined
+                    const psetName = String(unwrapIfcValue(pset?.Name) ?? '')
+                    const normalizedPsetName = normalizeIfcPropName(psetName)
+                    const isRelevantPset =
+                        normalizedPsetName === 'csetstandardch'
+                        || normalizedPsetName.startsWith('al00')
+                        || normalizedPsetName.startsWith('in01')
+                    if (!isRelevantPset) continue
+
+                    const hasProperties = pset?.HasProperties
+                    if (!Array.isArray(hasProperties)) continue
+
+                    for (const prop of hasProperties) {
+                        const propObj = prop as Record<string, unknown> | null
+                        const propName = String(unwrapIfcValue(propObj?.Name) ?? '')
+                        if (!propName) continue
+                        setCsetProperty(result, propName, propObj?.NominalValue)
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn(`Failed to read Cset_StandardCH for door ${doorExpressID} (fragments path):`, e)
+        }
+    } else {
+        try {
+            const api = model.api
+            const modelID = model.modelID
+            const door = api.GetLine(modelID, doorExpressID)
+            const isDefinedBy = door?.IsDefinedBy
+            const rels = Array.isArray(isDefinedBy) ? isDefinedBy : (isDefinedBy ? [isDefinedBy] : [])
+
+            for (const relRef of rels) {
+                const relId = relRef?.value
+                if (typeof relId !== 'number') continue
+                const rel = api.GetLine(modelID, relId)
+                const psetRef = rel?.RelatingPropertyDefinition
+                const psetId = psetRef?.value
+                if (typeof psetId !== 'number') continue
+                const pset = api.GetLine(modelID, psetId)
+                const psetName = String(unwrapIfcValue(pset?.Name) ?? '')
+                const normalizedPsetName = normalizeIfcPropName(psetName)
+                const isRelevantPset =
+                    normalizedPsetName === 'csetstandardch'
+                    || normalizedPsetName.startsWith('al00')
+                    || normalizedPsetName.startsWith('in01')
+                if (!isRelevantPset) continue
+
+                const hasProperties = pset?.HasProperties
+                const props = Array.isArray(hasProperties) ? hasProperties : []
+                for (const propRef of props) {
+                    const propId = propRef?.value
+                    if (typeof propId !== 'number') continue
+                    const prop = api.GetLine(modelID, propId)
+                    const propName = String(unwrapIfcValue(prop?.Name) ?? '')
+                    if (!propName) continue
+                    setCsetProperty(result, propName, prop?.NominalValue)
+                }
+            }
+        } catch (e) {
+            console.warn(`Failed to read Cset_StandardCH for door ${doorExpressID} (web-ifc path):`, e)
+        }
+    }
+
+    return hasCsetValues(result) ? result : null
 }
 
 /**
@@ -306,6 +534,9 @@ async function getDoorTypeInfo(
     operationTypeMap?: Map<number, string>
 ): Promise<{ direction: string | null, typeName: string | null }> {
     const result = { direction: null as string | null, typeName: null as string | null }
+    const isIfcClassName = (value: string | null): boolean => {
+        return !!value && /^ifc[a-z0-9_]*$/i.test(value.trim())
+    }
 
     // Check if we have OperationType from web-ifc extraction (preferred method)
     if (operationTypeMap && operationTypeMap.has(doorExpressID)) {
@@ -317,12 +548,10 @@ async function getDoorTypeInfo(
 
     if (fragmentsModel) {
         // Fragments model path - use already-extracted data (fast, no API calls)
-        // Use productTypeName (from IfcDoorType via IfcRelDefinesByType) - the real type name
-        // Fall back to typeName (IFC class name) if productTypeName not available
+        // Use productTypeName (from IfcDoorType via IfcRelDefinesByType) only.
+        // Do NOT fall back to IFC class names (e.g. IFCDOOR) for UI type filters.
         if (doorElement?.productTypeName) {
             result.typeName = doorElement.productTypeName;
-        } else if (doorElement?.typeName) {
-            result.typeName = doorElement.typeName;
         }
 
         // Extract OperationType for swing arc rendering (only if not already set from web-ifc map)
@@ -407,7 +636,10 @@ async function getDoorTypeInfo(
                         const type = api.GetLine(modelID, typeID);
 
                         if (type.Name && type.Name.value) {
-                            result.typeName = type.Name.value
+                            const candidateTypeName = String(type.Name.value)
+                            if (!isIfcClassName(candidateTypeName)) {
+                                result.typeName = candidateTypeName
+                            }
                         }
 
                         // Only overwrite direction if not found on instance
@@ -419,18 +651,8 @@ async function getDoorTypeInfo(
                     }
                 }
             }
-
-            // Fallback to ElementInfo typeName
-            if (!result.typeName && doorElement?.typeName) {
-                result.typeName = doorElement.typeName;
-            }
-
         } catch (e) {
             console.warn('Error getting door type info from web-ifc:', e);
-            // Fallback to ElementInfo typeName
-            if (doorElement?.typeName) {
-                result.typeName = doorElement.typeName;
-            }
         }
     }
 
@@ -486,7 +708,8 @@ export async function analyzeDoors(
     model: LoadedIFCModel,
     secondaryModel?: LoadedIFCModel,
     spatialStructure?: any,
-    operationTypeMap?: Map<number, string>
+    operationTypeMap?: Map<number, string>,
+    csetStandardCHMap?: Map<number, DoorCsetStandardCHData>
 ): Promise<DoorContext[]> {
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure)
@@ -572,7 +795,13 @@ export async function analyzeDoors(
         const doorId = door.globalId || String(door.expressID)
 
         // Get opening direction and type name
-        const { direction: openingDirection, typeName: doorTypeName } = await getDoorTypeInfo(model, door.expressID, door, operationTypeMap)
+        const { direction: openingDirection, typeName: baseDoorTypeName } = await getDoorTypeInfo(model, door.expressID, door, operationTypeMap)
+        const csetStandardCH = csetStandardCHMap?.get(door.expressID) || await getDoorCsetStandardCH(model, door.expressID)
+        // UI TYPE filter should use AL00_Tuernummer first.
+        const doorTypeName =
+            csetStandardCH?.alTuernummer
+            || csetStandardCH?.informationType
+            || baseDoorTypeName
 
         // Get storey name from spatial structure
         const storeyName = storeyMap.get(door.expressID) || null
@@ -588,6 +817,7 @@ export async function analyzeDoors(
             openingDirection,
             doorTypeName,
             storeyName,
+            csetStandardCH: csetStandardCH || undefined,
         })
     }
 

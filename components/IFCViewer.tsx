@@ -498,12 +498,27 @@ export default function IFCViewer() {
 
         // Extract OperationTypes from web-ifc for swing arc rendering
         let operationTypeMap: Map<number, string> | undefined
+        let csetStandardCHMap: Map<number, {
+          alTuernummer: string | null
+          informationType: string | null
+          massDurchgangsbreite: number | null
+          massDurchgangshoehe: number | null
+          massRohbreite: number | null
+          massRohhoehe: number | null
+          massAussenrahmenBreite: number | null
+          massAussenrahmenHoehe: number | null
+          symbolFluchtweg: string | null
+          gebaeude: string | null
+          feuerwiderstand: string | null
+          bauschalldaemmmass: string | null
+        }> | undefined
         if (archFileRef.current) {
           try {
-            const { extractDoorOperationTypes } = await import('@/lib/ifc-loader')
+            const { extractDoorOperationTypes, extractDoorCsetStandardCH } = await import('@/lib/ifc-loader')
             operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
+            csetStandardCHMap = await extractDoorCsetStandardCH(archFileRef.current)
           } catch (err) {
-            console.warn('Failed to extract OperationTypes, swing arcs will not be shown:', err)
+            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH):', err)
           }
         }
 
@@ -512,7 +527,8 @@ export default function IFCViewer() {
           loadedModelRef.current,
           electricalModelRef.current || undefined,
           spatialStructureRef.current,  // Use ref for immediate access
-          operationTypeMap  // Pass OperationType map for swing arc rendering
+          operationTypeMap,  // Pass OperationType map for swing arc rendering
+          csetStandardCHMap
         )
 
         // Load detailed geometry from web-ifc for high-quality SVG generation

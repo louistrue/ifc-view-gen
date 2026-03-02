@@ -129,9 +129,19 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           doorId: context.doorId,
-          doorType: context.doorTypeName || undefined,
+          doorType: context.csetStandardCH?.informationType || context.doorTypeName || undefined,
+          alTuernummer: context.csetStandardCH?.alTuernummer ?? undefined,
           openingDirection: context.openingDirection || undefined,
           modelSource: modelSource || undefined,
+          informationType: context.csetStandardCH?.informationType ?? undefined,
+          massDurchgangsbreite: context.csetStandardCH?.massDurchgangsbreite ?? undefined,
+          massDurchgangshoehe: context.csetStandardCH?.massDurchgangshoehe ?? undefined,
+          massRohbreite: context.csetStandardCH?.massRohbreite ?? undefined,
+          massRohhoehe: context.csetStandardCH?.massRohhoehe ?? undefined,
+          massAussenrahmenBreite: context.csetStandardCH?.massAussenrahmenBreite ?? undefined,
+          massAussenrahmenHoehe: context.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
+          feuerwiderstand: context.csetStandardCH?.feuerwiderstand ?? undefined,
+          bauschalldaemmmass: context.csetStandardCH?.bauschalldaemmmass ?? undefined,
           frontView: svgToDataUrl(front),
           backView: svgToDataUrl(back),
           topView: svgToDataUrl(plan),
@@ -165,7 +175,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     doorsToProcess.forEach(d => { newStatus[d.doorId] = 'idle' })
     setAirtableStatus(newStatus)
 
-    const CONCURRENCY = 3
+    const CONCURRENCY = 2
     const total = doorsToProcess.length
     let completed = 0
     let failed = 0
@@ -184,9 +194,19 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             doorId: door.doorId,
-            doorType: door.doorTypeName || undefined,
+            doorType: door.csetStandardCH?.informationType || door.doorTypeName || undefined,
+            alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
+            informationType: door.csetStandardCH?.informationType ?? undefined,
+            massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
+            massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
+            massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
+            massRohhoehe: door.csetStandardCH?.massRohhoehe ?? undefined,
+            massAussenrahmenBreite: door.csetStandardCH?.massAussenrahmenBreite ?? undefined,
+            massAussenrahmenHoehe: door.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
+            feuerwiderstand: door.csetStandardCH?.feuerwiderstand ?? undefined,
+            bauschalldaemmmass: door.csetStandardCH?.bauschalldaemmmass ?? undefined,
             frontView: svgToDataUrl(front),
             backView: svgToDataUrl(back),
             topView: svgToDataUrl(plan),
