@@ -2,7 +2,7 @@
 
 A collaboration between [bimdo GmbH](https://www.bimdo.ch) and [LTplus AG](https://www.lt.plus).
 
-A Next.js web application for loading, visualizing, and exporting professional technical drawings from IFC (Industry Foundation Classes) building models. Built with Three.js and web-ifc for high-performance BIM visualization.
+Next.js web application for loading, visualizing, and exporting professional technical drawings from IFC (Industry Foundation Classes) building models. Built with Three.js, web-ifc and fragments for high-performance BIM visualization.
 
 ## Features
 
