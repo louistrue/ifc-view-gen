@@ -235,14 +235,8 @@ AGPL-3
 
 ## Contact
 
-**bimdo GmbH**
-Hirschmattstrasse 33
-6003 Luzern
-Schweiz
-E-Mail: team@bimdo.ch
-
-**LTplus AG**
-[www.lt.plus](https://www.lt.plus)
+- **bimdo GmbH** — [www.bimdo.ch](https://www.bimdo.ch)
+- **LTplus AG** — [www.lt.plus](https://www.lt.plus)
 
 ## Acknowledgments
 
