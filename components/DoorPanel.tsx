@@ -8,6 +8,14 @@ import type { NavigationManager } from '@/lib/navigation-manager'
 import JSZip from 'jszip'
 import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
+import { Settings, ExternalLink, LogOut, Link2, Loader2, Check, X } from 'lucide-react'
+
+interface AirtableAuthStatus {
+  isAuthenticated: boolean
+  hasBaseId: boolean
+  baseId: string | null
+  tableName: string
+}
 
 interface DoorPanelProps {
   doorContexts: DoorContext[]
@@ -45,12 +53,13 @@ export default function DoorPanel({
   // UI state
   const [showFilters, setShowFilters] = useState(true)
   const [showStyleOptions, setShowStyleOptions] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [airtableStatus, setAirtableStatus] = useState<AirtableStatus>({})
-  const [airtableConfigured, setAirtableConfigured] = useState<boolean | null>(null)
+  const [authStatus, setAuthStatus] = useState<AirtableAuthStatus | null>(null)
   const [modalImage, setModalImage] = useState<{ svg: string; doorId: string; view: string } | null>(null)
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
@@ -127,13 +136,56 @@ export default function DoorPanel({
     return filteredDoors
   }, [filteredDoors, selectedDoorIds])
 
-  // Check Airtable configuration
-  useEffect(() => {
+  // Check Airtable OAuth auth status
+  const checkAuthStatus = useCallback(() => {
     fetch('/api/airtable')
       .then(res => res.json())
-      .then(data => setAirtableConfigured(data.configured))
-      .catch(() => setAirtableConfigured(false))
+      .then(data => setAuthStatus(data))
+      .catch(() => setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, tableName: 'Doors' }))
   }, [])
+
+  useEffect(() => {
+    checkAuthStatus()
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return
+      if (event.data.type === 'airtable-oauth-success') {
+        checkAuthStatus()
+        setError(null)
+      } else if (event.data.type === 'airtable-oauth-error') {
+        setError(`OAuth error: ${event.data.error}`)
+      }
+    }
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [checkAuthStatus])
+
+  const handleConnectAirtable = () => {
+    const width = 600, height = 700
+    const left = window.screen.width / 2 - width / 2
+    const top = window.screen.height / 2 - height / 2
+    const popup = window.open(
+      '/api/auth/airtable/authorize?popup=true',
+      'airtable-oauth',
+      `width=${width},height=${height},left=${left},top=${top},toolbar=no,location=no,status=no,menubar=no,scrollbars=yes,resizable=yes`
+    )
+    if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+      setError('Popup was blocked. Please allow popups for this site.')
+    }
+  }
+
+  const handleDisconnectAirtable = async () => {
+    try {
+      const response = await fetch('/api/auth/logout', { method: 'POST' })
+      if (response.ok) {
+        setAuthStatus({ isAuthenticated: false, hasBaseId: false, baseId: null, tableName: 'Doors' })
+      }
+    } catch {
+      setError('Failed to disconnect from Airtable')
+    }
+  }
+
+  const isAirtableReady = authStatus?.isAuthenticated === true
 
   // Sync filtered doors with 3D view
   useEffect(() => {
@@ -347,10 +399,14 @@ export default function DoorPanel({
           }),
         })
 
-        if (!response.ok) throw new Error('API Error')
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}))
+          throw new Error(errData.error || 'API Error')
+        }
         setAirtableStatus(prev => ({ ...prev, [door.doorId]: 'success' }))
         return true
       } catch (err) {
+        console.error(`Airtable upload error for ${door.doorId}:`, err)
         setAirtableStatus(prev => ({ ...prev, [door.doorId]: 'error' }))
         failed++
         return false
@@ -408,17 +464,31 @@ export default function DoorPanel({
     URL.revokeObjectURL(url)
   }
 
-  // Escape key handlers
+  // Escape key + click-outside handlers
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (modalImage) setModalImage(null)
         else if (showConfirmation) setShowConfirmation(false)
+        else if (showSettings) setShowSettings(false)
       }
     }
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [modalImage, showConfirmation])
+  }, [modalImage, showConfirmation, showSettings])
+
+  // Close settings panel on outside click
+  const settingsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!showSettings) return
+    const handleClick = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setShowSettings(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [showSettings])
 
   const hasActiveFilters = selectedStoreys.size > 0 || selectedTypes.size > 0 || searchQuery.trim().length > 0
 
@@ -451,6 +521,66 @@ export default function DoorPanel({
             </svg>
             {hasActiveFilters && <span className="filter-badge" />}
           </button>
+          {/* Settings / Airtable button */}
+          <div className="settings-wrapper" ref={settingsRef}>
+            <button
+              className={`icon-button ${showSettings ? 'active' : ''} ${isAirtableReady ? 'airtable-connected' : ''}`}
+              onClick={() => setShowSettings(v => !v)}
+              title="Airtable settings"
+            >
+              <Settings size={16} />
+              {isAirtableReady && <span className="connected-dot" />}
+            </button>
+
+            {showSettings && (
+              <div className="settings-panel">
+                <div className="settings-title">Airtable</div>
+
+                {authStatus === null ? (
+                  <div className="settings-loading">
+                    <Loader2 size={14} className="spin-icon" /> Checking...
+                  </div>
+                ) : isAirtableReady ? (
+                  <>
+                    <div className="settings-status connected">
+                      <Check size={13} />
+                      Connected
+                    </div>
+                    {authStatus.baseId && (
+                      <a
+                        href={`https://airtable.com/${authStatus.baseId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="settings-link"
+                        title={`Open ${authStatus.tableName} in Airtable`}
+                      >
+                        <Link2 size={13} />
+                        <span>{authStatus.tableName}</span>
+                        <ExternalLink size={11} />
+                      </a>
+                    )}
+                    <button className="settings-disconnect" onClick={handleDisconnectAirtable}>
+                      <LogOut size={13} />
+                      Disconnect
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="settings-status disconnected">
+                      <X size={13} />
+                      Not connected
+                    </div>
+                    <button className="settings-connect" onClick={() => { handleConnectAirtable(); setShowSettings(false) }}>
+                      Connect to Airtable
+                    </button>
+                    <p className="settings-hint">
+                      Connect to upload door views directly to your Airtable base.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -728,15 +858,23 @@ export default function DoorPanel({
             {isProcessing && pendingAction === 'download' ? 'Processing...' : `Download ZIP (${doorsToProcess.length})`}
           </button>
 
-          {airtableConfigured && (
-            <button
-              className="export-button airtable"
-              onClick={() => initiateAction('upload')}
-              disabled={isProcessing || doorsToProcess.length === 0}
-            >
-              {isProcessing && pendingAction === 'upload' ? 'Uploading...' : `Airtable (${doorsToProcess.length})`}
-            </button>
-          )}
+          <button
+            className={`export-button airtable ${!isAirtableReady ? 'needs-auth' : ''}`}
+            onClick={() => {
+              if (!isAirtableReady) {
+                handleConnectAirtable()
+              } else {
+                initiateAction('upload')
+              }
+            }}
+            disabled={isProcessing || (!isAirtableReady ? false : doorsToProcess.length === 0)}
+          >
+            {isProcessing && pendingAction === 'upload'
+              ? `Uploading... ${currentIndex}/${doorsToProcess.length}`
+              : !isAirtableReady
+              ? 'Connect & Upload to Airtable'
+              : `Upload to Airtable (${doorsToProcess.length})`}
+          </button>
         </div>
       </div>
 
@@ -1421,6 +1559,171 @@ export default function DoorPanel({
           border: none;
           border-radius: 6px;
           cursor: pointer;
+        }
+
+        /* Settings panel */
+        .settings-wrapper {
+          position: relative;
+        }
+
+        .icon-button.airtable-connected {
+          border-color: #22c55e;
+          color: #22c55e;
+        }
+
+        .connected-dot {
+          position: absolute;
+          top: -2px;
+          right: -2px;
+          width: 8px;
+          height: 8px;
+          background: #22c55e;
+          border-radius: 50%;
+          border: 1px solid #2a2a2a;
+        }
+
+        .settings-panel {
+          position: absolute;
+          top: calc(100% + 8px);
+          right: 0;
+          width: 220px;
+          background: #1e1e1e;
+          border: 1px solid #444;
+          border-radius: 10px;
+          padding: 14px;
+          z-index: 200;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .settings-title {
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.8px;
+          color: #666;
+        }
+
+        .settings-loading {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12px;
+          color: #888;
+        }
+
+        .settings-status {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12px;
+          font-weight: 500;
+          padding: 6px 8px;
+          border-radius: 6px;
+        }
+
+        .settings-status.connected {
+          background: rgba(34, 197, 94, 0.12);
+          color: #22c55e;
+        }
+
+        .settings-status.disconnected {
+          background: rgba(239, 68, 68, 0.12);
+          color: #f87171;
+        }
+
+        .settings-link {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 7px 10px;
+          background: rgba(78, 205, 196, 0.1);
+          border: 1px solid rgba(78, 205, 196, 0.3);
+          border-radius: 6px;
+          color: #4ecdc4;
+          font-size: 12px;
+          font-weight: 500;
+          text-decoration: none;
+          transition: background 0.15s;
+          white-space: nowrap;
+          overflow: hidden;
+        }
+
+        .settings-link span {
+          flex: 1;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .settings-link:hover {
+          background: rgba(78, 205, 196, 0.2);
+        }
+
+        .settings-disconnect {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 7px 10px;
+          background: transparent;
+          border: 1px solid #555;
+          border-radius: 6px;
+          color: #f87171;
+          font-size: 12px;
+          cursor: pointer;
+          transition: all 0.15s;
+          width: 100%;
+        }
+
+        .settings-disconnect:hover {
+          background: rgba(239, 68, 68, 0.1);
+          border-color: #f87171;
+        }
+
+        .settings-connect {
+          padding: 8px 12px;
+          background: #3b82f6;
+          border: none;
+          border-radius: 6px;
+          color: #fff;
+          font-size: 12px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: background 0.15s;
+          width: 100%;
+        }
+
+        .settings-connect:hover {
+          background: #2563eb;
+        }
+
+        .settings-hint {
+          margin: 0;
+          font-size: 11px;
+          color: #666;
+          line-height: 1.4;
+        }
+
+        :global(.spin-icon) {
+          animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
+        .export-button.airtable.needs-auth {
+          background: #374151;
+          border: 1px dashed #6b7280;
+          color: #9ca3af;
+        }
+
+        .export-button.airtable.needs-auth:hover {
+          background: #3b82f6;
+          border-color: #3b82f6;
+          color: #fff;
         }
       `}</style>
     </div>
