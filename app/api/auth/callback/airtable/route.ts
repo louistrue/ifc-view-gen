@@ -116,14 +116,34 @@ export async function GET(request: NextRequest) {
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
 
-    // Store the access token in the session, pre-populate base/table from env
+    // Fetch the list of bases the user authorized — pure OAuth, no env vars needed
+    let baseId: string | null = null;
+    let baseName: string | null = null;
+    try {
+      const basesRes = await fetch('https://api.airtable.com/v0/meta/bases', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (basesRes.ok) {
+        const basesData = await basesRes.json();
+        const firstBase = basesData.bases?.[0];
+        if (firstBase) {
+          baseId = firstBase.id;
+          baseName = firstBase.name;
+          console.log(`Auto-discovered base: ${baseName} (${baseId})`);
+        }
+      } else {
+        console.warn('Could not fetch bases:', await basesRes.text());
+      }
+    } catch (e) {
+      console.warn('Failed to fetch authorized bases:', e);
+    }
+
+    // Store the access token + discovered base in the session
     const session = await getIronSession<SessionData>(await cookies(), sessionOptions);
     session.airtableAccessToken = accessToken;
     session.isAuthenticated = true;
-    if (process.env.AIRTABLE_BASE_ID) {
-      session.airtableBaseId = process.env.AIRTABLE_BASE_ID;
-    }
-    session.airtableTableName = process.env.AIRTABLE_TABLE_NAME || 'Doors';
+    if (baseId) session.airtableBaseId = baseId;
+    session.airtableTableName = baseName || 'Doors';
     await session.save();
 
     console.log('OAuth flow completed successfully');

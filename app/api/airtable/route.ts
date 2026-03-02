@@ -163,25 +163,15 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        // Get baseId and tableName from request body, session, or env (fallback to defaults)
-        const baseId = body.baseId || session.airtableBaseId || process.env.AIRTABLE_BASE_ID
-        const tableName = body.tableName || session.airtableTableName || process.env.AIRTABLE_TABLE_NAME || 'Doors'
+        // baseId and tableName come exclusively from the OAuth session
+        const baseId = session.airtableBaseId
+        const tableName = session.airtableTableName || 'Doors'
 
         if (!baseId) {
             return NextResponse.json(
-                { error: 'baseId is required. Please provide it in the request or save it in your session.' },
+                { error: 'No Airtable base found in session. Please reconnect via OAuth.' },
                 { status: 400 }
             )
-        }
-
-        // Save baseId and tableName to session if provided in the request
-        if (body.baseId && body.baseId !== session.airtableBaseId) {
-            session.airtableBaseId = body.baseId
-            await session.save()
-        }
-        if (body.tableName && body.tableName !== session.airtableTableName) {
-            session.airtableTableName = body.tableName
-            await session.save()
         }
 
         // Find or create the door record
@@ -217,13 +207,10 @@ export async function POST(request: NextRequest) {
 export async function GET() {
     const session = await getIronSession<SessionData>(await cookies(), sessionOptions)
 
-    const baseId = session.airtableBaseId || process.env.AIRTABLE_BASE_ID || null
-    const tableName = session.airtableTableName || process.env.AIRTABLE_TABLE_NAME || 'Doors'
-
     return NextResponse.json({
         isAuthenticated: session.isAuthenticated || false,
-        hasBaseId: !!baseId,
-        baseId,
-        tableName,
+        hasBaseId: !!session.airtableBaseId,
+        baseId: session.airtableBaseId || null,
+        tableName: session.airtableTableName || 'Doors',
     })
 }

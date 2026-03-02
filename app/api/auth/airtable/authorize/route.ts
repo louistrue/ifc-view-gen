@@ -55,8 +55,8 @@ export async function GET(request: NextRequest) {
   authUrl.searchParams.append('code_challenge', codeChallenge);
   authUrl.searchParams.append('code_challenge_method', 'S256');
 
-  // Scopes must match what's configured in your Airtable OAuth app
-  authUrl.searchParams.append('scope', 'data.records:read data.records:write');
+  // Scopes: records r/w + schema to read base metadata (so we can auto-discover the base)
+  authUrl.searchParams.append('scope', 'data.records:read data.records:write schema.bases:read');
 
   console.log('Authorization URL:', authUrl.toString());
 
