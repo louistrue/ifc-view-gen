@@ -8,7 +8,7 @@ import type { NavigationManager } from '@/lib/navigation-manager'
 import JSZip from 'jszip'
 import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
-import { Settings, ExternalLink, LogOut, Link2, Loader2, Check, X } from 'lucide-react'
+import { Settings, ExternalLink, LogOut, Link2, Loader2, Check, X, Download, Upload } from 'lucide-react'
 
 interface AirtableAuthStatus {
   isAuthenticated: boolean
@@ -64,6 +64,8 @@ export default function DoorPanel({
   const [modalImage, setModalImage] = useState<{ svg: string; doorId: string; view: string } | null>(null)
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
+  const [sortField, setSortField] = useState<'door' | 'type' | 'storey'>('door')
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
 
   // Refs
   const listContainerRef = useRef<HTMLDivElement>(null)
@@ -135,7 +137,9 @@ export default function DoorPanel({
       const query = searchQuery.toLowerCase()
       result = result.filter(door =>
         door.doorId.toLowerCase().includes(query) ||
+        (door.door.name?.toLowerCase().includes(query)) ||
         (door.doorTypeName?.toLowerCase().includes(query)) ||
+        (door.csetStandardCH?.alTuernummer?.toLowerCase().includes(query)) ||
         (door.storeyName?.toLowerCase().includes(query))
       )
     }
@@ -150,6 +154,35 @@ export default function DoorPanel({
     }
     return filteredDoors
   }, [filteredDoors, selectedDoorIds])
+
+  const getDoorLabel = useCallback((door: DoorContext) => {
+    return door.csetStandardCH?.alTuernummer
+      || door.door.name
+      || door.doorTypeName
+      || door.doorId
+  }, [])
+
+  const sortedDoors = useMemo(() => {
+    const doors = [...filteredDoors]
+    doors.sort((a, b) => {
+      const aValue =
+        sortField === 'door'
+          ? getDoorLabel(a)
+          : sortField === 'type'
+          ? (a.doorTypeName || '')
+          : (a.storeyName || '')
+      const bValue =
+        sortField === 'door'
+          ? getDoorLabel(b)
+          : sortField === 'type'
+          ? (b.doorTypeName || '')
+          : (b.storeyName || '')
+
+      const compared = aValue.localeCompare(bValue, undefined, { numeric: true, sensitivity: 'base' })
+      return sortDirection === 'asc' ? compared : -compared
+    })
+    return doors
+  }, [filteredDoors, sortField, sortDirection, getDoorLabel])
 
   // Check Airtable OAuth auth status
   const checkAuthStatus = useCallback(() => {
@@ -516,6 +549,19 @@ export default function DoorPanel({
   }, [showSettings])
 
   const hasActiveFilters = selectedStoreys.size > 0 || selectedTypes.size > 0 || searchQuery.trim().length > 0
+  const toggleSort = useCallback((field: 'door' | 'type' | 'storey') => {
+    if (sortField === field) {
+      setSortDirection(prevDirection => (prevDirection === 'asc' ? 'desc' : 'asc'))
+      return
+    }
+    setSortField(field)
+    setSortDirection('asc')
+  }, [sortField])
+
+  const sortIndicator = useCallback((field: 'door' | 'type' | 'storey') => {
+    if (sortField !== field) return '↕'
+    return sortDirection === 'asc' ? '↑' : '↓'
+  }, [sortDirection, sortField])
 
   return (
     <div className="door-panel">
@@ -732,74 +778,89 @@ export default function DoorPanel({
             )}
           </div>
         ) : (
-          filteredDoors.slice(0, 100).map((door) => (
-            <div
-              key={door.doorId}
-              className={`door-item ${selectedDoorIds.has(door.doorId) ? 'selected' : ''} ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
-              onMouseEnter={() => handleDoorHover(door.doorId)}
-              onMouseLeave={() => handleDoorHover(null)}
-            >
-              <label className="door-checkbox">
-                <input
-                  type="checkbox"
-                  checked={selectedDoorIds.has(door.doorId)}
-                  onChange={() => toggleDoorSelection(door.doorId)}
-                />
-                <span className="checkmark" />
-              </label>
+          <>
+            <div className="door-list-header">
+              <span />
+              <button className="list-header-button" onClick={() => toggleSort('door')}>
+                <span className="label-text">Door</span>
+                <span className="sort-indicator">{sortIndicator('door')}</span>
+              </button>
+              <button className="list-header-button" onClick={() => toggleSort('type')}>
+                <span className="label-text">Type</span>
+                <span className="sort-indicator">{sortIndicator('type')}</span>
+              </button>
+              <button className="list-header-button" onClick={() => toggleSort('storey')}>
+                <span className="label-text">Storey</span>
+                <span className="sort-indicator">{sortIndicator('storey')}</span>
+              </button>
+              <span>Views</span>
+            </div>
 
-              <div className="door-info" onClick={() => handleDoorClick(door)}>
-                <div className="door-id">{door.doorId}</div>
-                <div className="door-meta">
-                  {door.doorTypeName && (
-                    <span className="meta-badge type">{door.doorTypeName}</span>
-                  )}
-                  {door.storeyName && (
-                    <span className="meta-badge storey">{door.storeyName}</span>
-                  )}
+            {sortedDoors.slice(0, 100).map((door) => (
+              <div
+                key={door.doorId}
+                className={`door-row ${selectedDoorIds.has(door.doorId) ? 'selected' : ''} ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
+                onMouseEnter={() => handleDoorHover(door.doorId)}
+                onMouseLeave={() => handleDoorHover(null)}
+              >
+                <label className="door-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={selectedDoorIds.has(door.doorId)}
+                    onChange={() => toggleDoorSelection(door.doorId)}
+                  />
+                  <span className="checkmark" />
+                </label>
+
+                <button className="door-name" onClick={() => handleDoorClick(door)} title={getDoorLabel(door)}>
+                  {getDoorLabel(door)}
+                </button>
+
+                <div className="door-cell muted" title={door.doorTypeName || ''}>
+                  {door.doorTypeName || '—'}
+                </div>
+
+                <div className="door-cell muted" title={door.storeyName || ''}>
+                  {door.storeyName || '—'}
+                </div>
+
+                <div className="door-actions">
+                  <button
+                    className="action-button compact"
+                    onClick={() => handleDoorClick(door)}
+                    title="Zoom to door"
+                  >
+                    +
+                  </button>
+                  <button
+                    className="action-button compact"
+                    onClick={() => showSingleDoor(door, 'front')}
+                    title="Front view"
+                  >
+                    F
+                  </button>
+                  <button
+                    className="action-button compact"
+                    onClick={() => showSingleDoor(door, 'back')}
+                    title="Back view"
+                  >
+                    B
+                  </button>
+                  <button
+                    className="action-button compact"
+                    onClick={() => showSingleDoor(door, 'plan')}
+                    title="Plan view"
+                  >
+                    P
+                  </button>
                 </div>
               </div>
-
-              <div className="door-actions">
-                <button
-                  className="action-button"
-                  onClick={() => handleDoorClick(door)}
-                  title="Zoom to door"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="12" y1="8" x2="12" y2="16" />
-                    <line x1="8" y1="12" x2="16" y2="12" />
-                  </svg>
-                </button>
-                <button
-                  className="action-button"
-                  onClick={() => showSingleDoor(door, 'front')}
-                  title="Front view"
-                >
-                  F
-                </button>
-                <button
-                  className="action-button"
-                  onClick={() => showSingleDoor(door, 'back')}
-                  title="Back view"
-                >
-                  B
-                </button>
-                <button
-                  className="action-button"
-                  onClick={() => showSingleDoor(door, 'plan')}
-                  title="Plan view"
-                >
-                  P
-                </button>
-              </div>
-            </div>
-          ))
+            ))}
+          </>
         )}
-        {filteredDoors.length > 100 && (
+        {sortedDoors.length > 100 && (
           <div className="more-items">
-            +{filteredDoors.length - 100} more doors
+            +{sortedDoors.length - 100} more doors
           </div>
         )}
       </div>
@@ -874,13 +935,21 @@ export default function DoorPanel({
         {error && <div className="error-message">{error}</div>}
 
         {/* Export Buttons */}
-        <div className="export-buttons">
+        <div className="export-toolbar">
+          <div className="export-summary">
+            <span className="summary-count">{doorsToProcess.length} ready</span>
+            <span className={`summary-connection ${isAirtableReady ? 'connected' : 'disconnected'}`}>
+              {isAirtableReady ? 'Airtable connected' : 'Airtable not connected'}
+            </span>
+          </div>
+          <div className="export-buttons">
           <button
-            className="export-button primary"
+            className="export-button secondary"
             onClick={() => initiateAction('download')}
             disabled={isProcessing || doorsToProcess.length === 0}
           >
-            {isProcessing && pendingAction === 'download' ? 'Processing...' : `Download ZIP (${doorsToProcess.length})`}
+            <Download size={14} />
+            <span>{isProcessing && pendingAction === 'download' ? 'Processing...' : 'Export ZIP'}</span>
           </button>
 
           <button
@@ -894,12 +963,14 @@ export default function DoorPanel({
             }}
             disabled={isProcessing || (!isAirtableReady ? false : doorsToProcess.length === 0)}
           >
-            {isProcessing && pendingAction === 'upload'
+            <Upload size={14} />
+            <span>{isProcessing && pendingAction === 'upload'
               ? `Uploading... ${currentIndex}/${doorsToProcess.length}`
               : !isAirtableReady
-              ? 'Connect & Upload to Airtable'
-              : `Upload to Airtable (${doorsToProcess.length})`}
+              ? 'Connect Airtable'
+              : 'Upload to Airtable'}</span>
           </button>
+          </div>
         </div>
       </div>
 
@@ -1140,8 +1211,9 @@ export default function DoorPanel({
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 8px 16px;
-          background: #1a1a1a;
+          padding: 10px 12px;
+          background: #171717;
+          border-bottom: 1px solid #2d2d2d;
           font-size: 12px;
         }
 
@@ -1151,26 +1223,28 @@ export default function DoorPanel({
 
         .selection-actions {
           display: flex;
-          gap: 12px;
+          gap: 10px;
         }
 
         .text-button {
-          background: none;
-          border: none;
-          color: #4ecdc4;
-          font-size: 12px;
+          background: #262626;
+          border: 1px solid #3c3c3c;
+          color: #d1d5db;
+          font-size: 11px;
+          border-radius: 999px;
           cursor: pointer;
-          padding: 0;
+          padding: 4px 10px;
         }
 
         .text-button:hover {
-          text-decoration: underline;
+          background: #333;
+          color: #fff;
         }
 
         .door-list {
           flex: 1;
           overflow-y: auto;
-          padding: 8px;
+          padding: 0;
         }
 
         .empty-state {
@@ -1183,32 +1257,88 @@ export default function DoorPanel({
           gap: 12px;
         }
 
-        .door-item {
+        .door-list-header {
+          display: grid;
+          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
+          gap: 8px;
+          padding: 8px 12px;
+          background: #1d1d1d;
+          border-bottom: 1px solid #303030;
+          font-size: 10px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          color: #7d7d7d;
+          position: sticky;
+          top: 0;
+          z-index: 5;
+        }
+
+        .door-list-header > span:last-child {
+          text-align: center;
+        }
+
+        .list-header-button {
           display: flex;
           align-items: center;
+          justify-content: space-between;
+          width: 100%;
+          min-width: 0;
+          background: none;
+          border: none;
+          color: inherit;
+          cursor: pointer;
+          padding: 0;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-size: inherit;
+          font-weight: 600;
+          text-align: left;
+          overflow: hidden;
+        }
+
+        .list-header-button:hover {
+          color: #cbd5e1;
+        }
+
+        .list-header-button .label-text {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .sort-indicator {
+          font-size: 10px;
+          line-height: 1;
+          color: #94a3b8;
+          flex-shrink: 0;
+          margin-left: 4px;
+        }
+
+        .door-row {
+          display: grid;
+          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
           gap: 8px;
-          padding: 8px 10px;
-          margin-bottom: 4px;
-          background: #333;
-          border-radius: 6px;
-          border: 1px solid transparent;
-          transition: all 0.15s;
+          align-items: center;
+          min-height: 36px;
+          padding: 5px 12px;
+          border-bottom: 1px solid #2c2c2c;
+          transition: background 0.15s ease;
         }
 
-        .door-item:hover, .door-item.hovered {
-          background: #3a3a3a;
-          border-color: #4ecdc4;
+        .door-row:hover, .door-row.hovered {
+          background: #242424;
         }
 
-        .door-item.selected {
-          background: rgba(78, 205, 196, 0.1);
-          border-color: #4ecdc4;
+        .door-row.selected {
+          background: rgba(37, 99, 235, 0.14);
         }
 
         .door-checkbox {
           position: relative;
-          display: flex;
+          display: inline-flex;
           align-items: center;
+          justify-content: center;
         }
 
         .door-checkbox input {
@@ -1216,97 +1346,101 @@ export default function DoorPanel({
           height: 16px;
           opacity: 0;
           position: absolute;
+          cursor: pointer;
         }
 
         .door-checkbox .checkmark {
-          width: 16px;
-          height: 16px;
-          border: 1px solid #555;
-          border-radius: 3px;
+          width: 14px;
+          height: 14px;
+          border: 1px solid #606060;
+          border-radius: 4px;
           background: #1a1a1a;
+          transition: all 0.15s ease;
+          position: relative;
+          display: inline-block;
         }
 
         .door-checkbox input:checked + .checkmark {
-          background: #4ecdc4;
-          border-color: #4ecdc4;
+          background: #2563eb;
+          border-color: #2563eb;
         }
 
         .door-checkbox input:checked + .checkmark::after {
           content: '';
           position: absolute;
-          left: 5px;
-          top: 1px;
+          left: 50%;
+          top: 48%;
           width: 4px;
-          height: 8px;
-          border: solid #1a1a1a;
+          height: 7px;
+          border: solid #fff;
           border-width: 0 2px 2px 0;
-          transform: rotate(45deg);
+          transform: translate(-50%, -50%) rotate(45deg);
         }
 
-        .door-info {
-          flex: 1;
-          min-width: 0;
-          cursor: pointer;
-        }
-
-        .door-id {
+        .door-name {
+          border: none;
+          background: none;
+          color: #f3f4f6;
+          text-align: left;
+          font-size: 12px;
           font-weight: 500;
-          white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
-          font-size: 12px;
+          white-space: nowrap;
+          cursor: pointer;
+          padding: 0;
         }
 
-        .door-meta {
-          display: flex;
-          gap: 4px;
-          margin-top: 4px;
+        .door-name:hover {
+          color: #93c5fd;
         }
 
-        .meta-badge {
-          font-size: 10px;
-          padding: 2px 6px;
-          border-radius: 3px;
+        .door-cell {
+          font-size: 11px;
+          overflow: hidden;
+          text-overflow: ellipsis;
           white-space: nowrap;
         }
 
-        .meta-badge.type {
-          background: rgba(59, 130, 246, 0.2);
-          color: #60a5fa;
-        }
-
-        .meta-badge.storey {
-          background: rgba(168, 85, 247, 0.2);
-          color: #c084fc;
+        .door-cell.muted {
+          color: #9ca3af;
         }
 
         .door-actions {
-          display: flex;
+          display: grid;
+          grid-template-columns: repeat(2, 20px);
+          grid-template-rows: repeat(2, 20px);
+          place-content: center;
+          justify-content: center;
           gap: 4px;
-          opacity: 0;
-          transition: opacity 0.2s;
-        }
-
-        .door-item:hover .door-actions {
-          opacity: 1;
         }
 
         .action-button {
-          display: flex;
+          width: 20px;
+          height: 20px;
+          border: 1px solid #4b5563;
+          background: #2d2d2d;
+          border-radius: 5px;
+          color: #d1d5db;
+          font-size: 9px;
+          font-weight: 700;
+          line-height: 1;
+          display: inline-flex;
           align-items: center;
           justify-content: center;
-          width: 24px;
-          height: 24px;
-          background: #444;
-          border: none;
-          border-radius: 4px;
-          color: #aaa;
           cursor: pointer;
+          transition: all 0.15s ease;
+          padding: 0;
         }
 
         .action-button:hover {
-          background: #555;
+          background: #374151;
+          border-color: #6b7280;
           color: #fff;
+        }
+
+        .action-button.compact {
+          min-width: 20px;
         }
 
         .more-items {
@@ -1421,21 +1555,68 @@ export default function DoorPanel({
           margin: 8px 0;
         }
 
-        .export-buttons {
+        .export-toolbar {
+          margin-top: 12px;
+          padding: 10px;
+          border: 1px solid #444;
+          border-radius: 10px;
+          background: #2a2a2a;
           display: flex;
           flex-direction: column;
+          gap: 10px;
+        }
+
+        .export-summary {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          font-size: 11px;
+        }
+
+        .summary-count {
+          color: #e5e7eb;
+          font-weight: 600;
+        }
+
+        .summary-connection {
+          color: #9ca3af;
+          padding: 2px 8px;
+          border-radius: 999px;
+          background: #1f2937;
+          border: 1px solid #374151;
+        }
+
+        .summary-connection.connected {
+          color: #86efac;
+          background: rgba(34, 197, 94, 0.12);
+          border-color: rgba(34, 197, 94, 0.3);
+        }
+
+        .summary-connection.disconnected {
+          color: #fca5a5;
+          background: rgba(239, 68, 68, 0.12);
+          border-color: rgba(239, 68, 68, 0.28);
+        }
+
+        .export-buttons {
+          display: flex;
+          flex-direction: row;
           gap: 8px;
-          margin-top: 12px;
         }
 
         .export-button {
-          padding: 10px 16px;
-          border: none;
-          border-radius: 6px;
-          font-size: 13px;
+          flex: 1;
+          padding: 10px 12px;
+          border: 1px solid transparent;
+          border-radius: 8px;
+          font-size: 12px;
           font-weight: 500;
           cursor: pointer;
           transition: all 0.2s;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
         }
 
         .export-button:disabled {
@@ -1443,22 +1624,26 @@ export default function DoorPanel({
           cursor: not-allowed;
         }
 
-        .export-button.primary {
-          background: #3b82f6;
-          color: #fff;
+        .export-button.secondary {
+          background: #374151;
+          border-color: #4b5563;
+          color: #e5e7eb;
         }
 
-        .export-button.primary:hover:not(:disabled) {
-          background: #2563eb;
+        .export-button.secondary:hover:not(:disabled) {
+          background: #4b5563;
+          border-color: #6b7280;
         }
 
         .export-button.airtable {
-          background: #18bfff;
+          background: #2563eb;
+          border-color: #2563eb;
           color: #fff;
         }
 
         .export-button.airtable:hover:not(:disabled) {
-          background: #0da8e6;
+          background: #1d4ed8;
+          border-color: #1d4ed8;
         }
 
         .modal-overlay {
@@ -1740,9 +1925,9 @@ export default function DoorPanel({
         }
 
         .export-button.airtable.needs-auth {
-          background: #374151;
-          border: 1px dashed #6b7280;
-          color: #9ca3af;
+          background: #1f2937;
+          border: 1px dashed #4b5563;
+          color: #cbd5e1;
         }
 
         .export-button.airtable.needs-auth:hover {

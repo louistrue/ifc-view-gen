@@ -675,6 +675,7 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
             // web-ifc returns GlobalId as an object with a .value property
             // IFC GlobalId is typically 22 characters (base64-like encoding)
             let globalId: string | undefined = undefined
+            let elementName: string | undefined = undefined
             try {
                 if (elementProps) {
                     const props = elementProps as any
@@ -695,12 +696,26 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                     if (globalId && /^\d+$/.test(globalId)) {
                         globalId = undefined
                     }
+
+                    // IFC Name can be useful for UI labels
+                    if (props.Name?.value) {
+                        elementName = String(props.Name.value).trim()
+                    } else if (props.Name && typeof props.Name === 'string') {
+                        elementName = props.Name.trim()
+                    } else if (props.name?.value) {
+                        elementName = String(props.name.value).trim()
+                    } else if (props.name && typeof props.name === 'string') {
+                        elementName = props.name.trim()
+                    }
                 }
 
 
                 // Empty string is not valid, treat as undefined
                 if (globalId === '') {
                     globalId = undefined
+                }
+                if (elementName === '') {
+                    elementName = undefined
                 }
             } catch (e) {
                 // GlobalId extraction failed, continue without it
@@ -747,6 +762,7 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 meshes: meshes, // Store all meshes for this element
                 boundingBox: (!bboxInitialized || !bbox || bbox.isEmpty()) ? undefined : bbox,
                 globalId,
+                name: elementName,
             }
 
             elements.push(elementInfo)

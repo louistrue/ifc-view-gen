@@ -13,6 +13,7 @@ export interface ElementInfo {
     expressID: number
     ifcType: number
     typeName: string // IFC class name (e.g., "IFCDOOR", "IFCWALL")
+    name?: string // IFC element Name (human-readable label)
     productTypeName?: string // Product type name from IfcRelDefinesByType (e.g., "Door Type A")
     mesh: THREE.Mesh
     meshes?: THREE.Mesh[] // All meshes for this element
