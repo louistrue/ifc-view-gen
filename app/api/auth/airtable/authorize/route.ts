@@ -58,7 +58,7 @@ export async function GET(request: NextRequest) {
   // Scopes: records r/w + schema to read base metadata (so we can auto-discover the base)
   authUrl.searchParams.append('scope', 'data.records:read data.records:write schema.bases:read');
 
-  console.log('Authorization URL:', authUrl.toString());
+  console.log('Authorization URL generated', { origin: authUrl.origin, pathname: authUrl.pathname });
 
   // Store the state and code verifier in cookies for verification in the callback
   const response = NextResponse.redirect(authUrl.toString());
@@ -79,13 +79,21 @@ export async function GET(request: NextRequest) {
     path: '/',
   });
 
-  // Store popup flag if this is a popup flow
+  // Store popup flag if this is a popup flow; otherwise clear any stale value
   if (isPopup) {
     response.cookies.set('oauth_is_popup', 'true', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
       maxAge: 60 * 10, // 10 minutes
+      path: '/',
+    });
+  } else {
+    response.cookies.set('oauth_is_popup', '', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 0,
       path: '/',
     });
   }

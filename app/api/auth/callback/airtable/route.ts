@@ -10,13 +10,12 @@ export async function GET(request: NextRequest) {
   const error = searchParams.get('error');
   const errorDescription = searchParams.get('error_description');
 
-  // Log all callback parameters for debugging
+  // Log non-sensitive callback indicators for debugging
   console.log('OAuth Callback:', {
     hasCode: !!code,
     hasState: !!state,
     error,
     errorDescription,
-    allParams: Object.fromEntries(searchParams.entries()),
   });
 
   // Verify state parameter for CSRF protection
@@ -115,6 +114,11 @@ export async function GET(request: NextRequest) {
 
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
+
+    if (!accessToken || typeof accessToken !== 'string') {
+      console.error('Token exchange succeeded but access_token is missing or invalid');
+      return NextResponse.redirect(errorRedirect('invalid_token_response'));
+    }
 
     // Fetch the list of bases the user authorized — pure OAuth, no env vars needed
     // Discover the base and first table — pure OAuth, no env vars needed
