@@ -19,6 +19,15 @@ export interface SVGRenderOptions {
     fontFamily?: string
 }
 
+/** Escape user-derived strings for safe use in SVG text content (prevents XSS) */
+function escapeSvgText(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+}
+
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
@@ -656,14 +665,14 @@ function renderTitleBlock(
     if (showLabels) {
         content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="bold" fill="#000000">Ansicht: ${localizedViewType}</text>`
 
-        const typeLabel = context.doorTypeName ? context.doorTypeName : context.doorId
+        const typeLabel = escapeSvgText(context.doorTypeName ? context.doorTypeName : context.doorId)
         const labelPrefix = context.doorTypeName ? "Typ" : "ID"
         content += `    <text x="${leftX + 250}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${labelPrefix}: ${typeLabel}</text>`
         currentY += fontSize * 1.5
 
         // 2. Opening Direction (if valid)
         if (context.openingDirection && (viewType === 'Front' || viewType === 'Back')) {
-            const dirText = formatOpeningDirection(context.openingDirection)
+            const dirText = escapeSvgText(formatOpeningDirection(context.openingDirection))
             content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
             currentY += fontSize * 1.5
         }
@@ -996,7 +1005,7 @@ function renderElevationFromBoundingBox(
     ${isBackView ? 'Rückansicht' : 'Vorderansicht'} (vereinfacht)
   </text>
   <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.8}" fill="#666">
-    ${context.doorId}
+    ${escapeSvgText(context.doorId)}
   </text>
   <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.7}" fill="#888">
     ${(doorWidth * 100).toFixed(0)}cm × ${(doorHeight * 100).toFixed(0)}cm
@@ -1643,7 +1652,7 @@ function renderPlanFromBoundingBox(
     Grundriss (vereinfacht)
   </text>
   <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.8}" fill="#666">
-    ${context.doorId}
+    ${escapeSvgText(context.doorId)}
   </text>
   <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.7}" fill="#888">
     ${(doorWidth * 100).toFixed(0)}cm × ${(doorHeight * 100).toFixed(0)}cm

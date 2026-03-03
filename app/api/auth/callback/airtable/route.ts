@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (!storedState || storedState !== state) {
-    console.error('State mismatch:', { storedState, receivedState: state });
+    console.error('OAuth state mismatch - possible CSRF');
     return NextResponse.redirect(errorRedirect('invalid_state'));
   }
 
@@ -103,11 +103,9 @@ export async function GET(request: NextRequest) {
     });
 
     if (!tokenResponse.ok) {
-      const errorData = await tokenResponse.json().catch(() => ({}));
       console.error('Token exchange failed:', {
         status: tokenResponse.status,
         statusText: tokenResponse.statusText,
-        errorData,
       });
       return NextResponse.redirect(errorRedirect('token_exchange_failed'));
     }

@@ -250,6 +250,12 @@ async function getAvailableTableFields(token: string, baseId: string, tableName:
   return result
 }
 
+/** Sanitize a string for use in blob path segments to prevent path traversal */
+function sanitizeBlobPathSegment(value: string): string {
+  const sanitized = value.replace(/[^a-zA-Z0-9_-]/g, '_')
+  return sanitized.slice(0, 255) || 'unknown'
+}
+
 async function uploadToBlob(dataUrl: string | undefined, doorId: string, viewType: string): Promise<string | undefined> {
   if (!dataUrl || !dataUrl.startsWith('data:')) return dataUrl
 
@@ -265,7 +271,8 @@ async function uploadToBlob(dataUrl: string | undefined, doorId: string, viewTyp
     const contentType = matches[1]
     const buffer = Buffer.from(matches[2], 'base64')
     const extension = contentType.split('/')[1] || 'bin'
-    const filename = `doors/${doorId}/${viewType}-${Date.now()}.${extension}`
+    const safeDoorId = sanitizeBlobPathSegment(doorId)
+    const filename = `doors/${safeDoorId}/${viewType}-${Date.now()}.${extension}`
 
     const blob = await put(filename, buffer, { access: 'public', contentType })
     return blob.url
@@ -283,7 +290,8 @@ async function findOrCreateDoorRecord(
   doorIdField: string
 ): Promise<{ recordId: string; exists: boolean }> {
   const tableUrl = `${AIRTABLE_API_BASE}/${baseId}/${encodeURIComponent(tableName)}`
-  const safeDoorId = doorId.replace(/"/g, '\\"')
+  // Escape for Airtable formula string: backslash first, then double-quote
+  const safeDoorId = doorId.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, ' ')
 
   const searchUrl = `${tableUrl}?filterByFormula={${doorIdField}}="${safeDoorId}"`
   const searchRes = await airtableFetchWithRetry(searchUrl, { headers: { Authorization: `Bearer ${token}` } }, 'find record')
@@ -583,7 +591,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Airtable API error:', error)
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to send to Airtable' },
+      { error: 'Failed to send to Airtable' },
       { status: 500 }
     )
   }

@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function GET(request: NextRequest) {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
+
   const clientId = process.env.AIRTABLE_CLIENT_ID;
   const clientSecret = process.env.AIRTABLE_CLIENT_SECRET;
   const sessionSecret = process.env.SESSION_SECRET;
