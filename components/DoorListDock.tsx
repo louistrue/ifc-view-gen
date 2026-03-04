@@ -827,6 +827,14 @@ export default function DoorListDock({
         <div className="list-footer">
           {`${visibleDoors.length} von ${filteredDoors.length} Türen angezeigt (Anzeigelimit ${maxItems} Türen)`}
           {selectedDoorIds.size > 0 && ` | ${selectedDoorIds.size} selektiert`}
+          {hasLocalFilters && (
+            <>
+              {' | '}
+              <button type="button" className="text-button" onClick={clearLocalFilters}>
+                Filter zurücksetzen
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -1212,6 +1220,10 @@ export default function DoorListDock({
 
         .list-footer {
           flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 4px;
           padding: 8px 12px;
           font-size: 11px;
           color: #7d7d7d;
