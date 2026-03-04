@@ -163,29 +163,6 @@ export default function ViewerToolbar({
             >
                 Classes
             </button>
-
-            <div style={{ height: '1px', backgroundColor: '#444', margin: '4px 0' }} />
-
-            {/* Help */}
-            <button
-                title="Keyboard shortcuts"
-                style={{ ...buttonStyle, textAlign: 'center' }}
-                onClick={() => {
-                    alert(`Keyboard Shortcuts:
-
-Views:
-  1-7 — View presets (Top, Bottom, Front, Back, Left, 3D)
-  Z — Zoom window
-  
-Section:
-  R — Reset / Show full model
-  Shift — Hold for horizontal/vertical constraint
-  F — Flip section direction
-  ESC — Cancel section drawing`)
-                }}
-            >
-                ? Shortcuts
-            </button>
         </div>
     )
 }
