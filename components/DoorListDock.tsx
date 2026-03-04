@@ -27,6 +27,90 @@ function FilterIcon() {
   )
 }
 
+type ExcludeDropdownFilter = 'type' | 'storey' | 'brandschutz' | 'schallschutz'
+
+function filterDoorsWithExclude(
+  doors: DoorContext[],
+  opts: {
+    doorFilter: string
+    typeFilterSet: Set<string>
+    storeyFilterSet: Set<string>
+    brandschutzFilterSet: Set<string>
+    schallschutzFilterSet: Set<string>
+    lbFilter: string
+    lhFilter: string
+    rbFilter: string
+    rhFilter: string
+    bramFilter: string
+    hramFilter: string
+    guidFilter: string
+    exclude?: ExcludeDropdownFilter
+    getDoorLabel: (d: DoorContext) => string
+    formatNum: (n: number | null | undefined) => string
+  }
+): DoorContext[] {
+  const d = opts.doorFilter.trim().toLowerCase()
+  const lb = opts.lbFilter.trim().toLowerCase()
+  const lh = opts.lhFilter.trim().toLowerCase()
+  const rb = opts.rbFilter.trim().toLowerCase()
+  const rh = opts.rhFilter.trim().toLowerCase()
+  const bram = opts.bramFilter.trim().toLowerCase()
+  const hram = opts.hramFilter.trim().toLowerCase()
+  const g = opts.guidFilter.trim().toLowerCase()
+
+  return doors.filter(door => {
+    if (d) {
+      const label = opts.getDoorLabel(door).toLowerCase()
+      if (!label.includes(d)) return false
+    }
+    if (opts.exclude !== 'type' && opts.typeFilterSet.size > 0) {
+      const type = door.csetStandardCH?.geometryType || '—'
+      if (!opts.typeFilterSet.has(type)) return false
+    }
+    if (opts.exclude !== 'storey' && opts.storeyFilterSet.size > 0) {
+      const storey = door.storeyName || '—'
+      if (!opts.storeyFilterSet.has(storey)) return false
+    }
+    if (opts.exclude !== 'brandschutz' && opts.brandschutzFilterSet.size > 0) {
+      const brand = door.csetStandardCH?.feuerwiderstand || '—'
+      if (!opts.brandschutzFilterSet.has(brand)) return false
+    }
+    if (opts.exclude !== 'schallschutz' && opts.schallschutzFilterSet.size > 0) {
+      const schall = door.csetStandardCH?.bauschalldaemmmass || '—'
+      if (!opts.schallschutzFilterSet.has(schall)) return false
+    }
+    if (lb) {
+      const val = opts.formatNum(door.csetStandardCH?.massDurchgangsbreite).toLowerCase()
+      if (!val.includes(lb)) return false
+    }
+    if (lh) {
+      const val = opts.formatNum(door.csetStandardCH?.massDurchgangshoehe).toLowerCase()
+      if (!val.includes(lh)) return false
+    }
+    if (rb) {
+      const val = opts.formatNum(door.csetStandardCH?.massRohbreite).toLowerCase()
+      if (!val.includes(rb)) return false
+    }
+    if (rh) {
+      const val = opts.formatNum(door.csetStandardCH?.massRohhoehe).toLowerCase()
+      if (!val.includes(rh)) return false
+    }
+    if (bram) {
+      const val = opts.formatNum(door.csetStandardCH?.massAussenrahmenBreite).toLowerCase()
+      if (!val.includes(bram)) return false
+    }
+    if (hram) {
+      const val = opts.formatNum(door.csetStandardCH?.massAussenrahmenHoehe).toLowerCase()
+      if (!val.includes(hram)) return false
+    }
+    if (g) {
+      const guid = ((door.door.globalId ?? door.doorId) || '').toLowerCase()
+      if (!guid.includes(g)) return false
+    }
+    return true
+  })
+}
+
 const COLS: Array<{ key: ColKey; min: number; initial: number }> = [
   { key: 'check', min: 24, initial: 24 },
   { key: 'door', min: 140, initial: 260 },
@@ -193,68 +277,47 @@ export default function DoorListDock({
    const formatNum = useCallback((n: number | null | undefined) =>
      n != null && Number.isFinite(n) ? String(n) : '—', [])
 
-   const filteredDoors = useMemo(() => {
-     const d = doorFilter.trim().toLowerCase()
-     const lb = lbFilter.trim().toLowerCase()
-     const lh = lhFilter.trim().toLowerCase()
-     const rb = rbFilter.trim().toLowerCase()
-     const rh = rhFilter.trim().toLowerCase()
-     const bram = bramFilter.trim().toLowerCase()
-     const hram = hramFilter.trim().toLowerCase()
-     const g = guidFilter.trim().toLowerCase()
+   const filterOpts = useMemo(
+     () => ({
+       doorFilter,
+       typeFilterSet,
+       storeyFilterSet,
+       brandschutzFilterSet,
+       schallschutzFilterSet,
+       lbFilter,
+       lhFilter,
+       rbFilter,
+       rhFilter,
+       bramFilter,
+       hramFilter,
+       guidFilter,
+       getDoorLabel,
+       formatNum,
+     }),
+     [doorFilter, typeFilterSet, storeyFilterSet, brandschutzFilterSet, schallschutzFilterSet, lbFilter, lhFilter, rbFilter, rhFilter, bramFilter, hramFilter, guidFilter, getDoorLabel, formatNum]
+   )
 
-     return doors.filter(door => {
-       if (d) {
-         const label = getDoorLabel(door).toLowerCase()
-         if (!label.includes(d)) return false
-       }
-       if (typeFilterSet.size > 0) {
-         const type = door.csetStandardCH?.geometryType || '—'
-         if (!typeFilterSet.has(type)) return false
-       }
-       if (storeyFilterSet.size > 0) {
-         const storey = door.storeyName || '—'
-         if (!storeyFilterSet.has(storey)) return false
-       }
-       if (brandschutzFilterSet.size > 0) {
-         const brand = door.csetStandardCH?.feuerwiderstand || '—'
-         if (!brandschutzFilterSet.has(brand)) return false
-       }
-       if (schallschutzFilterSet.size > 0) {
-         const schall = door.csetStandardCH?.bauschalldaemmmass || '—'
-         if (!schallschutzFilterSet.has(schall)) return false
-       }
-       if (lb) {
-         const val = formatNum(door.csetStandardCH?.massDurchgangsbreite).toLowerCase()
-         if (!val.includes(lb)) return false
-       }
-       if (lh) {
-         const val = formatNum(door.csetStandardCH?.massDurchgangshoehe).toLowerCase()
-         if (!val.includes(lh)) return false
-       }
-       if (rb) {
-         const val = formatNum(door.csetStandardCH?.massRohbreite).toLowerCase()
-         if (!val.includes(rb)) return false
-       }
-       if (rh) {
-         const val = formatNum(door.csetStandardCH?.massRohhoehe).toLowerCase()
-         if (!val.includes(rh)) return false
-       }
-       if (bram) {
-         const val = formatNum(door.csetStandardCH?.massAussenrahmenBreite).toLowerCase()
-         if (!val.includes(bram)) return false
-       }
-       if (hram) {
-         const val = formatNum(door.csetStandardCH?.massAussenrahmenHoehe).toLowerCase()
-         if (!val.includes(hram)) return false
-       }
-       if (g) {
-         const guid = ((door.door.globalId ?? door.doorId) || '').toLowerCase()
-         if (!guid.includes(g)) return false
-       }
-       return true
-     })
-   }, [doors, doorFilter, getDoorLabel, typeFilterSet, storeyFilterSet, brandschutzFilterSet, schallschutzFilterSet, lbFilter, lhFilter, rbFilter, rhFilter, bramFilter, hramFilter, guidFilter, formatNum])
+   const filteredDoors = useMemo(
+     () => filterDoorsWithExclude(doors, filterOpts),
+     [doors, filterOpts]
+   )
+
+   const doorsForTypeOptions = useMemo(
+     () => filterDoorsWithExclude(doors, { ...filterOpts, exclude: 'type' }),
+     [doors, filterOpts]
+   )
+   const doorsForStoreyOptions = useMemo(
+     () => filterDoorsWithExclude(doors, { ...filterOpts, exclude: 'storey' }),
+     [doors, filterOpts]
+   )
+   const doorsForBrandschutzOptions = useMemo(
+     () => filterDoorsWithExclude(doors, { ...filterOpts, exclude: 'brandschutz' }),
+     [doors, filterOpts]
+   )
+   const doorsForSchallschutzOptions = useMemo(
+     () => filterDoorsWithExclude(doors, { ...filterOpts, exclude: 'schallschutz' }),
+     [doors, filterOpts]
+   )
 
    const visibleDoors = filteredDoors.slice(0, maxItems)
    const remaining = Math.max(0, filteredDoors.length - visibleDoors.length)
@@ -278,39 +341,39 @@ export default function DoorListDock({
 
    const uniqueTypeValues = useMemo(() => {
      const s = new Set<string>()
-     doors.forEach(d => {
-       const v = d.csetStandardCH?.geometryType || '—'
-       s.add(v)
+     doorsForTypeOptions.forEach(d => {
+       s.add(d.csetStandardCH?.geometryType || '—')
      })
+     typeFilterSet.forEach(v => s.add(v))
      return Array.from(s).sort()
-   }, [doors])
+   }, [doorsForTypeOptions, typeFilterSet])
 
    const uniqueStoreyValues = useMemo(() => {
      const s = new Set<string>()
-     doors.forEach(d => {
-       const v = d.storeyName || '—'
-       s.add(v)
+     doorsForStoreyOptions.forEach(d => {
+       s.add(d.storeyName || '—')
      })
+     storeyFilterSet.forEach(v => s.add(v))
      return Array.from(s).sort()
-   }, [doors])
+   }, [doorsForStoreyOptions, storeyFilterSet])
 
    const uniqueBrandschutzValues = useMemo(() => {
      const s = new Set<string>()
-     doors.forEach(d => {
-       const v = d.csetStandardCH?.feuerwiderstand || '—'
-       s.add(v)
+     doorsForBrandschutzOptions.forEach(d => {
+       s.add(d.csetStandardCH?.feuerwiderstand || '—')
      })
+     brandschutzFilterSet.forEach(v => s.add(v))
      return Array.from(s).sort()
-   }, [doors])
+   }, [doorsForBrandschutzOptions, brandschutzFilterSet])
 
    const uniqueSchallschutzValues = useMemo(() => {
      const s = new Set<string>()
-     doors.forEach(d => {
-       const v = d.csetStandardCH?.bauschalldaemmmass || '—'
-       s.add(v)
+     doorsForSchallschutzOptions.forEach(d => {
+       s.add(d.csetStandardCH?.bauschalldaemmmass || '—')
      })
+     schallschutzFilterSet.forEach(v => s.add(v))
      return Array.from(s).sort()
-   }, [doors])
+   }, [doorsForSchallschutzOptions, schallschutzFilterSet])
 
    type DropdownCol = SortField
    const [dropdownOpenKey, setDropdownOpenKey] = useState<DropdownCol | null>(null)
