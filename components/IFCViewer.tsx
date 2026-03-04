@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
@@ -17,6 +17,7 @@ import ViewPresets from './ViewPresets'
 import SpatialHierarchyPanel from './SpatialHierarchyPanel'
 import TypeFilterPanel from './TypeFilterPanel'
 import IFCClassFilterPanel from './IFCClassFilterPanel'
+import DoorListDock from './DoorListDock'
 
 export default function IFCViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -38,6 +39,110 @@ export default function IFCViewer() {
   const [error, setError] = useState<string | null>(null)
   const [doorContexts, setDoorContexts] = useState<DoorContext[]>([])
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
+
+  // DoorListDock
+  const [dockSelectedDoorIds, setDockSelectedDoorIds] = useState<Set<string>>(new Set()) // Store selected door IDs for DoorListDock
+  const [dockHoveredDoorId, setDockHoveredDoorId] = useState<string | null>(null) // Hover (Highlight in 3D)
+  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'>('door') // Sort field for DoorListDock
+  const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
+  const DOCK_RIGHT_OFFSET_PX = 400
+  const DOCK_HEIGHT_PX = 260
+
+  const getDockDoorLabel = useCallback((door: DoorContext) => {
+    return (
+      door.csetStandardCH?.alTuernummer ||
+      door.door.name ||
+      door.doorTypeName ||
+      door.doorId
+    )
+  }, [])
+
+  const toggleDockDoorSelection = useCallback((doorId: string) => {
+    setDockSelectedDoorIds(prev => {
+      const next = new Set(prev)
+      if (next.has(doorId)) next.delete(doorId)
+      else next.add(doorId)
+      return next
+    })
+  }, [])
+
+  const toggleDockSort = useCallback((field: 'door' | 'type' | 'storey') => {
+    setDockSortField(prevField => {
+      if (prevField === field) {
+        setDockSortDirection(prevDir => (prevDir === 'asc' ? 'desc' : 'asc'))
+        return prevField
+      }
+      setDockSortDirection('asc')
+      return field
+    })
+  }, [])
+
+  const dockSortIndicator = useCallback(
+    (field: 'door' | 'type' | 'storey') => {
+      if (dockSortField !== field) return '↕'
+      return dockSortDirection === 'asc' ? '↑' : '↓'
+    },
+    [dockSortDirection, dockSortField]
+  )
+
+  const sortedDockDoors = useMemo(() => {
+    const doors = [...doorContexts]
+    doors.sort((a, b) => {
+      const aValue =
+        dockSortField === 'door'
+          ? getDockDoorLabel(a)
+          : dockSortField === 'type'
+            ? (a.doorTypeName || '')
+            : (a.storeyName || '')
+      const bValue =
+        dockSortField === 'door'
+          ? getDockDoorLabel(b)
+          : dockSortField === 'type'
+            ? (b.doorTypeName || '')
+            : (b.storeyName || '')
+
+      const compared = aValue.localeCompare(bValue, undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      })
+      return dockSortDirection === 'asc' ? compared : -compared
+    })
+    return doors
+  }, [doorContexts, dockSortDirection, dockSortField, getDockDoorLabel])
+
+  const handleDockDoorHover = useCallback(
+    (doorId: string | null) => {
+      setDockHoveredDoorId(doorId)
+
+      const vm = visibilityManagerRef.current
+      if (!vm) return
+
+      if (doorId === null) {
+        vm.setHoveredElement(null)
+        return
+      }
+
+      const door = doorContexts.find(d => d.doorId === doorId)
+      if (!door) return
+
+      vm.setHoveredElement(door.door.expressID)
+    },
+    [doorContexts]
+  )
+
+  const handleDockDoorClick = useCallback((door: DoorContext) => {
+    const nav = navigationManagerRef.current
+    if (!nav || !door.door.boundingBox) return
+
+    const vm = visibilityManagerRef.current
+    if (vm) vm.setSelectedElements([door.door.expressID])
+
+    nav.zoomToElementFromNormal(door.door.boundingBox, door.normal, 2.5)
+  }, [])
+
+  const handleDockShowSingleDoor = useCallback((_door: DoorContext, _view: 'front' | 'back' | 'plan') => {
+    // TODO: optional preview implementation later
+  }, [])
 
   // File names for display
   const [archFileName, setArchFileName] = useState<string>('')
@@ -916,6 +1021,24 @@ export default function IFCViewer() {
               }}
             />
           </div>
+        )}
+
+        {showBatchProcessor && doorContexts.length > 0 && (
+          <DoorListDock
+            doors={sortedDockDoors}
+            selectedDoorIds={dockSelectedDoorIds}
+            hoveredDoorId={dockHoveredDoorId}
+            getDoorLabel={getDockDoorLabel}
+            onToggleSelect={toggleDockDoorSelection}
+            onDoorClick={handleDockDoorClick}
+            onHoverDoorId={handleDockDoorHover}
+            onShowSingleDoor={handleDockShowSingleDoor}
+            sortIndicator={dockSortIndicator}
+            onToggleSort={toggleDockSort}
+            dock
+            dockHeightPx={DOCK_HEIGHT_PX}
+            dockRightOffsetPx={DOCK_RIGHT_OFFSET_PX}
+          />
         )}
       </div>
 
