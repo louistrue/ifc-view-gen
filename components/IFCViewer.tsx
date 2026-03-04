@@ -66,15 +66,9 @@ export default function IFCViewer() {
     })
   }, [])
 
-  const toggleDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
-    setDockSortField(prevField => {
-      if (prevField === field) {
-        setDockSortDirection(prevDir => (prevDir === 'asc' ? 'desc' : 'asc'))
-        return prevField
-      }
-      setDockSortDirection('asc')
-      return field
-    })
+  const setDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid', direction: 'asc' | 'desc') => {
+    setDockSortField(field)
+    setDockSortDirection(direction)
   }, [])
 
   const dockSortIndicator = useCallback(
@@ -1047,7 +1041,7 @@ export default function IFCViewer() {
             onHoverDoorId={handleDockDoorHover}
             onShowSingleDoor={handleDockShowSingleDoor}
             sortIndicator={dockSortIndicator}
-            onToggleSort={toggleDockSort}
+            onSetSort={setDockSort}
             dock
             dockHeightPx={DOCK_HEIGHT_PX}
             dockRightOffsetPx={DOCK_RIGHT_OFFSET_PX}

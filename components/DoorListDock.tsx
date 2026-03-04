@@ -8,7 +8,6 @@ type SortField = 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | '
 type ViewKind = 'front' | 'back' | 'plan'
 
 type ColKey = 'check' | 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'views' | 'guid'
-type SearchableCol = 'door' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
 type StringSet = Set<string>
 
 function SearchIcon() {
@@ -52,7 +51,7 @@ export type DoorListDockProps = {
 
   // sorting UI
   sortIndicator: (field: SortField) => string
-  onToggleSort: (field: SortField) => void
+  onSetSort: (field: SortField, direction: 'asc' | 'desc') => void
 
   // empty state actions (optional)
   hasActiveFilters?: boolean
@@ -78,7 +77,7 @@ export default function DoorListDock({
   onHoverDoorId,
   onShowSingleDoor,
   sortIndicator,
-  onToggleSort,
+  onSetSort,
   hasActiveFilters,
   onClearFilters,
   maxItems = 100,
@@ -266,11 +265,9 @@ export default function DoorListDock({
      return Array.from(s).sort()
    }, [doors])
 
-   const [dropdownOpenKey, setDropdownOpenKey] = useState<'type' | 'storey' | 'brandschutz' | 'schallschutz' | null>(null)
+   type DropdownCol = SortField
+   const [dropdownOpenKey, setDropdownOpenKey] = useState<DropdownCol | null>(null)
    const dropdownRef = useRef<HTMLDivElement>(null)
-
-   const [searchActiveCol, setSearchActiveCol] = useState<SearchableCol | null>(null)
-   const searchColRef = useRef<HTMLDivElement>(null)
 
    useEffect(() => {
      if (!dropdownOpenKey) return
@@ -279,19 +276,8 @@ export default function DoorListDock({
          setDropdownOpenKey(null)
        }
      }
-     document.addEventListener('mousedown', onOutside)
-     return () => document.removeEventListener('mousedown', onOutside)
-   }, [dropdownOpenKey])
-
-   useEffect(() => {
-     if (!searchActiveCol) return
-     const onOutside = (e: MouseEvent) => {
-       if (searchColRef.current && !searchColRef.current.contains(e.target as Node)) {
-         setSearchActiveCol(null)
-       }
-     }
      const onEscape = (e: KeyboardEvent) => {
-       if (e.key === 'Escape') setSearchActiveCol(null)
+       if (e.key === 'Escape') setDropdownOpenKey(null)
      }
      document.addEventListener('mousedown', onOutside)
      document.addEventListener('keydown', onEscape)
@@ -299,7 +285,7 @@ export default function DoorListDock({
        document.removeEventListener('mousedown', onOutside)
        document.removeEventListener('keydown', onEscape)
      }
-   }, [searchActiveCol])
+   }, [dropdownOpenKey])
 
    const toggleDropdownValue = useCallback(
      (key: 'type' | 'storey' | 'brandschutz' | 'schallschutz', value: string, setter: (fn: (p: StringSet) => StringSet) => void) => {
@@ -345,28 +331,29 @@ export default function DoorListDock({
           <div className="door-list-header" style={{ gridTemplateColumns: gridTemplate }}>
             <div className="header-col header-col-checkbox" />
 
-            <div className="header-col header-resizable" ref={searchActiveCol === 'door' ? searchColRef : undefined}>
-              {searchActiveCol === 'door' ? (
-                <input className="header-filter" placeholder="Suchen…" value={doorFilter} onChange={(e) => setDoorFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('door')}>
-                    <span className="label-text">AL00_Türnummer</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('door')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'door' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'door' ? null : 'door')}>
+                  <span className="label-text">Türnummer</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'door' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={doorFilter} onChange={(e) => setDoorFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('door', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('door', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('door', e)} />
             </div>
 
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'type' ? dropdownRef : undefined}>
-              <div className="header-title-row">
-                <button className="list-header-button" onClick={() => onToggleSort('type')}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'type' ? null : 'type')}>
                   <span className="label-text">Geometrietyp</span>
                 </button>
-                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'type' ? null : 'type')} title="Filter">▾</button>
               </div>
               {dropdownOpenKey === 'type' && (
                 <div className="header-dropdown">
@@ -376,17 +363,20 @@ export default function DoorListDock({
                       <span>{v}</span>
                     </label>
                   ))}
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('type', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('type', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('type', e)} />
             </div>
 
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'storey' ? dropdownRef : undefined}>
-              <div className="header-title-row">
-                <button className="list-header-button" onClick={() => onToggleSort('storey')}>
-                  <span className="label-text">Storey</span>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'storey' ? null : 'storey')}>
+                  <span className="label-text">Geschoss</span>
                 </button>
-                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'storey' ? null : 'storey')} title="Filter">▾</button>
               </div>
               {dropdownOpenKey === 'storey' && (
                 <div className="header-dropdown">
@@ -396,17 +386,20 @@ export default function DoorListDock({
                       <span>{v}</span>
                     </label>
                   ))}
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('storey', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('storey', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('storey', e)} />
             </div>
 
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'brandschutz' ? dropdownRef : undefined}>
-              <div className="header-title-row">
-                <button className="list-header-button" onClick={() => onToggleSort('brandschutz')}>
-                  <span className="label-text">IN01_Brandschutz_manuell</span>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'brandschutz' ? null : 'brandschutz')}>
+                  <span className="label-text">Brandschutz</span>
                 </button>
-                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'brandschutz' ? null : 'brandschutz')} title="Filter">▾</button>
               </div>
               {dropdownOpenKey === 'brandschutz' && (
                 <div className="header-dropdown">
@@ -416,17 +409,20 @@ export default function DoorListDock({
                       <span>{v}</span>
                     </label>
                   ))}
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('brandschutz', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('brandschutz', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('brandschutz', e)} />
             </div>
 
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'schallschutz' ? dropdownRef : undefined}>
-              <div className="header-title-row">
-                <button className="list-header-button" onClick={() => onToggleSort('schallschutz')}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'schallschutz' ? null : 'schallschutz')}>
                   <span className="label-text">Schallschutz</span>
                 </button>
-                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'schallschutz' ? null : 'schallschutz')} title="Filter">▾</button>
               </div>
               {dropdownOpenKey === 'schallschutz' && (
                 <div className="header-dropdown">
@@ -436,121 +432,143 @@ export default function DoorListDock({
                       <span>{v}</span>
                     </label>
                   ))}
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('schallschutz', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('schallschutz', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('schallschutz', e)} />
             </div>
 
-            <div className="header-col header-resizable" ref={searchActiveCol === 'lb' ? searchColRef : undefined}>
-              {searchActiveCol === 'lb' ? (
-                <input className="header-filter" placeholder="Suchen…" value={lbFilter} onChange={(e) => setLbFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('lb')}>
-                    <span className="label-text">LB</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('lb')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'lb' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'lb' ? null : 'lb')}>
+                  <span className="label-text">LB</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'lb' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={lbFilter} onChange={(e) => setLbFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('lb', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('lb', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('lb', e)} />
             </div>
-            <div className="header-col header-resizable" ref={searchActiveCol === 'lh' ? searchColRef : undefined}>
-              {searchActiveCol === 'lh' ? (
-                <input className="header-filter" placeholder="Suchen…" value={lhFilter} onChange={(e) => setLhFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('lh')}>
-                    <span className="label-text">LH</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('lh')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'lh' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'lh' ? null : 'lh')}>
+                  <span className="label-text">LH</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'lh' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={lhFilter} onChange={(e) => setLhFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('lh', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('lh', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('lh', e)} />
             </div>
-            <div className="header-col header-resizable" ref={searchActiveCol === 'rb' ? searchColRef : undefined}>
-              {searchActiveCol === 'rb' ? (
-                <input className="header-filter" placeholder="Suchen…" value={rbFilter} onChange={(e) => setRbFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('rb')}>
-                    <span className="label-text">RB</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('rb')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'rb' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'rb' ? null : 'rb')}>
+                  <span className="label-text">RB</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'rb' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={rbFilter} onChange={(e) => setRbFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('rb', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('rb', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('rb', e)} />
             </div>
-            <div className="header-col header-resizable" ref={searchActiveCol === 'rh' ? searchColRef : undefined}>
-              {searchActiveCol === 'rh' ? (
-                <input className="header-filter" placeholder="Suchen…" value={rhFilter} onChange={(e) => setRhFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('rh')}>
-                    <span className="label-text">RH</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('rh')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'rh' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'rh' ? null : 'rh')}>
+                  <span className="label-text">RH</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'rh' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={rhFilter} onChange={(e) => setRhFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('rh', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('rh', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('rh', e)} />
             </div>
-            <div className="header-col header-resizable" ref={searchActiveCol === 'bram' ? searchColRef : undefined}>
-              {searchActiveCol === 'bram' ? (
-                <input className="header-filter" placeholder="Suchen…" value={bramFilter} onChange={(e) => setBramFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('bram')}>
-                    <span className="label-text">BRAM</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('bram')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'bram' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'bram' ? null : 'bram')}>
+                  <span className="label-text">BRAM</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'bram' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={bramFilter} onChange={(e) => setBramFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('bram', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('bram', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('bram', e)} />
             </div>
-            <div className="header-col header-resizable" ref={searchActiveCol === 'hram' ? searchColRef : undefined}>
-              {searchActiveCol === 'hram' ? (
-                <input className="header-filter" placeholder="Suchen…" value={hramFilter} onChange={(e) => setHramFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('hram')}>
-                    <span className="label-text">HRAM</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('hram')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'hram' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'hram' ? null : 'hram')}>
+                  <span className="label-text">HRAM</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'hram' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={hramFilter} onChange={(e) => setHramFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('hram', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('hram', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('hram', e)} />
             </div>
 
             <div className="header-col header-resizable view-col">
-              <div className="header-title-row">
-                <span className="header-label">Ansicht</span>
-                <button className="clear-header-filters" onClick={clearLocalFilters} title="Filter zurücksetzen"></button>
+              <div className="header-row">
+                <button disabled type="button" className="list-header-button" style={{ cursor: 'default', pointerEvents: 'none', opacity: 1 }}>
+                  <span className="label-text">Ansicht</span>
+                </button>
+                <span className="header-search-toggle" style={{ visibility: 'hidden', pointerEvents: 'none' }} aria-hidden>
+                  <SearchIcon />
+                </span>
               </div>
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('views', e)} />
             </div>
 
-            <div className="header-col header-resizable" ref={searchActiveCol === 'guid' ? searchColRef : undefined}>
-              {searchActiveCol === 'guid' ? (
-                <input className="header-filter" placeholder="Suchen…" value={guidFilter} onChange={(e) => setGuidFilter(e.target.value)} autoFocus />
-              ) : (
-                <div className="header-search-row">
-                  <button className="list-header-button" onClick={() => onToggleSort('guid')}>
-                    <span className="label-text">GUID</span>
-                  </button>
-                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('guid')} title="Suchen">
-                    <SearchIcon />
-                  </button>
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'guid' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'guid' ? null : 'guid')}>
+                  <span className="label-text">GUID</span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'guid' && (
+                <div className="header-dropdown">
+                  <input className="header-filter" placeholder="Suchen…" value={guidFilter} onChange={(e) => setGuidFilter(e.target.value)} autoFocus />
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('guid', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('guid', 'desc')} title="Absteigend">↓</button>
+                  </div>
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('guid', e)} />
@@ -586,10 +604,10 @@ export default function DoorListDock({
                 {door.storeyName || '—'}
               </div>
 
-              <div className="door-cell muted" title={door.csetStandardCH?.feuerwiderstand || ''}>
+              <div className="door-cell muted door-cell-text" title={door.csetStandardCH?.feuerwiderstand || ''}>
                 {door.csetStandardCH?.feuerwiderstand || '—'}
               </div>
-              <div className="door-cell muted" title={door.csetStandardCH?.bauschalldaemmmass || ''}>
+              <div className="door-cell muted door-cell-text" title={door.csetStandardCH?.bauschalldaemmmass || ''}>
                 {door.csetStandardCH?.bauschalldaemmmass || '—'}
               </div>
               <div className="door-cell muted door-cell-numeric" title={formatNum(door.csetStandardCH?.massDurchgangsbreite)}>
@@ -669,7 +687,7 @@ export default function DoorListDock({
           padding: 8px 12px;
           background: #1d1d1d;
           border-bottom: 1px solid #303030;
-          font-size: 10px;
+          font-size: 11px;
           color: #7d7d7d;
           position: sticky;
           top: 0;
@@ -688,7 +706,7 @@ export default function DoorListDock({
           color: inherit;
           cursor: pointer;
           padding: 0;
-          font-size: inherit;
+          font-size: 11px;
           font-weight: 600;
           text-align: left;
           overflow: hidden;
@@ -705,15 +723,16 @@ export default function DoorListDock({
           white-space: nowrap;
         }
 
-        .header-search-row {
+        .header-row {
           display: flex;
           align-items: center;
           width: 100%;
           min-width: 0;
           gap: 4px;
+          height: 22px;
         }
 
-        .header-search-row .list-header-button {
+        .header-row .list-header-button {
           flex: 1;
           min-width: 0;
         }
@@ -734,18 +753,6 @@ export default function DoorListDock({
 
         .header-search-toggle:hover {
           color: #cbd5e1;
-        }
-
-        .header-title-row {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          min-width: 0;
-        }
-
-        .header-title-row .list-header-button {
-          flex: 1;
-          min-width: 0;
         }
 
         .header-dropdown-trigger {
@@ -803,9 +810,32 @@ export default function DoorListDock({
           flex-shrink: 0;
         }
 
-        .view-col {
+        .header-sort-buttons {
+          display: flex;
+          gap: 4px;
+          margin-top: 8px;
+          padding-top: 8px;
+          border-top: 1px solid #333;
+        }
+
+        .header-sort-btn {
+          flex: 1;
+          padding: 4px 8px;
+          font-size: 11px;
+          border: 1px solid #333;
+          border-radius: 4px;
+          background: #141414;
+          color: #9ca3af;
+          cursor: pointer;
+          display: flex;
           align-items: center;
           justify-content: center;
+        }
+
+        .header-sort-btn:hover {
+          color: #fff;
+          border-color: #555;
+          background: #2a2a2a;
         }
 
         .door-row {
@@ -904,18 +934,14 @@ export default function DoorListDock({
           font-variant-numeric: tabular-nums;
         }
 
+        .door-cell-text {
+          text-align: right;
+        }
+
         .door-cell-guid {
           font-size: 10px;
           font-family: ui-monospace, monospace;
         }
-
-        .header-label {
-          font-size: 9px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
 
         .door-actions {
           display: grid;
@@ -981,12 +1007,10 @@ export default function DoorListDock({
           flex-direction: column;
           gap: 6px;
           min-width: 0;
-          min-height: 56px;
+          min-height: 22px;
         }
 
-        .header-col-checkbox {
-          min-height: 56px;
-        }
+
 
         .header-filter {
           width: 100%;
@@ -1004,19 +1028,11 @@ export default function DoorListDock({
           border-color: #4ecdc4;
         }
 
-        .clear-header-filters {
-          width: 22px;
-          height: 22px;
-          border-radius: 6px;
-          border: 1px solid #333;
-          background: #141414;
-          color: #9ca3af;
-          cursor: pointer;
-        }
-
-        .clear-header-filters:hover {
-          color: #fff;
-          border-color: #555;
+        .header-label {
+          font-size: 11px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
        .header-resizable {
