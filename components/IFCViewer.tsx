@@ -301,15 +301,18 @@ export default function IFCViewer() {
     const camera = new THREE.PerspectiveCamera(
       75,
       containerRef.current.clientWidth / containerRef.current.clientHeight,
-      0.1,
-      1000
+      0.01,
+      10000
     )
     camera.position.set(10, 10, 10)
     camera.lookAt(0, 0, 0)
     cameraRef.current = camera
 
     // Renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      logarithmicDepthBuffer: true,
+    })
 
     // Canvas fills full container - sidebars are overlays
     const containerWidth = containerRef.current.clientWidth
