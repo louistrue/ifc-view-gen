@@ -51,15 +51,18 @@ export class NavigationManager {
     this.controls = new CameraControls(this.camera, this.renderer.domElement)
 
     // Configure orbit controls for BIM navigation
-    this.controls.dollySpeed = 0.5
+    this.controls.dollySpeed = 1.25
     this.controls.truckSpeed = 1.0
+    this.controls.minDistance = Number.EPSILON
+    this.controls.dollyToCursor = true
     this.controls.mouseButtons.wheel = CameraControls.ACTION.DOLLY
     this.controls.mouseButtons.left = CameraControls.ACTION.ROTATE
     this.controls.mouseButtons.right = CameraControls.ACTION.TRUCK
     this.controls.mouseButtons.middle = CameraControls.ACTION.TRUCK
 
-    // Smooth transitions
-    this.controls.smoothTime = 0.25
+    // Smooth transitions – higher value = gentler deceleration at end of zoom
+    this.controls.smoothTime = 0.45
+    this.controls.restThreshold = 0.005
 
     // Set up update callback
     this.controls.addEventListener('control', () => {
@@ -358,13 +361,21 @@ export class NavigationManager {
     const fov = this.camera.fov * (Math.PI / 180)
     const distance = (maxDim * padding) / (2 * Math.tan(fov / 2))
 
-    // Position camera along the normal direction
-    const cameraPos = center.clone().add(normal.clone().multiplyScalar(distance))
+    // make sure normal is horizontal
+    const n = normal.clone()
+    n.y = 0
 
-    // Ensure camera is not below ground
-    if (cameraPos.y < 0.5) {
-      cameraPos.y = 0.5
+    if (n.lengthSq() < 1e-10) {
+      n.set(0, 0, 1) // fallback direction
     }
+
+    n.normalize()
+
+    // position camera along horizontal normal
+    const cameraPos = center.clone().addScaledVector(n, distance)
+
+    // ensure horizontal viewing direction
+    cameraPos.y = center.y
 
     this.controls.setLookAt(
       cameraPos.x,

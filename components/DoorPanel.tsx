@@ -24,6 +24,7 @@ interface DoorPanelProps {
   navigationManager: NavigationManager | null
   modelSource?: string
   onComplete?: () => void
+  onShowSingleDoorReady?: (showSingleDoor: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => void
 }
 
 interface AirtableStatus {
@@ -36,12 +37,14 @@ export default function DoorPanel({
   navigationManager,
   modelSource,
   onComplete,
+  onShowSingleDoorReady,
 }: DoorPanelProps) {
   // Filter state
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedStoreys, setSelectedStoreys] = useState<Set<string>>(new Set())
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set())
   const [isolateFiltered, setIsolateFiltered] = useState(false)
+  const [dimFiltered, setDimFiltered] = useState(false)
 
   // Collapsible sections: TYPE expanded by default, STOREY collapsed
   const [storeyExpanded, setStoreyExpanded] = useState(false)
@@ -242,10 +245,13 @@ export default function DoorPanel({
     if (isolateFiltered && filteredDoors.length > 0) {
       const doorExpressIds = filteredDoors.map(d => d.door.expressID)
       visibilityManager.isolateElements(doorExpressIds)
+    } else if (dimFiltered && filteredDoors.length > 0) {
+      const doorExpressIds = filteredDoors.map(d => d.door.expressID)
+      visibilityManager.dimNonSelectedElements(doorExpressIds)
     } else {
       visibilityManager.resetAllVisibility()
     }
-  }, [filteredDoors, isolateFiltered, visibilityManager])
+  }, [filteredDoors, isolateFiltered, dimFiltered, visibilityManager])
 
   // Handle hover - highlight in 3D
   const handleDoorHover = useCallback((doorId: string | null) => {
@@ -355,6 +361,11 @@ export default function DoorPanel({
     [options]
   )
 
+  useEffect(() => {
+    onShowSingleDoorReady?.(showSingleDoor)
+    return () => { onShowSingleDoorReady?.(null) }
+  }, [showSingleDoor, onShowSingleDoorReady])
+
   // Download ZIP
   const performDownload = useCallback(async () => {
     if (doorsToProcess.length === 0) {
@@ -438,11 +449,11 @@ export default function DoorPanel({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             doorId: door.doorId,
-            doorType: door.csetStandardCH?.informationType || door.doorTypeName || undefined,
+            doorType: door.csetStandardCH?.geometryType || door.doorTypeName || undefined,
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
-            informationType: door.csetStandardCH?.informationType ?? undefined,
+            geometryType: door.csetStandardCH?.geometryType ?? undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
@@ -574,12 +585,28 @@ export default function DoorPanel({
         <div className="header-actions">
           <button
             className={`icon-button ${isolateFiltered ? 'active' : ''}`}
-            onClick={() => setIsolateFiltered(!isolateFiltered)}
+            onClick={() => {
+              setIsolateFiltered(prev => !prev)
+              if (!isolateFiltered) setDimFiltered(false)
+            }}
             title={isolateFiltered ? 'Show all elements' : 'Isolate doors in 3D'}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="10" />
               <circle cx="12" cy="12" r="4" />
+            </svg>
+          </button>
+          <button
+            className={`icon-button ${dimFiltered ? 'active' : ''}`}
+            onClick={() => {
+              setDimFiltered(prev => !prev)
+              if (!dimFiltered) setIsolateFiltered(false)
+            }}
+            title={dimFiltered ? 'Show all elements' : 'Dim non-matching elements'}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" opacity="0.5" />
+              <rect x="7" y="7" width="10" height="10" rx="1" />
             </svg>
           </button>
           <button
@@ -1722,15 +1749,22 @@ export default function DoorPanel({
 
         .image-modal-body {
           flex: 1;
-          overflow: auto;
+          min-height: 0;
+          overflow: hidden;
           padding: 20px;
           background: #fff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
         }
 
         .image-modal-body :global(svg) {
           display: block;
           max-width: 100%;
+          max-height: 100%;
+          width: auto;
           height: auto;
+          object-fit: contain;
         }
 
         .image-modal-footer {

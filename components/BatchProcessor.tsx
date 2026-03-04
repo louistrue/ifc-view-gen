@@ -129,11 +129,11 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           doorId: context.doorId,
-          doorType: context.csetStandardCH?.informationType || context.doorTypeName || undefined,
+          doorType: context.csetStandardCH?.geometryType || context.doorTypeName || undefined,
           alTuernummer: context.csetStandardCH?.alTuernummer ?? undefined,
           openingDirection: context.openingDirection || undefined,
           modelSource: modelSource || undefined,
-          informationType: context.csetStandardCH?.informationType ?? undefined,
+          geometryType: context.csetStandardCH?.geometryType ?? undefined,
           massDurchgangsbreite: context.csetStandardCH?.massDurchgangsbreite ?? undefined,
           massDurchgangshoehe: context.csetStandardCH?.massDurchgangshoehe ?? undefined,
           massRohbreite: context.csetStandardCH?.massRohbreite ?? undefined,
@@ -194,11 +194,11 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             doorId: door.doorId,
-            doorType: door.csetStandardCH?.informationType || door.doorTypeName || undefined,
+            doorType: door.csetStandardCH?.geometryType || door.doorTypeName || undefined,
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
-            informationType: door.csetStandardCH?.informationType ?? undefined,
+            geometryType: door.csetStandardCH?.geometryType ?? undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
@@ -857,23 +857,28 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         }
         .image-modal-body {
           flex: 1;
-          overflow: auto;
+          min-height: 0;
+          overflow: hidden;
           padding: 2rem;
           background: #fff;
-          min-height: 0;
           display: flex;
-          align-items: flex-start;
+          align-items: center;
           justify-content: center;
         }
         .image-container {
-          display: inline-block;
-          max-width: 100%;
+          flex: 1;
+          min-height: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
         }
         .image-container svg {
           display: block;
           max-width: 100%;
+          max-height: 100%;
           width: auto;
           height: auto;
+          object-fit: contain;
         }
         .image-modal-footer {
           display: flex;

@@ -45,7 +45,7 @@ const fieldResolutionCache = new Map<string, FieldResolutionCacheEntry>()
 const FIELD_CANDIDATES = {
   doorId: ['AL00_GUID', 'Door ID'],
   alTuernummer: ['AL00_Türnummer', 'AL00_Tuernummer'],
-  infoType: ['Information type', 'Door Type'],
+  geometryType: ['Geometry type', 'Door Type'],
   massDurchgangsbreite: ['GE01_LichteBreiteLB', 'Mass - Durchgangsbreite'],
   massDurchgangshoehe: ['GE01_LichteHöheLH', 'GE01_LichteHoeheLH', 'Mass - Durchgangshöhe'],
   massRohbreite: ['GE01_RoheBreiteRB', 'GE01_RohBreiteRB', 'Mass - Rohbreite'],
@@ -65,7 +65,7 @@ interface DoorData {
   doorId: string
   doorType?: string
   alTuernummer?: string
-  informationType?: string
+  geometryType?: string
   openingDirection?: string
   modelSource?: string
   massDurchgangsbreite?: number
@@ -338,7 +338,7 @@ async function updateDoorRecord(
   tableFieldsByName: Record<string, TableField>
 ): Promise<void> {
   const fields: Record<string, unknown> = {}
-  const normalizedInfoType = sanitizeChoiceValue(data.informationType)
+  const normalizedGeometryType = sanitizeChoiceValue(data.geometryType)
   const normalizedDoorType = sanitizeChoiceValue(data.doorType)
   const normalizedBrandschutz = sanitizeChoiceValue(data.feuerwiderstand)
   const normalizedSchallschutz = sanitizeSchallschutzValue(data.bauschalldaemmmass)
