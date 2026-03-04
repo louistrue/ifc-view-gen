@@ -562,7 +562,7 @@ export default function DoorListDock({
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('schallschutz', e)} />
             </div>
 
-            <div className="header-col header-resizable" ref={dropdownOpenKey === 'lb' ? dropdownRef : undefined}>
+            <div className="header-col header-resizable header-col-numeric" ref={dropdownOpenKey === 'lb' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'lb' ? null : 'lb')}>
                   <span className="header-label-wrap">
@@ -586,7 +586,7 @@ export default function DoorListDock({
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('lb', e)} />
             </div>
-            <div className="header-col header-resizable" ref={dropdownOpenKey === 'lh' ? dropdownRef : undefined}>
+            <div className="header-col header-resizable header-col-numeric" ref={dropdownOpenKey === 'lh' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'lh' ? null : 'lh')}>
                   <span className="header-label-wrap">
@@ -610,7 +610,7 @@ export default function DoorListDock({
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('lh', e)} />
             </div>
-            <div className="header-col header-resizable" ref={dropdownOpenKey === 'rb' ? dropdownRef : undefined}>
+            <div className="header-col header-resizable header-col-numeric" ref={dropdownOpenKey === 'rb' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'rb' ? null : 'rb')}>
                   <span className="header-label-wrap">
@@ -634,7 +634,7 @@ export default function DoorListDock({
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('rb', e)} />
             </div>
-            <div className="header-col header-resizable" ref={dropdownOpenKey === 'rh' ? dropdownRef : undefined}>
+            <div className="header-col header-resizable header-col-numeric" ref={dropdownOpenKey === 'rh' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'rh' ? null : 'rh')}>
                   <span className="header-label-wrap">
@@ -658,7 +658,7 @@ export default function DoorListDock({
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('rh', e)} />
             </div>
-            <div className="header-col header-resizable" ref={dropdownOpenKey === 'bram' ? dropdownRef : undefined}>
+            <div className="header-col header-resizable header-col-numeric" ref={dropdownOpenKey === 'bram' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'bram' ? null : 'bram')}>
                   <span className="header-label-wrap">
@@ -682,7 +682,7 @@ export default function DoorListDock({
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('bram', e)} />
             </div>
-            <div className="header-col header-resizable" ref={dropdownOpenKey === 'hram' ? dropdownRef : undefined}>
+            <div className="header-col header-resizable header-col-numeric" ref={dropdownOpenKey === 'hram' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'hram' ? null : 'hram')}>
                   <span className="header-label-wrap">
@@ -1222,6 +1222,11 @@ export default function DoorListDock({
 
         .header-col-checkbox .header-row {
           justify-content: center;
+        }
+
+        .header-col-numeric .list-header-button {
+          justify-content: flex-end;
+          text-align: right;
         }
 
 
