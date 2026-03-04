@@ -91,7 +91,7 @@ export default function DoorListDock({
   onSetSort,
   hasActiveFilters,
   onClearFilters,
-  maxItems = 100,
+  maxItems = 2000,
   dock = false,
   dockHeightPx = 260,
   dockRightOffsetPx = 400,
@@ -378,14 +378,15 @@ export default function DoorListDock({
       }
       ref={listContainerRef as any}
     >
-      {dock && onDockHeightChange && (
-        <div
-          className="dock-resize-handle"
-          onMouseDown={onHeightResizeStart}
-          title="Höhe anpassen"
-        />
-      )}
-      {filteredDoors.length === 0 ? (
+      <div className="door-list-scroll-area">
+        {dock && onDockHeightChange && (
+          <div
+            className="dock-resize-handle"
+            onMouseDown={onHeightResizeStart}
+            title="Höhe anpassen"
+          />
+        )}
+        {filteredDoors.length === 0 ? (
         <div className="empty-state">
           <p>No doors match your filters</p>
           {hasLocalFilters && (
@@ -820,13 +821,30 @@ export default function DoorListDock({
           {remaining > 0 && <div className="more-items">+{remaining} more doors</div>}
         </div>
       )}
+      </div>
+
+      {doors.length > 0 && (
+        <div className="list-footer">
+          {`${visibleDoors.length} von ${filteredDoors.length} Türen angezeigt (Anzeigelimit ${maxItems} Türen)`}
+          {selectedDoorIds.size > 0 && ` | ${selectedDoorIds.size} selektiert`}
+        </div>
+      )}
+
 
       <style jsx>{`
         .door-list {
           flex: 1;
+          display: flex;
+          flex-direction: column;
+          padding: 0;
+          min-height: 0;
+        }
+
+        .door-list-scroll-area {
+          flex: 1;
+          min-height: 0;
           overflow-x: auto;
           overflow-y: auto;
-          padding: 0;
         }
 
         /* Bottom overlay mode */
@@ -1190,6 +1208,15 @@ export default function DoorListDock({
           padding: 12px;
           color: #666;
           font-size: 12px;
+        }
+
+        .list-footer {
+          flex-shrink: 0;
+          padding: 8px 12px;
+          font-size: 11px;
+          color: #7d7d7d;
+          border-top: 1px solid #303030;
+          background: #1d1d1d;
         }
 
         .text-button {
