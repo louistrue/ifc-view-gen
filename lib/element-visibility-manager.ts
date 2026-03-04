@@ -571,6 +571,7 @@ export class ElementVisibilityManager {
         // Create a group to hold highlight visuals
         const highlightGroup = new THREE.Group()
         highlightGroup.userData.isHighlightGroup = true
+        highlightGroup.renderOrder = 1 // Render after main model so highlights stay on top
 
         // 1. Create a wireframe box around the element
         const boxGeometry = new THREE.BoxGeometry(size.x * scale, size.y * scale, size.z * scale)
@@ -580,6 +581,8 @@ export class ElementVisibilityManager {
             linewidth: 2,
             transparent: true,
             opacity: 1.0,
+            depthTest: false,
+            depthWrite: false,
         })
         const wireframe = new THREE.LineSegments(edgesGeometry, lineMaterial)
         wireframe.position.copy(center)
@@ -592,6 +595,7 @@ export class ElementVisibilityManager {
             opacity: 0.15,
             side: THREE.DoubleSide,
             depthWrite: false,
+            depthTest: false,
         })
         const fillMesh = new THREE.Mesh(boxGeometry.clone(), fillMaterial)
         fillMesh.position.copy(center)
