@@ -46,7 +46,7 @@ export default function IFCViewer() {
   const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
   const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
   const DOCK_RIGHT_OFFSET_PX = 400
-  const DOCK_HEIGHT_PX = 260
+  const [dockHeightPx, setDockHeightPx] = useState(260)
 
   const getDockDoorLabel = useCallback((door: DoorContext) => {
     return (
@@ -1043,7 +1043,10 @@ export default function IFCViewer() {
             sortIndicator={dockSortIndicator}
             onSetSort={setDockSort}
             dock
-            dockHeightPx={DOCK_HEIGHT_PX}
+            dockHeightPx={dockHeightPx}
+            onDockHeightChange={setDockHeightPx}
+            minDockHeightPx={120}
+            maxDockHeightPx={600}
             dockRightOffsetPx={DOCK_RIGHT_OFFSET_PX}
           />
         )}

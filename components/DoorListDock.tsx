@@ -72,6 +72,9 @@ export type DoorListDockProps = {
   dock?: boolean
   dockHeightPx?: number
   dockRightOffsetPx?: number // should match right sidebar width (e.g. 400)
+  onDockHeightChange?: (heightPx: number) => void
+  minDockHeightPx?: number
+  maxDockHeightPx?: number
   listContainerRef?: RefObject<HTMLDivElement | null>
 }
 
@@ -92,6 +95,9 @@ export default function DoorListDock({
   dock = false,
   dockHeightPx = 260,
   dockRightOffsetPx = 400,
+  onDockHeightChange,
+  minDockHeightPx = 120,
+  maxDockHeightPx = 600,
   listContainerRef,
 }: DoorListDockProps) {
    const [doorFilter, setDoorFilter] = useState('')
@@ -150,6 +156,39 @@ export default function DoorListDock({
      window.addEventListener('mousemove', onResizeMove)
      window.addEventListener('mouseup', onResizeEnd)
    }, [colWidths, onResizeMove, onResizeEnd])
+
+   const heightResizeRef = useRef<{ startY: number; startHeight: number } | null>(null)
+
+   const onHeightResizeMove = useCallback(
+     (e: MouseEvent) => {
+       const r = heightResizeRef.current
+       if (!r || !onDockHeightChange) return
+       const deltaY = e.clientY - r.startY
+       const next = Math.min(maxDockHeightPx, Math.max(minDockHeightPx, r.startHeight - deltaY))
+       onDockHeightChange(next)
+     },
+     [onDockHeightChange, minDockHeightPx, maxDockHeightPx]
+   )
+
+   const onHeightResizeEnd = useCallback(() => {
+     heightResizeRef.current = null
+     window.removeEventListener('mousemove', onHeightResizeMove)
+     window.removeEventListener('mouseup', onHeightResizeEnd)
+     document.body.classList.remove('dock-height-resizing')
+   }, [onHeightResizeMove])
+
+   const onHeightResizeStart = useCallback(
+     (e: React.MouseEvent) => {
+       e.preventDefault()
+       e.stopPropagation()
+       if (!onDockHeightChange) return
+       heightResizeRef.current = { startY: e.clientY, startHeight: dockHeightPx }
+       document.body.classList.add('dock-height-resizing')
+       window.addEventListener('mousemove', onHeightResizeMove)
+       window.addEventListener('mouseup', onHeightResizeEnd)
+     },
+     [onDockHeightChange, dockHeightPx, onHeightResizeMove, onHeightResizeEnd]
+   )
 
    const formatNum = useCallback((n: number | null | undefined) =>
      n != null && Number.isFinite(n) ? String(n) : '—', [])
@@ -339,6 +378,13 @@ export default function DoorListDock({
       }
       ref={listContainerRef as any}
     >
+      {dock && onDockHeightChange && (
+        <div
+          className="dock-resize-handle"
+          onMouseDown={onHeightResizeStart}
+          title="Höhe anpassen"
+        />
+      )}
       {filteredDoors.length === 0 ? (
         <div className="empty-state">
           <p>No doors match your filters</p>
@@ -793,6 +839,25 @@ export default function DoorListDock({
           border-top: 1px solid #333;
           box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.4);
           z-index: 1200;
+        }
+
+        .dock-resize-handle {
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 8px;
+          cursor: ns-resize;
+          z-index: 15;
+        }
+
+        .dock-resize-handle:hover {
+          background: rgba(148, 163, 184, 0.15);
+        }
+
+        :global(body.dock-height-resizing) {
+          cursor: ns-resize !important;
+          user-select: none;
         }
 
         .empty-state {
