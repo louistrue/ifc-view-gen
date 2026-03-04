@@ -43,6 +43,7 @@ export default function IFCViewer() {
 
   // DoorListDock
   const [dockSelectedDoorIds, setDockSelectedDoorIds] = useState<Set<string>>(new Set()) // Store selected door IDs for DoorListDock
+  const [scrollToDoorId, setScrollToDoorId] = useState<string | null>(null) // Scroll list to this door when selected from model
   const [dockHoveredDoorId, setDockHoveredDoorId] = useState<string | null>(null) // Hover (Highlight in 3D)
   const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
   const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
@@ -159,18 +160,26 @@ export default function IFCViewer() {
     const vm = visibilityManagerRef.current
     if (!vm || doorContexts.length === 0) return
 
-    if (dockSelectedDoorIds.size > 0) {
-      const selectedExpressIds = doorContexts
-        .filter(d => dockSelectedDoorIds.has(d.doorId))
-        .map(d => d.door.expressID)
-      if (selectedExpressIds.length > 0) {
-        vm.setSelectedElements(selectedExpressIds)
-        vm.dimNonSelectedElements(selectedExpressIds)
+    const run = async () => {
+      if (dockSelectedDoorIds.size > 0) {
+        const selectedExpressIds = doorContexts
+          .filter(d => dockSelectedDoorIds.has(d.doorId))
+          .map(d => d.door.expressID)
+        if (selectedExpressIds.length > 0) {
+          vm.setSelectedElements(selectedExpressIds)
+          await vm.dimNonSelectedElements(selectedExpressIds)
+        } else {
+          vm.setSelectedElements([])
+          await vm.resetAllVisibility()
+        }
+      } else {
+        vm.setSelectedElements([])
+        triggerRenderRef.current?.()
+        await vm.resetAllVisibility()
       }
-    } else {
-      vm.setSelectedElements([])
-      vm.exitDimMode()
+      triggerRenderRef.current?.()
     }
+    run()
   }, [dockSelectedDoorIds, doorContexts])
 
   // File names for display
@@ -203,6 +212,82 @@ export default function IFCViewer() {
   const [activeClassFilters, setActiveClassFilters] = useState<Set<string> | null>(null)
   // Persist active IFC class filters across panel open/close
   const [activeIFCClassFilters, setActiveIFCClassFilters] = useState<Set<string> | null>(null)
+
+  // Click on 3D model to toggle door selection (syncs to DoorListDock)
+  // Selection only on pointerup when movement was small (real click, not rotate)
+  useEffect(() => {
+    const canvas = rendererRef.current?.domElement
+    const camera = cameraRef.current
+    if (!canvas || !camera || !containerRef.current) return
+
+    const DRAG_THRESHOLD_PX = 5
+    const pointerDownRef = { x: 0, y: 0, active: false }
+
+    const handlePointerDown = (e: PointerEvent) => {
+      if (!showBatchProcessor || doorContexts.length === 0) return
+      if (zoomWindowActive || sectionMode === 'line') return
+
+      pointerDownRef.x = e.clientX
+      pointerDownRef.y = e.clientY
+      pointerDownRef.active = true
+    }
+
+    const handlePointerUp = (e: PointerEvent) => {
+      if (!showBatchProcessor || doorContexts.length === 0) return
+      if (zoomWindowActive || sectionMode === 'line') return
+      if (!pointerDownRef.active) return
+
+      const dx = e.clientX - pointerDownRef.x
+      const dy = e.clientY - pointerDownRef.y
+      if (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
+        pointerDownRef.active = false
+        return
+      }
+
+      const rect = containerRef.current!.getBoundingClientRect()
+      if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+        pointerDownRef.active = false
+        return
+      }
+
+      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+
+      const raycaster = new THREE.Raycaster()
+      raycaster.setFromCamera(new THREE.Vector2(x, y), camera)
+
+      const ray = raycaster.ray
+      const intersection = new THREE.Vector3()
+      let closestDoor: DoorContext | null = null
+      let closestDist = Infinity
+
+      for (const context of doorContexts) {
+        const box = context.door.boundingBox
+        if (!box) continue
+        const hit = ray.intersectBox(box, intersection)
+        if (hit) {
+          const dist = ray.origin.distanceTo(intersection)
+          if (dist < closestDist) {
+            closestDist = dist
+            closestDoor = context
+          }
+        }
+      }
+
+      if (closestDoor) {
+        toggleDockDoorSelection(closestDoor.doorId)
+        setScrollToDoorId(closestDoor.doorId)
+      }
+      pointerDownRef.active = false
+    }
+
+    canvas.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('pointerup', handlePointerUp)
+    return () => {
+      canvas.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('pointerup', handlePointerUp)
+    }
+  }, [showBatchProcessor, doorContexts, zoomWindowActive, sectionMode, toggleDockDoorSelection])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -1065,6 +1150,8 @@ export default function IFCViewer() {
             onShowSingleDoor={handleDockShowSingleDoor}
             sortIndicator={dockSortIndicator}
             onSetSort={setDockSort}
+            scrollToDoorId={scrollToDoorId}
+            onScrollToDoorHandled={() => setScrollToDoorId(null)}
             dock
             dockHeightPx={dockHeightPx}
             onDockHeightChange={setDockHeightPx}

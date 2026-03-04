@@ -160,6 +160,8 @@ export type DoorListDockProps = {
   minDockHeightPx?: number
   maxDockHeightPx?: number
   listContainerRef?: RefObject<HTMLDivElement | null>
+  scrollToDoorId?: string | null
+  onScrollToDoorHandled?: () => void
 }
 
 export default function DoorListDock({
@@ -183,6 +185,8 @@ export default function DoorListDock({
   minDockHeightPx = 120,
   maxDockHeightPx = 600,
   listContainerRef,
+  scrollToDoorId,
+  onScrollToDoorHandled,
 }: DoorListDockProps) {
    const [doorFilter, setDoorFilter] = useState('')
    const [typeFilterSet, setTypeFilterSet] = useState<Set<string>>(new Set())
@@ -214,6 +218,7 @@ export default function DoorListDock({
    )
 
    const resizingRef = useRef<{ key: ColKey; startX: number; startWidth: number } | null>(null)
+   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
 
    const onResizeMove = useCallback((e: MouseEvent) => {
      const r = resizingRef.current
@@ -406,6 +411,13 @@ export default function DoorListDock({
    }, [filteredDoors, selectedDoorIds, onToggleSelect])
 
    useEffect(() => {
+     if (!scrollToDoorId || !onScrollToDoorHandled) return
+     const el = scrollContainerRef.current?.querySelector(`[data-door-id="${scrollToDoorId}"]`)
+     el?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
+     onScrollToDoorHandled()
+   }, [scrollToDoorId, onScrollToDoorHandled])
+
+   useEffect(() => {
      if (!dropdownOpenKey) return
      const onOutside = (e: MouseEvent) => {
        if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
@@ -446,7 +458,10 @@ export default function DoorListDock({
             } as CSSProperties)
           : undefined
       }
-      ref={listContainerRef as any}
+      ref={(el) => {
+        scrollContainerRef.current = el
+        if (listContainerRef) (listContainerRef as any).current = el
+      }}
     >
       <div className="door-list-scroll-area">
         {dock && onDockHeightChange && (
@@ -819,6 +834,7 @@ export default function DoorListDock({
           {visibleDoors.map((door) => (
             <div
               key={door.doorId}
+              data-door-id={door.doorId}
               className={`door-row ${selectedDoorIds.has(door.doorId) ? 'selected' : ''} ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
               style={{ gridTemplateColumns: gridTemplate }}
               onMouseEnter={() => onHoverDoorId(door.doorId)}
