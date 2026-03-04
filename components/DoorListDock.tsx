@@ -209,7 +209,7 @@ export default function DoorListDock({
          if (!label.includes(d)) return false
        }
        if (typeFilterSet.size > 0) {
-         const type = door.doorTypeName || door.csetStandardCH?.geometryType || '—'
+         const type = door.csetStandardCH?.geometryType || '—'
          if (!typeFilterSet.has(type)) return false
        }
        if (storeyFilterSet.size > 0) {
@@ -767,8 +767,8 @@ export default function DoorListDock({
                 {getDoorLabel(door)}
               </button>
 
-              <div className="door-cell muted" title={door.doorTypeName || door.csetStandardCH?.geometryType || ''}>
-                {door.doorTypeName || door.csetStandardCH?.geometryType || '—'}
+              <div className="door-cell muted" title={door.csetStandardCH?.geometryType || ''}>
+                {door.csetStandardCH?.geometryType || '—'}
               </div>
 
               <div className="door-cell muted" title={door.storeyName || ''}>
