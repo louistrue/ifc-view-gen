@@ -53,6 +53,7 @@ export class NavigationManager {
     // Configure orbit controls for BIM navigation
     this.controls.dollySpeed = 0.5
     this.controls.truckSpeed = 1.0
+    this.controls.dollyToCursor = true
     this.controls.mouseButtons.wheel = CameraControls.ACTION.DOLLY
     this.controls.mouseButtons.left = CameraControls.ACTION.ROTATE
     this.controls.mouseButtons.right = CameraControls.ACTION.TRUCK
