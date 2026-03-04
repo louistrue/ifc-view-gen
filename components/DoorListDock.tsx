@@ -279,7 +279,7 @@ export default function DoorListDock({
    const uniqueTypeValues = useMemo(() => {
      const s = new Set<string>()
      doors.forEach(d => {
-       const v = d.doorTypeName || d.csetStandardCH?.geometryType || '—'
+       const v = d.csetStandardCH?.geometryType || '—'
        s.add(v)
      })
      return Array.from(s).sort()

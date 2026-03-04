@@ -141,15 +141,32 @@ export default function IFCViewer() {
     const nav = navigationManagerRef.current
     if (!nav || !door.door.boundingBox) return
 
-    const vm = visibilityManagerRef.current
-    if (vm) vm.setSelectedElements([door.door.expressID])
-
+    // Only zoom – do NOT change selection/colors (checkbox controls selection)
     nav.zoomToElementFromNormal(door.door.boundingBox, door.normal, 2.5)
   }, [])
 
   const handleDockShowSingleDoor = useCallback((_door: DoorContext, _view: 'front' | 'back' | 'plan') => {
     // TODO: optional preview implementation later
   }, [])
+
+  // Sync DoorListDock checkbox selection to 3D view: selected highlighted, rest dimmed
+  useEffect(() => {
+    const vm = visibilityManagerRef.current
+    if (!vm || doorContexts.length === 0) return
+
+    if (dockSelectedDoorIds.size > 0) {
+      const selectedExpressIds = doorContexts
+        .filter(d => dockSelectedDoorIds.has(d.doorId))
+        .map(d => d.door.expressID)
+      if (selectedExpressIds.length > 0) {
+        vm.setSelectedElements(selectedExpressIds)
+        vm.dimNonSelectedElements(selectedExpressIds)
+      }
+    } else {
+      vm.setSelectedElements([])
+      vm.exitDimMode()
+    }
+  }, [dockSelectedDoorIds, doorContexts])
 
   // File names for display
   const [archFileName, setArchFileName] = useState<string>('')

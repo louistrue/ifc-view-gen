@@ -3,16 +3,16 @@
  * Provides hide/show/isolate/filter/highlight functionality with optimal performance
  */
 
-import { FragmentsModel, FragmentsModels } from '@thatopen/fragments'
+import { FragmentsModel, FragmentsModels, RenderedFaces } from '@thatopen/fragments'
 import * as THREE from 'three'
 import type { ElementInfo } from './ifc-types'
 import type { SpatialNode } from './spatial-structure'
 import { getAllElementIds } from './spatial-structure'
 
-// Highlight colors for different states
+// Highlight colors for different states (aligned with bimdoer/ifc-validator)
 export const HIGHLIGHT_COLORS = {
-    hovered: new THREE.Color(0x00ff88),    // Bright green for hover
-    selected: new THREE.Color(0xffd700),   // Gold/yellow for selection (more visible)
+    hovered: new THREE.Color(0xff8800),    // Orange for hover
+    selected: new THREE.Color(0x0099ff),   // Blue for selection (ifc-validator style)
     filtered: new THREE.Color(0x4ecdc4),   // Teal for filtered doors
 }
 
@@ -24,6 +24,7 @@ export class ElementVisibilityManager {
     private originalVisibility: Map<number, boolean> = new Map()
     private hiddenElements: Set<number> = new Set()
     private isolatedElements: Set<number> | null = null
+    private dimmedElements: { selectedIds: Set<number>; dimOpacity: number } | null = null
     private typeFilters: Set<string> = new Set()
     private ifcClassFilters: Set<string> = new Set()
     private transparencyMap: Map<number, number> = new Map() // localId -> opacity (0-1)
@@ -189,6 +190,49 @@ export class ElementVisibilityManager {
     }
 
     /**
+     * Dim non-selected elements (show all, but non-selected with reduced opacity)
+     * Uses Fragments highlight API with dimmed material
+     */
+    async dimNonSelectedElements(selectedIds: number[], dimOpacity: number = 0.3): Promise<void> {
+        this.isolatedElements = null
+        this.dimmedElements = { selectedIds: new Set(selectedIds), dimOpacity }
+
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
+        }
+
+        const selectedSet = new Set(selectedIds)
+        const nonSelectedIds = this.allModelIds.filter(id => !selectedSet.has(id))
+
+        await this.fragmentsModel.resetVisible()
+
+        if (this.hiddenElements.size > 0) {
+            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        }
+
+        if (nonSelectedIds.length > 0) {
+            await this.fragmentsModel.highlight(nonSelectedIds, {
+                color: new THREE.Color(0xffffff),
+                renderedFaces: RenderedFaces.TWO,
+                opacity: dimOpacity,
+                transparent: true,
+            })
+        }
+        await this.applyChanges()
+    }
+
+    /**
+     * Exit dim mode (reset highlight on dimmed elements)
+     */
+    async exitDimMode(): Promise<void> {
+        if (this.dimmedElements === null) return
+
+        this.dimmedElements = null
+        await this.fragmentsModel.resetHighlight()
+        await this.applyChanges()
+    }
+
+    /**
      * Filter by product type names - hides ALL model elements except matching types
      * Only filters by productTypeName (from IfcDoorType, etc.) - NOT IFC classes
      */
@@ -326,11 +370,13 @@ export class ElementVisibilityManager {
     async resetAllVisibility(): Promise<void> {
         this.hiddenElements.clear()
         this.isolatedElements = null
+        this.dimmedElements = null
         this.typeFilters.clear()
         this.ifcClassFilters.clear()
         this.transparencyMap.clear()
 
         await this.fragmentsModel.resetVisible()
+        await this.fragmentsModel.resetHighlight()
         await this.applyChanges()
     }
 
@@ -362,12 +408,14 @@ export class ElementVisibilityManager {
     getVisibilityState(): {
         hidden: number[]
         isolated: number[] | null
+        dimmed: number[] | null
         typeFilters: string[]
         ifcClassFilters: string[]
     } {
         return {
             hidden: Array.from(this.hiddenElements),
             isolated: this.isolatedElements ? Array.from(this.isolatedElements) : null,
+            dimmed: this.dimmedElements ? Array.from(this.dimmedElements.selectedIds) : null,
             typeFilters: Array.from(this.typeFilters),
             ifcClassFilters: Array.from(this.ifcClassFilters),
         }
@@ -385,17 +433,23 @@ export class ElementVisibilityManager {
     }
 
     /**
-     * Set hovered element - creates a glow effect on the element
+     * Set hovered element - creates orange glow on hovered door
+     * Selection stays blue in background; when unhovering a selected door, restore blue
      */
     setHoveredElement(localId: number | null): void {
         // Clear previous hover
         if (this.hoveredElementId !== null) {
             this.removeHighlightMesh(this.hoveredElementId)
+            // Restore selection (blue) if the unhovered element was selected
+            if (this.selectedElements.has(this.hoveredElementId)) {
+                this.createHighlightMesh(this.hoveredElementId, HIGHLIGHT_COLORS.selected, 1.01)
+            }
         }
 
         this.hoveredElementId = localId
 
         if (localId !== null) {
+            // Always show hover (orange) – even for selected doors
             this.createHighlightMesh(localId, HIGHLIGHT_COLORS.hovered, 1.03)
         }
 
@@ -418,15 +472,13 @@ export class ElementVisibilityManager {
 
         this.selectedElements = new Set(localIds)
 
-        // Create highlight meshes for new selections
+        // Create highlight meshes for new selections (always replace - e.g. green hover -> blue selection)
         for (const localId of localIds) {
-            if (!this.highlightMeshes.has(localId)) {
-                const element = this.elements.get(localId)
-                if (element) {
-                    this.createHighlightMesh(localId, HIGHLIGHT_COLORS.selected, 1.01)
-                } else {
-                    console.warn(`[Highlight] Could not find element for localId ${localId}`)
-                }
+            const element = this.elements.get(localId)
+            if (element) {
+                this.createHighlightMesh(localId, HIGHLIGHT_COLORS.selected, 1.01)
+            } else {
+                console.warn(`[Highlight] Could not find element for localId ${localId}`)
             }
         }
 

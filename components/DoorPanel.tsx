@@ -42,6 +42,7 @@ export default function DoorPanel({
   const [selectedStoreys, setSelectedStoreys] = useState<Set<string>>(new Set())
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set())
   const [isolateFiltered, setIsolateFiltered] = useState(false)
+  const [dimFiltered, setDimFiltered] = useState(false)
 
   // Collapsible sections: TYPE expanded by default, STOREY collapsed
   const [storeyExpanded, setStoreyExpanded] = useState(false)
@@ -242,10 +243,13 @@ export default function DoorPanel({
     if (isolateFiltered && filteredDoors.length > 0) {
       const doorExpressIds = filteredDoors.map(d => d.door.expressID)
       visibilityManager.isolateElements(doorExpressIds)
+    } else if (dimFiltered && filteredDoors.length > 0) {
+      const doorExpressIds = filteredDoors.map(d => d.door.expressID)
+      visibilityManager.dimNonSelectedElements(doorExpressIds)
     } else {
       visibilityManager.resetAllVisibility()
     }
-  }, [filteredDoors, isolateFiltered, visibilityManager])
+  }, [filteredDoors, isolateFiltered, dimFiltered, visibilityManager])
 
   // Handle hover - highlight in 3D
   const handleDoorHover = useCallback((doorId: string | null) => {
@@ -574,12 +578,28 @@ export default function DoorPanel({
         <div className="header-actions">
           <button
             className={`icon-button ${isolateFiltered ? 'active' : ''}`}
-            onClick={() => setIsolateFiltered(!isolateFiltered)}
+            onClick={() => {
+              setIsolateFiltered(prev => !prev)
+              if (!isolateFiltered) setDimFiltered(false)
+            }}
             title={isolateFiltered ? 'Show all elements' : 'Isolate doors in 3D'}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="10" />
               <circle cx="12" cy="12" r="4" />
+            </svg>
+          </button>
+          <button
+            className={`icon-button ${dimFiltered ? 'active' : ''}`}
+            onClick={() => {
+              setDimFiltered(prev => !prev)
+              if (!dimFiltered) setIsolateFiltered(false)
+            }}
+            title={dimFiltered ? 'Show all elements' : 'Dim non-matching elements'}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" opacity="0.5" />
+              <rect x="7" y="7" width="10" height="10" rx="1" />
             </svg>
           </button>
           <button
