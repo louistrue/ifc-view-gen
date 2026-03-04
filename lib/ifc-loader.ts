@@ -208,7 +208,7 @@ export async function extractDoorOperationTypes(file: File): Promise<Map<number,
 
 export interface DoorCsetStandardCHData {
     alTuernummer: string | null
-    informationType: string | null
+    geometryType: string | null
     massDurchgangsbreite: number | null
     massDurchgangshoehe: number | null
     massRohbreite: number | null
@@ -224,7 +224,7 @@ export interface DoorCsetStandardCHData {
 function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
     return {
         alTuernummer: null,
-        informationType: null,
+        geometryType: null,
         massDurchgangsbreite: null,
         massDurchgangshoehe: null,
         massRohbreite: null,
@@ -265,17 +265,17 @@ function parseIfcNumber(raw: any): number | null {
 
 function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nominalValue: any): void {
     const normalized = normalizeIfcName(propName)
-    if (normalized === 'al00tuernummer' || normalized === 'tuernummer') {
+    if (normalized === 'tuernummereindeutig') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) {
             target.alTuernummer = value.trim()
         }
         return
     }
-    if (normalized === 'informationtype') {
+    if (normalized === 'geometrytype') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) {
-            target.informationType = value.trim()
+            target.geometryType = value.trim()
         }
         return
     }

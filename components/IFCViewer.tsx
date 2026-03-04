@@ -82,7 +82,7 @@ export default function IFCViewer() {
   const getSortValue = useCallback((door: import('@/lib/door-analyzer').DoorContext, field: typeof dockSortField) => {
     switch (field) {
       case 'door': return getDockDoorLabel(door)
-      case 'type': return door.doorTypeName || door.csetStandardCH?.informationType || ''
+      case 'type': return door.doorTypeName || door.csetStandardCH?.geometryType || ''
       case 'storey': return door.storeyName || ''
       case 'brandschutz': return door.csetStandardCH?.feuerwiderstand || ''
       case 'schallschutz': return door.csetStandardCH?.bauschalldaemmmass || ''
@@ -612,7 +612,7 @@ export default function IFCViewer() {
         let operationTypeMap: Map<number, string> | undefined
         let csetStandardCHMap: Map<number, {
           alTuernummer: string | null
-          informationType: string | null
+          geometryType: string | null
           massDurchgangsbreite: number | null
           massDurchgangshoehe: number | null
           massRohbreite: number | null

@@ -209,7 +209,7 @@ export default function DoorListDock({
          if (!label.includes(d)) return false
        }
        if (typeFilterSet.size > 0) {
-         const type = door.doorTypeName || door.csetStandardCH?.informationType || '—'
+         const type = door.doorTypeName || door.csetStandardCH?.geometryType || '—'
          if (!typeFilterSet.has(type)) return false
        }
        if (storeyFilterSet.size > 0) {
@@ -279,7 +279,7 @@ export default function DoorListDock({
    const uniqueTypeValues = useMemo(() => {
      const s = new Set<string>()
      doors.forEach(d => {
-       const v = d.doorTypeName || d.csetStandardCH?.informationType || '—'
+       const v = d.doorTypeName || d.csetStandardCH?.geometryType || '—'
        s.add(v)
      })
      return Array.from(s).sort()
@@ -766,8 +766,8 @@ export default function DoorListDock({
                 {getDoorLabel(door)}
               </button>
 
-              <div className="door-cell muted" title={door.doorTypeName || door.csetStandardCH?.informationType || ''}>
-                {door.doorTypeName || door.csetStandardCH?.informationType || '—'}
+              <div className="door-cell muted" title={door.doorTypeName || door.csetStandardCH?.geometryType || ''}>
+                {door.doorTypeName || door.csetStandardCH?.geometryType || '—'}
               </div>
 
               <div className="door-cell muted" title={door.storeyName || ''}>

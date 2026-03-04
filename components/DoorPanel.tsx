@@ -438,11 +438,11 @@ export default function DoorPanel({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             doorId: door.doorId,
-            doorType: door.csetStandardCH?.informationType || door.doorTypeName || undefined,
+            doorType: door.csetStandardCH?.geometryType || door.doorTypeName || undefined,
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
-            informationType: door.csetStandardCH?.informationType ?? undefined,
+            geometryType: door.csetStandardCH?.geometryType ?? undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
