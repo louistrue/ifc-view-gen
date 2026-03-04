@@ -27,6 +27,7 @@ export class ElementVisibilityManager {
     private dimmedElements: { selectedIds: Set<number>; dimOpacity: number } | null = null
     private typeFilters: Set<string> = new Set()
     private ifcClassFilters: Set<string> = new Set()
+    private storeyFilterIds: number[] | null = null
     private transparencyMap: Map<number, number> = new Map() // localId -> opacity (0-1)
     private onRenderNeeded: (() => void) | null = null
 
@@ -201,11 +202,16 @@ export class ElementVisibilityManager {
             await this.cacheAllModelIds()
         }
 
+        const visibleIds = this.storeyFilterIds ?? this.allModelIds
         const selectedSet = new Set(selectedIds)
-        const nonSelectedIds = this.allModelIds.filter(id => !selectedSet.has(id))
+        const nonSelectedIds = visibleIds.filter(id => !selectedSet.has(id))
 
         await this.fragmentsModel.resetVisible()
 
+        if (this.storeyFilterIds && this.storeyFilterIds.length > 0) {
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            await this.fragmentsModel.setVisible(this.storeyFilterIds, true)
+        }
         if (this.hiddenElements.size > 0) {
             await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
         }
@@ -373,10 +379,40 @@ export class ElementVisibilityManager {
         this.dimmedElements = null
         this.typeFilters.clear()
         this.ifcClassFilters.clear()
+        this.storeyFilterIds = null
         this.transparencyMap.clear()
 
         await this.fragmentsModel.resetVisible()
         await this.fragmentsModel.resetHighlight()
+        await this.applyChanges()
+    }
+
+    /**
+     * Filter by storey - hides ALL model elements except those in selected storeys
+     */
+    async filterByStorey(elementIds: number[]): Promise<void> {
+        this.storeyFilterIds = elementIds
+
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
+        }
+
+        await this.fragmentsModel.setVisible(this.allModelIds, false)
+        if (elementIds.length > 0) {
+            await this.fragmentsModel.setVisible(elementIds, true)
+        }
+        await this.applyChanges()
+    }
+
+    /**
+     * Clear storey filter (show all elements)
+     */
+    async clearStoreyFilter(): Promise<void> {
+        this.storeyFilterIds = null
+        await this.fragmentsModel.resetVisible()
+        if (this.hiddenElements.size > 0) {
+            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        }
         await this.applyChanges()
     }
 

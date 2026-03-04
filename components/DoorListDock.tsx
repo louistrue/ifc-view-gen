@@ -149,6 +149,9 @@ export type DoorListDockProps = {
   hasActiveFilters?: boolean
   onClearFilters?: () => void
 
+  // sync storey filter to 3D model visibility
+  onStoreyFilterChange?: (storeyNames: Set<string>) => void
+
   // layout / limits
   maxItems?: number
 
@@ -177,6 +180,7 @@ export default function DoorListDock({
   onSetSort,
   hasActiveFilters,
   onClearFilters,
+  onStoreyFilterChange,
   maxItems = 2000,
   dock = false,
   dockHeightPx = 260,
@@ -416,6 +420,10 @@ export default function DoorListDock({
      el?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
      onScrollToDoorHandled()
    }, [scrollToDoorId, onScrollToDoorHandled])
+
+   useEffect(() => {
+     onStoreyFilterChange?.(storeyFilterSet)
+   }, [storeyFilterSet, onStoreyFilterChange])
 
    useEffect(() => {
      if (!dropdownOpenKey) return

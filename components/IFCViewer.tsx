@@ -7,7 +7,7 @@ import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
 import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
-import { extractSpatialStructure, type SpatialNode } from '@/lib/spatial-structure'
+import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
 import { SectionPlane } from '@/lib/section-plane'
 import ViewerToolbar, { type SectionMode } from './ViewerToolbar'
@@ -153,6 +153,19 @@ export default function IFCViewer() {
 
   const handleDockShowSingleDoor = useCallback((door: DoorContext, view: 'front' | 'back' | 'plan') => {
     dockShowSingleDoorRef.current?.(door, view)
+  }, [])
+
+  const handleStoreyFilterChange = useCallback((storeyNames: Set<string>) => {
+    const vm = visibilityManagerRef.current
+    const spatial = spatialStructureRef.current
+    if (!vm) return
+    if (storeyNames.size === 0) {
+      vm.clearStoreyFilter()
+    } else if (spatial) {
+      const ids = getStoreyElementIdsByNames(spatial, storeyNames)
+      vm.filterByStorey(ids)
+    }
+    triggerRenderRef.current?.()
   }, [])
 
   // Sync DoorListDock checkbox selection to 3D view: selected highlighted, rest dimmed
@@ -1155,6 +1168,7 @@ export default function IFCViewer() {
             onSetSort={setDockSort}
             scrollToDoorId={scrollToDoorId}
             onScrollToDoorHandled={() => setScrollToDoorId(null)}
+            onStoreyFilterChange={handleStoreyFilterChange}
             dock
             dockHeightPx={dockHeightPx}
             onDockHeightChange={setDockHeightPx}
