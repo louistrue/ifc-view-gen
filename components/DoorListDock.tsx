@@ -1,11 +1,41 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
 
-type SortField = 'door' | 'type' | 'storey'
+type SortField = 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
 type ViewKind = 'front' | 'back' | 'plan'
+
+type ColKey = 'check' | 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'views' | 'guid'
+type SearchableCol = 'door' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
+type StringSet = Set<string>
+
+function SearchIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.35-4.35" />
+    </svg>
+  )
+}
+
+const COLS: Array<{ key: ColKey; min: number; initial: number }> = [
+  { key: 'check', min: 24, initial: 24 },
+  { key: 'door', min: 140, initial: 260 },
+  { key: 'type', min: 110, initial: 140 },
+  { key: 'storey', min: 90, initial: 110 },
+  { key: 'brandschutz', min: 90, initial: 110 },
+  { key: 'schallschutz', min: 90, initial: 110 },
+  { key: 'lb', min: 56, initial: 72 },
+  { key: 'lh', min: 56, initial: 72 },
+  { key: 'rb', min: 56, initial: 72 },
+  { key: 'rh', min: 56, initial: 72 },
+  { key: 'bram', min: 60, initial: 80 },
+  { key: 'hram', min: 60, initial: 80 },
+  { key: 'views', min: 90, initial: 100 },
+  { key: 'guid', min: 160, initial: 220 },
+]
 
 export type DoorListDockProps = {
   // data
@@ -58,41 +88,232 @@ export default function DoorListDock({
   listContainerRef,
 }: DoorListDockProps) {
    const [doorFilter, setDoorFilter] = useState('')
-   const [typeFilter, setTypeFilter] = useState('')
-   const [storeyFilter, setStoreyFilter] = useState('')
- 
+   const [typeFilterSet, setTypeFilterSet] = useState<Set<string>>(new Set())
+   const [storeyFilterSet, setStoreyFilterSet] = useState<Set<string>>(new Set())
+   const [brandschutzFilterSet, setBrandschutzFilterSet] = useState<Set<string>>(new Set())
+   const [schallschutzFilterSet, setSchallschutzFilterSet] = useState<Set<string>>(new Set())
+   const [lbFilter, setLbFilter] = useState('')
+   const [lhFilter, setLhFilter] = useState('')
+   const [rbFilter, setRbFilter] = useState('')
+   const [rhFilter, setRhFilter] = useState('')
+   const [bramFilter, setBramFilter] = useState('')
+   const [hramFilter, setHramFilter] = useState('')
+   const [guidFilter, setGuidFilter] = useState('')
+
+   const [colWidths, setColWidths] = useState<Record<ColKey, number>>(() => {
+     const init = {} as Record<ColKey, number>
+     for (const c of COLS) init[c.key] = c.initial
+     return init
+   })
+
+   const gridTemplate = useMemo(
+     () => COLS.map(c => `${Math.max(c.min, colWidths[c.key])}px`).join(' '),
+     [colWidths]
+   )
+
+   const totalWidth = useMemo(
+     () => COLS.reduce((sum, c) => sum + Math.max(c.min, colWidths[c.key]), 0),
+     [colWidths]
+   )
+
+   const resizingRef = useRef<{ key: ColKey; startX: number; startWidth: number } | null>(null)
+
+   const onResizeMove = useCallback((e: MouseEvent) => {
+     const r = resizingRef.current
+     if (!r) return
+     const col = COLS.find(c => c.key === r.key)!
+     const delta = e.clientX - r.startX
+     const next = Math.max(col.min, r.startWidth + delta)
+     setColWidths(prev => ({ ...prev, [r.key]: next }))
+   }, [])
+
+   const onResizeEnd = useCallback(() => {
+     resizingRef.current = null
+     window.removeEventListener('mousemove', onResizeMove)
+     window.removeEventListener('mouseup', onResizeEnd)
+     document.body.classList.remove('col-resizing')
+   }, [])
+
+   const onResizeStart = useCallback((key: ColKey, e: React.MouseEvent) => {
+     e.preventDefault()
+     e.stopPropagation()
+     const startWidth = colWidths[key]
+     resizingRef.current = { key, startX: e.clientX, startWidth }
+     document.body.classList.add('col-resizing')
+     window.addEventListener('mousemove', onResizeMove)
+     window.addEventListener('mouseup', onResizeEnd)
+   }, [colWidths, onResizeMove, onResizeEnd])
+
+   const formatNum = useCallback((n: number | null | undefined) =>
+     n != null && Number.isFinite(n) ? String(n) : '—', [])
+
    const filteredDoors = useMemo(() => {
      const d = doorFilter.trim().toLowerCase()
-     const t = typeFilter.trim().toLowerCase()
-     const s = storeyFilter.trim().toLowerCase()
- 
+     const lb = lbFilter.trim().toLowerCase()
+     const lh = lhFilter.trim().toLowerCase()
+     const rb = rbFilter.trim().toLowerCase()
+     const rh = rhFilter.trim().toLowerCase()
+     const bram = bramFilter.trim().toLowerCase()
+     const hram = hramFilter.trim().toLowerCase()
+     const g = guidFilter.trim().toLowerCase()
+
      return doors.filter(door => {
        if (d) {
          const label = getDoorLabel(door).toLowerCase()
          if (!label.includes(d)) return false
        }
-       if (t) {
-         const type = (door.doorTypeName || '').toLowerCase()
-         if (!type.includes(t)) return false
+       if (typeFilterSet.size > 0) {
+         const type = door.doorTypeName || door.csetStandardCH?.informationType || '—'
+         if (!typeFilterSet.has(type)) return false
        }
-       if (s) {
-         const storey = (door.storeyName || '').toLowerCase()
-         if (!storey.includes(s)) return false
+       if (storeyFilterSet.size > 0) {
+         const storey = door.storeyName || '—'
+         if (!storeyFilterSet.has(storey)) return false
+       }
+       if (brandschutzFilterSet.size > 0) {
+         const brand = door.csetStandardCH?.feuerwiderstand || '—'
+         if (!brandschutzFilterSet.has(brand)) return false
+       }
+       if (schallschutzFilterSet.size > 0) {
+         const schall = door.csetStandardCH?.bauschalldaemmmass || '—'
+         if (!schallschutzFilterSet.has(schall)) return false
+       }
+       if (lb) {
+         const val = formatNum(door.csetStandardCH?.massDurchgangsbreite).toLowerCase()
+         if (!val.includes(lb)) return false
+       }
+       if (lh) {
+         const val = formatNum(door.csetStandardCH?.massDurchgangshoehe).toLowerCase()
+         if (!val.includes(lh)) return false
+       }
+       if (rb) {
+         const val = formatNum(door.csetStandardCH?.massRohbreite).toLowerCase()
+         if (!val.includes(rb)) return false
+       }
+       if (rh) {
+         const val = formatNum(door.csetStandardCH?.massRohhoehe).toLowerCase()
+         if (!val.includes(rh)) return false
+       }
+       if (bram) {
+         const val = formatNum(door.csetStandardCH?.massAussenrahmenBreite).toLowerCase()
+         if (!val.includes(bram)) return false
+       }
+       if (hram) {
+         const val = formatNum(door.csetStandardCH?.massAussenrahmenHoehe).toLowerCase()
+         if (!val.includes(hram)) return false
+       }
+       if (g) {
+         const guid = ((door.door.globalId ?? door.doorId) || '').toLowerCase()
+         if (!guid.includes(g)) return false
        }
        return true
      })
-   }, [doors, doorFilter, getDoorLabel, storeyFilter, typeFilter])
- 
+   }, [doors, doorFilter, getDoorLabel, typeFilterSet, storeyFilterSet, brandschutzFilterSet, schallschutzFilterSet, lbFilter, lhFilter, rbFilter, rhFilter, bramFilter, hramFilter, guidFilter, formatNum])
+
    const visibleDoors = filteredDoors.slice(0, maxItems)
    const remaining = Math.max(0, filteredDoors.length - visibleDoors.length)
- 
+
    const clearLocalFilters = () => {
      setDoorFilter('')
-     setTypeFilter('')
-     setStoreyFilter('')
+     setTypeFilterSet(new Set())
+     setStoreyFilterSet(new Set())
+     setBrandschutzFilterSet(new Set())
+     setSchallschutzFilterSet(new Set())
+     setLbFilter('')
+     setLhFilter('')
+     setRbFilter('')
+     setRhFilter('')
+     setBramFilter('')
+     setHramFilter('')
+     setGuidFilter('')
    }
 
-  return (
+   const hasLocalFilters = doorFilter || typeFilterSet.size > 0 || storeyFilterSet.size > 0 || brandschutzFilterSet.size > 0 || schallschutzFilterSet.size > 0 || lbFilter || lhFilter || rbFilter || rhFilter || bramFilter || hramFilter || guidFilter
+
+   const uniqueTypeValues = useMemo(() => {
+     const s = new Set<string>()
+     doors.forEach(d => {
+       const v = d.doorTypeName || d.csetStandardCH?.informationType || '—'
+       s.add(v)
+     })
+     return Array.from(s).sort()
+   }, [doors])
+
+   const uniqueStoreyValues = useMemo(() => {
+     const s = new Set<string>()
+     doors.forEach(d => {
+       const v = d.storeyName || '—'
+       s.add(v)
+     })
+     return Array.from(s).sort()
+   }, [doors])
+
+   const uniqueBrandschutzValues = useMemo(() => {
+     const s = new Set<string>()
+     doors.forEach(d => {
+       const v = d.csetStandardCH?.feuerwiderstand || '—'
+       s.add(v)
+     })
+     return Array.from(s).sort()
+   }, [doors])
+
+   const uniqueSchallschutzValues = useMemo(() => {
+     const s = new Set<string>()
+     doors.forEach(d => {
+       const v = d.csetStandardCH?.bauschalldaemmmass || '—'
+       s.add(v)
+     })
+     return Array.from(s).sort()
+   }, [doors])
+
+   const [dropdownOpenKey, setDropdownOpenKey] = useState<'type' | 'storey' | 'brandschutz' | 'schallschutz' | null>(null)
+   const dropdownRef = useRef<HTMLDivElement>(null)
+
+   const [searchActiveCol, setSearchActiveCol] = useState<SearchableCol | null>(null)
+   const searchColRef = useRef<HTMLDivElement>(null)
+
+   useEffect(() => {
+     if (!dropdownOpenKey) return
+     const onOutside = (e: MouseEvent) => {
+       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+         setDropdownOpenKey(null)
+       }
+     }
+     document.addEventListener('mousedown', onOutside)
+     return () => document.removeEventListener('mousedown', onOutside)
+   }, [dropdownOpenKey])
+
+   useEffect(() => {
+     if (!searchActiveCol) return
+     const onOutside = (e: MouseEvent) => {
+       if (searchColRef.current && !searchColRef.current.contains(e.target as Node)) {
+         setSearchActiveCol(null)
+       }
+     }
+     const onEscape = (e: KeyboardEvent) => {
+       if (e.key === 'Escape') setSearchActiveCol(null)
+     }
+     document.addEventListener('mousedown', onOutside)
+     document.addEventListener('keydown', onEscape)
+     return () => {
+       document.removeEventListener('mousedown', onOutside)
+       document.removeEventListener('keydown', onEscape)
+     }
+   }, [searchActiveCol])
+
+   const toggleDropdownValue = useCallback(
+     (key: 'type' | 'storey' | 'brandschutz' | 'schallschutz', value: string, setter: (fn: (p: StringSet) => StringSet) => void) => {
+       setter(prev => {
+         const next = new Set(prev)
+         if (next.has(value)) next.delete(value)
+         else next.add(value)
+         return next
+       })
+     },
+     []
+   )
+
+   return (
     <div
       className={dock ? 'door-list dock' : 'door-list'}
       style={
@@ -108,68 +329,239 @@ export default function DoorListDock({
       {filteredDoors.length === 0 ? (
         <div className="empty-state">
           <p>No doors match your filters</p>
-          {hasActiveFilters && onClearFilters && (
-            <button className="text-button" onClick={onClearFilters}>
+          {hasLocalFilters && (
+            <button className="text-button" onClick={clearLocalFilters}>
               Clear filters
+            </button>
+          )}
+          {hasActiveFilters && onClearFilters && !hasLocalFilters && (
+            <button className="text-button" onClick={onClearFilters}>
+              Clear parent filters
             </button>
           )}
         </div>
       ) : (
-        <>
-          <div className="door-list-header">
-            <span />
+        <div className="door-list-scroll" style={{ minWidth: totalWidth }}>
+          <div className="door-list-header" style={{ gridTemplateColumns: gridTemplate }}>
+            <div className="header-col header-col-checkbox" />
 
-            <div className="header-col">
-                <button className="list-header-button" onClick={() => onToggleSort('door')}>
-                <span className="label-text">Door</span>
-                <span className="sort-indicator">{sortIndicator('door')}</span>
-                </button>
-                <input
-                className="header-filter"
-                placeholder="Filter…"
-                value={doorFilter}
-                onChange={(e) => setDoorFilter(e.target.value)}
-                />
+            <div className="header-col header-resizable" ref={searchActiveCol === 'door' ? searchColRef : undefined}>
+              {searchActiveCol === 'door' ? (
+                <input className="header-filter" placeholder="Suchen…" value={doorFilter} onChange={(e) => setDoorFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('door')}>
+                    <span className="label-text">AL00_Türnummer</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('door')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('door', e)} />
             </div>
 
-            <div className="header-col">
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'type' ? dropdownRef : undefined}>
+              <div className="header-title-row">
                 <button className="list-header-button" onClick={() => onToggleSort('type')}>
-                <span className="label-text">Type</span>
-                <span className="sort-indicator">{sortIndicator('type')}</span>
+                  <span className="label-text">Geometrietyp</span>
                 </button>
-                <input
-                className="header-filter"
-                placeholder="Filter…"
-                value={typeFilter}
-                onChange={(e) => setTypeFilter(e.target.value)}
-                />
+                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'type' ? null : 'type')} title="Filter">▾</button>
+              </div>
+              {dropdownOpenKey === 'type' && (
+                <div className="header-dropdown">
+                  {uniqueTypeValues.map(v => (
+                    <label key={v} className="header-dropdown-item">
+                      <input type="checkbox" checked={typeFilterSet.has(v)} onChange={() => toggleDropdownValue('type', v, setTypeFilterSet)} />
+                      <span>{v}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('type', e)} />
             </div>
 
-            <div className="header-col">
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'storey' ? dropdownRef : undefined}>
+              <div className="header-title-row">
                 <button className="list-header-button" onClick={() => onToggleSort('storey')}>
-                <span className="label-text">Storey</span>
-                <span className="sort-indicator">{sortIndicator('storey')}</span>
+                  <span className="label-text">Storey</span>
                 </button>
-                <input
-                className="header-filter"
-                placeholder="Filter…"
-                value={storeyFilter}
-                onChange={(e) => setStoreyFilter(e.target.value)}
-                />
+                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'storey' ? null : 'storey')} title="Filter">▾</button>
+              </div>
+              {dropdownOpenKey === 'storey' && (
+                <div className="header-dropdown">
+                  {uniqueStoreyValues.map(v => (
+                    <label key={v} className="header-dropdown-item">
+                      <input type="checkbox" checked={storeyFilterSet.size === 0 || storeyFilterSet.has(v)} onChange={() => toggleDropdownValue('storey', v, setStoreyFilterSet)} />
+                      <span>{v}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('storey', e)} />
             </div>
 
-            <div className="header-col views-col">
-                <span>Views</span>
-                <button className="clear-header-filters" onClick={clearLocalFilters} title="Clear filters">
-                ×
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'brandschutz' ? dropdownRef : undefined}>
+              <div className="header-title-row">
+                <button className="list-header-button" onClick={() => onToggleSort('brandschutz')}>
+                  <span className="label-text">IN01_Brandschutz_manuell</span>
                 </button>
+                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'brandschutz' ? null : 'brandschutz')} title="Filter">▾</button>
+              </div>
+              {dropdownOpenKey === 'brandschutz' && (
+                <div className="header-dropdown">
+                  {uniqueBrandschutzValues.map(v => (
+                    <label key={v} className="header-dropdown-item">
+                      <input type="checkbox" checked={brandschutzFilterSet.has(v)} onChange={() => toggleDropdownValue('brandschutz', v, setBrandschutzFilterSet)} />
+                      <span>{v}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('brandschutz', e)} />
             </div>
+
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'schallschutz' ? dropdownRef : undefined}>
+              <div className="header-title-row">
+                <button className="list-header-button" onClick={() => onToggleSort('schallschutz')}>
+                  <span className="label-text">Schallschutz</span>
+                </button>
+                <button className="header-dropdown-trigger" onClick={() => setDropdownOpenKey(k => k === 'schallschutz' ? null : 'schallschutz')} title="Filter">▾</button>
+              </div>
+              {dropdownOpenKey === 'schallschutz' && (
+                <div className="header-dropdown">
+                  {uniqueSchallschutzValues.map(v => (
+                    <label key={v} className="header-dropdown-item">
+                      <input type="checkbox" checked={schallschutzFilterSet.has(v)} onChange={() => toggleDropdownValue('schallschutz', v, setSchallschutzFilterSet)} />
+                      <span>{v}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('schallschutz', e)} />
             </div>
+
+            <div className="header-col header-resizable" ref={searchActiveCol === 'lb' ? searchColRef : undefined}>
+              {searchActiveCol === 'lb' ? (
+                <input className="header-filter" placeholder="Suchen…" value={lbFilter} onChange={(e) => setLbFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('lb')}>
+                    <span className="label-text">LB</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('lb')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('lb', e)} />
+            </div>
+            <div className="header-col header-resizable" ref={searchActiveCol === 'lh' ? searchColRef : undefined}>
+              {searchActiveCol === 'lh' ? (
+                <input className="header-filter" placeholder="Suchen…" value={lhFilter} onChange={(e) => setLhFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('lh')}>
+                    <span className="label-text">LH</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('lh')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('lh', e)} />
+            </div>
+            <div className="header-col header-resizable" ref={searchActiveCol === 'rb' ? searchColRef : undefined}>
+              {searchActiveCol === 'rb' ? (
+                <input className="header-filter" placeholder="Suchen…" value={rbFilter} onChange={(e) => setRbFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('rb')}>
+                    <span className="label-text">RB</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('rb')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('rb', e)} />
+            </div>
+            <div className="header-col header-resizable" ref={searchActiveCol === 'rh' ? searchColRef : undefined}>
+              {searchActiveCol === 'rh' ? (
+                <input className="header-filter" placeholder="Suchen…" value={rhFilter} onChange={(e) => setRhFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('rh')}>
+                    <span className="label-text">RH</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('rh')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('rh', e)} />
+            </div>
+            <div className="header-col header-resizable" ref={searchActiveCol === 'bram' ? searchColRef : undefined}>
+              {searchActiveCol === 'bram' ? (
+                <input className="header-filter" placeholder="Suchen…" value={bramFilter} onChange={(e) => setBramFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('bram')}>
+                    <span className="label-text">BRAM</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('bram')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('bram', e)} />
+            </div>
+            <div className="header-col header-resizable" ref={searchActiveCol === 'hram' ? searchColRef : undefined}>
+              {searchActiveCol === 'hram' ? (
+                <input className="header-filter" placeholder="Suchen…" value={hramFilter} onChange={(e) => setHramFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('hram')}>
+                    <span className="label-text">HRAM</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('hram')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('hram', e)} />
+            </div>
+
+            <div className="header-col header-resizable view-col">
+              <div className="header-title-row">
+                <span className="header-label">Ansicht</span>
+                <button className="clear-header-filters" onClick={clearLocalFilters} title="Filter zurücksetzen"></button>
+              </div>
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('views', e)} />
+            </div>
+
+            <div className="header-col header-resizable" ref={searchActiveCol === 'guid' ? searchColRef : undefined}>
+              {searchActiveCol === 'guid' ? (
+                <input className="header-filter" placeholder="Suchen…" value={guidFilter} onChange={(e) => setGuidFilter(e.target.value)} autoFocus />
+              ) : (
+                <div className="header-search-row">
+                  <button className="list-header-button" onClick={() => onToggleSort('guid')}>
+                    <span className="label-text">GUID</span>
+                  </button>
+                  <button className="header-search-toggle" onClick={() => setSearchActiveCol('guid')} title="Suchen">
+                    <SearchIcon />
+                  </button>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('guid', e)} />
+            </div>
+          </div>
 
           {visibleDoors.map((door) => (
             <div
               key={door.doorId}
               className={`door-row ${selectedDoorIds.has(door.doorId) ? 'selected' : ''} ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
+              style={{ gridTemplateColumns: gridTemplate }}
               onMouseEnter={() => onHoverDoorId(door.doorId)}
               onMouseLeave={() => onHoverDoorId(null)}
             >
@@ -186,12 +578,37 @@ export default function DoorListDock({
                 {getDoorLabel(door)}
               </button>
 
-              <div className="door-cell muted" title={door.doorTypeName || ''}>
-                {door.doorTypeName || '—'}
+              <div className="door-cell muted" title={door.doorTypeName || door.csetStandardCH?.informationType || ''}>
+                {door.doorTypeName || door.csetStandardCH?.informationType || '—'}
               </div>
 
               <div className="door-cell muted" title={door.storeyName || ''}>
                 {door.storeyName || '—'}
+              </div>
+
+              <div className="door-cell muted" title={door.csetStandardCH?.feuerwiderstand || ''}>
+                {door.csetStandardCH?.feuerwiderstand || '—'}
+              </div>
+              <div className="door-cell muted" title={door.csetStandardCH?.bauschalldaemmmass || ''}>
+                {door.csetStandardCH?.bauschalldaemmmass || '—'}
+              </div>
+              <div className="door-cell muted door-cell-numeric" title={formatNum(door.csetStandardCH?.massDurchgangsbreite)}>
+                {formatNum(door.csetStandardCH?.massDurchgangsbreite)}
+              </div>
+              <div className="door-cell muted door-cell-numeric" title={formatNum(door.csetStandardCH?.massDurchgangshoehe)}>
+                {formatNum(door.csetStandardCH?.massDurchgangshoehe)}
+              </div>
+              <div className="door-cell muted door-cell-numeric" title={formatNum(door.csetStandardCH?.massRohbreite)}>
+                {formatNum(door.csetStandardCH?.massRohbreite)}
+              </div>
+              <div className="door-cell muted door-cell-numeric" title={formatNum(door.csetStandardCH?.massRohhoehe)}>
+                {formatNum(door.csetStandardCH?.massRohhoehe)}
+              </div>
+              <div className="door-cell muted door-cell-numeric" title={formatNum(door.csetStandardCH?.massAussenrahmenBreite)}>
+                {formatNum(door.csetStandardCH?.massAussenrahmenBreite)}
+              </div>
+              <div className="door-cell muted door-cell-numeric" title={formatNum(door.csetStandardCH?.massAussenrahmenHoehe)}>
+                {formatNum(door.csetStandardCH?.massAussenrahmenHoehe)}
               </div>
 
               <div className="door-actions">
@@ -205,16 +622,21 @@ export default function DoorListDock({
                   P
                 </button>
               </div>
+
+              <div className="door-cell muted door-cell-guid" title={door.door.globalId ?? door.doorId}>
+                {door.door.globalId ?? door.doorId}
+              </div>
             </div>
           ))}
 
           {remaining > 0 && <div className="more-items">+{remaining} more doors</div>}
-        </>
+        </div>
       )}
 
       <style jsx>{`
         .door-list {
           flex: 1;
+          overflow-x: auto;
           overflow-y: auto;
           padding: 0;
         }
@@ -243,18 +665,16 @@ export default function DoorListDock({
 
         .door-list-header {
           display: grid;
-          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 110px;
-          gap: 8px;
+          gap: 6px;
           padding: 8px 12px;
           background: #1d1d1d;
           border-bottom: 1px solid #303030;
           font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
           color: #7d7d7d;
           position: sticky;
           top: 0;
           z-index: 5;
+          align-items: stretch;
         }
 
         .list-header-button {
@@ -268,8 +688,6 @@ export default function DoorListDock({
           color: inherit;
           cursor: pointer;
           padding: 0;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
           font-size: inherit;
           font-weight: 600;
           text-align: left;
@@ -287,18 +705,112 @@ export default function DoorListDock({
           white-space: nowrap;
         }
 
-        .sort-indicator {
-          font-size: 10px;
-          line-height: 1;
-          color: #94a3b8;
+        .header-search-row {
+          display: flex;
+          align-items: center;
+          width: 100%;
+          min-width: 0;
+          gap: 4px;
+        }
+
+        .header-search-row .list-header-button {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .header-search-toggle {
           flex-shrink: 0;
-          margin-left: 4px;
+          margin-left: auto;
+          margin-right: 8px;
+          padding: 4px;
+          background: none;
+          border: none;
+          color: #fff;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .header-search-toggle:hover {
+          color: #cbd5e1;
+        }
+
+        .header-title-row {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          min-width: 0;
+        }
+
+        .header-title-row .list-header-button {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .header-dropdown-trigger {
+          flex-shrink: 0;
+          width: 20px;
+          height: 20px;
+          padding: 0;
+          border: 1px solid #333;
+          border-radius: 4px;
+          background: #141414;
+          color: #9ca3af;
+          cursor: pointer;
+          font-size: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .header-dropdown-trigger:hover {
+          color: #fff;
+          border-color: #555;
+        }
+
+        .header-dropdown {
+          position: absolute;
+          top: 100%;
+          left: 0;
+          right: 0;
+          margin-top: 4px;
+          max-height: 200px;
+          overflow-y: auto;
+          background: #1d1d1d;
+          border: 1px solid #333;
+          border-radius: 6px;
+          padding: 4px;
+          z-index: 20;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        .header-dropdown-item {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 6px;
+          cursor: pointer;
+          font-size: 11px;
+          border-radius: 4px;
+        }
+
+        .header-dropdown-item:hover {
+          background: #2a2a2a;
+        }
+
+        .header-dropdown-item input {
+          flex-shrink: 0;
+        }
+
+        .view-col {
+          align-items: center;
+          justify-content: center;
         }
 
         .door-row {
           display: grid;
-          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 110px;
-          gap: 8px;
+          gap: 6px;
           align-items: center;
           min-height: 36px;
           padding: 5px 12px;
@@ -387,14 +899,32 @@ export default function DoorListDock({
           color: #9ca3af;
         }
 
+        .door-cell-numeric {
+          text-align: right;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .door-cell-guid {
+          font-size: 10px;
+          font-family: ui-monospace, monospace;
+        }
+
+        .header-label {
+          font-size: 9px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+
         .door-actions {
-            display: grid;
-            grid-auto-flow: column;
-            grid-auto-columns: 20px;
-            align-items: center;
-            justify-content: center;
-            gap: 4px;
-            }
+          display: grid;
+          grid-auto-flow: column;
+          grid-auto-columns: 20px;
+          align-items: center;
+          justify-content: center;
+          gap: 4px;
+        }
 
         .action-button {
           width: 20px;
@@ -451,6 +981,11 @@ export default function DoorListDock({
           flex-direction: column;
           gap: 6px;
           min-width: 0;
+          min-height: 56px;
+        }
+
+        .header-col-checkbox {
+          min-height: 56px;
         }
 
         .header-filter {
@@ -469,10 +1004,6 @@ export default function DoorListDock({
           border-color: #4ecdc4;
         }
 
-        .views-col {
-          align-items: center;
-        }
-
         .clear-header-filters {
           width: 22px;
           height: 22px;
@@ -486,6 +1017,26 @@ export default function DoorListDock({
         .clear-header-filters:hover {
           color: #fff;
           border-color: #555;
+        }
+
+       .header-resizable {
+          position: relative;
+        }
+          .col-resizer {
+          position: absolute;
+          top: 0;
+          right: -3px;
+          width: 6px;
+          height: 100%;
+          cursor: col-resize;
+          z-index: 10;
+        }
+          .col-resizer:hover {
+          background: rgba(148, 163, 184, 0.15);
+        }
+          :global(body.col-resizing) {
+          cursor: col-resize !important;
+          user-select: none;
         }
       `}</style>
     </div>

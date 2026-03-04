@@ -43,7 +43,7 @@ export default function IFCViewer() {
   // DoorListDock
   const [dockSelectedDoorIds, setDockSelectedDoorIds] = useState<Set<string>>(new Set()) // Store selected door IDs for DoorListDock
   const [dockHoveredDoorId, setDockHoveredDoorId] = useState<string | null>(null) // Hover (Highlight in 3D)
-  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'>('door') // Sort field for DoorListDock
+  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
   const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
   const DOCK_RIGHT_OFFSET_PX = 400
   const DOCK_HEIGHT_PX = 260
@@ -66,7 +66,7 @@ export default function IFCViewer() {
     })
   }, [])
 
-  const toggleDockSort = useCallback((field: 'door' | 'type' | 'storey') => {
+  const toggleDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
     setDockSortField(prevField => {
       if (prevField === field) {
         setDockSortDirection(prevDir => (prevDir === 'asc' ? 'desc' : 'asc'))
@@ -78,37 +78,50 @@ export default function IFCViewer() {
   }, [])
 
   const dockSortIndicator = useCallback(
-    (field: 'door' | 'type' | 'storey') => {
+    (field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
       if (dockSortField !== field) return '↕'
       return dockSortDirection === 'asc' ? '↑' : '↓'
     },
     [dockSortDirection, dockSortField]
   )
 
+  const getSortValue = useCallback((door: import('@/lib/door-analyzer').DoorContext, field: typeof dockSortField) => {
+    switch (field) {
+      case 'door': return getDockDoorLabel(door)
+      case 'type': return door.doorTypeName || door.csetStandardCH?.informationType || ''
+      case 'storey': return door.storeyName || ''
+      case 'brandschutz': return door.csetStandardCH?.feuerwiderstand || ''
+      case 'schallschutz': return door.csetStandardCH?.bauschalldaemmmass || ''
+      case 'lb': return door.csetStandardCH?.massDurchgangsbreite ?? -Infinity
+      case 'lh': return door.csetStandardCH?.massDurchgangshoehe ?? -Infinity
+      case 'rb': return door.csetStandardCH?.massRohbreite ?? -Infinity
+      case 'rh': return door.csetStandardCH?.massRohhoehe ?? -Infinity
+      case 'bram': return door.csetStandardCH?.massAussenrahmenBreite ?? -Infinity
+      case 'hram': return door.csetStandardCH?.massAussenrahmenHoehe ?? -Infinity
+      case 'guid': return door.door.globalId ?? door.doorId ?? ''
+      default: return ''
+    }
+  }, [getDockDoorLabel])
+
   const sortedDockDoors = useMemo(() => {
     const doors = [...doorContexts]
+    const isNumeric = ['lb', 'lh', 'rb', 'rh', 'bram', 'hram'].includes(dockSortField)
     doors.sort((a, b) => {
-      const aValue =
-        dockSortField === 'door'
-          ? getDockDoorLabel(a)
-          : dockSortField === 'type'
-            ? (a.doorTypeName || '')
-            : (a.storeyName || '')
-      const bValue =
-        dockSortField === 'door'
-          ? getDockDoorLabel(b)
-          : dockSortField === 'type'
-            ? (b.doorTypeName || '')
-            : (b.storeyName || '')
-
-      const compared = aValue.localeCompare(bValue, undefined, {
-        numeric: true,
-        sensitivity: 'base',
-      })
+      const aVal = getSortValue(a, dockSortField)
+      const bVal = getSortValue(b, dockSortField)
+      let compared: number
+      if (isNumeric && typeof aVal === 'number' && typeof bVal === 'number') {
+        compared = aVal - bVal
+      } else {
+        compared = String(aVal).localeCompare(String(bVal), undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        })
+      }
       return dockSortDirection === 'asc' ? compared : -compared
     })
     return doors
-  }, [doorContexts, dockSortDirection, dockSortField, getDockDoorLabel])
+  }, [doorContexts, dockSortDirection, dockSortField, getSortValue])
 
   const handleDockDoorHover = useCallback(
     (doorId: string | null) => {
