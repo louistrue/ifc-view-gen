@@ -399,6 +399,13 @@ export default function DoorListDock({
    }, [someVisibleSelected, allVisibleSelected])
 
    useEffect(() => {
+     const visibleIds = new Set(filteredDoors.map(d => d.doorId))
+     selectedDoorIds.forEach(id => {
+       if (!visibleIds.has(id)) onToggleSelect(id)
+     })
+   }, [filteredDoors, selectedDoorIds, onToggleSelect])
+
+   useEffect(() => {
      if (!dropdownOpenKey) return
      const onOutside = (e: MouseEvent) => {
        if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
