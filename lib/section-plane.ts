@@ -13,17 +13,12 @@ export class SectionPlane {
     private scene: THREE.Scene
     private renderer: THREE.WebGLRenderer | null = null
     private originalBounds: THREE.Box3
-    private planeSize: number
     private onChangeCallback: (() => void) | null = null
 
     constructor(scene: THREE.Scene, bounds: THREE.Box3, renderer?: THREE.WebGLRenderer) {
         this.scene = scene
         this.renderer = renderer || null
         this.originalBounds = bounds.clone()
-
-        // Calculate plane size based on model bounds
-        const size = bounds.getSize(new THREE.Vector3())
-        this.planeSize = Math.max(size.x, size.y, size.z) * 1.5
 
         // Default plane facing up (horizontal cut)
         this.plane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0)
@@ -122,6 +117,28 @@ export class SectionPlane {
     }
 
     /**
+     * Get model bounds for drag-based section positioning
+     */
+    getBounds(): THREE.Box3 {
+        return this.originalBounds.clone()
+    }
+
+    /**
+     * Set horizontal section plane by direction and world Y
+     * @param direction 'top' = drag from top (keep above plane), 'bottom' = drag from bottom (keep below plane)
+     * @param worldY World Y coordinate for the section plane
+     */
+    setByDirection(direction: 'top' | 'bottom', worldY: number): void {
+        const center = this.originalBounds.getCenter(new THREE.Vector3())
+        const point = new THREE.Vector3(center.x, worldY, center.z)
+        // top: keep y > worldY (above plane) -> normal (0,1,0)
+        // bottom: keep y < worldY (below plane) -> normal (0,-1,0)
+        const normal = direction === 'top' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, -1, 0)
+        this.plane.setFromNormalAndCoplanarPoint(normal, point)
+        this.updateHelper()
+    }
+
+    /**
      * Set plane from world position and camera view direction
      */
     setFromPointAndView(point: THREE.Vector3, camera: THREE.PerspectiveCamera): void {
@@ -135,7 +152,68 @@ export class SectionPlane {
     }
 
     /**
-     * Update the visual helper - elegant thin rectangular outline only
+     * Get the 2D extent of the bounding box projected onto the section plane.
+     */
+    private getPlaneExtentFromBounds(): {
+        width: number
+        height: number
+        centerU: number
+        centerV: number
+        u: THREE.Vector3
+        v: THREE.Vector3
+    } {
+        const normal = this.plane.normal
+        const planeCenter = new THREE.Vector3()
+        this.plane.coplanarPoint(planeCenter)
+
+        // Build orthonormal basis in the plane: u and v
+        let u = new THREE.Vector3()
+        if (Math.abs(normal.y) < 0.9) {
+            u.crossVectors(new THREE.Vector3(0, 1, 0), normal)
+        } else {
+            u.crossVectors(new THREE.Vector3(1, 0, 0), normal)
+        }
+        u.normalize()
+
+        const v = new THREE.Vector3().crossVectors(normal, u).normalize()
+
+        // Project 8 corners of bounding box onto plane, then to 2D
+        const min = this.originalBounds.min
+        const max = this.originalBounds.max
+        const corners = [
+            new THREE.Vector3(min.x, min.y, min.z),
+            new THREE.Vector3(max.x, min.y, min.z),
+            new THREE.Vector3(min.x, max.y, min.z),
+            new THREE.Vector3(max.x, max.y, min.z),
+            new THREE.Vector3(min.x, min.y, max.z),
+            new THREE.Vector3(max.x, min.y, max.z),
+            new THREE.Vector3(min.x, max.y, max.z),
+            new THREE.Vector3(max.x, max.y, max.z),
+        ]
+
+        let minU = Infinity, maxU = -Infinity
+        let minV = Infinity, maxV = -Infinity
+
+        const toPlane = new THREE.Vector3()
+        for (const corner of corners) {
+            toPlane.copy(corner).sub(planeCenter)
+            const uVal = toPlane.dot(u)
+            const vVal = toPlane.dot(v)
+            minU = Math.min(minU, uVal)
+            maxU = Math.max(maxU, uVal)
+            minV = Math.min(minV, vVal)
+            maxV = Math.max(maxV, vVal)
+        }
+
+        const width = Math.max(maxU - minU, 0.01)
+        const height = Math.max(maxV - minV, 0.01)
+        const centerU = (minU + maxU) / 2
+        const centerV = (minV + maxV) / 2
+        return { width, height, centerU, centerV, u, v }
+    }
+
+    /**
+     * Update the visual helper - plane and outline limited to building bounds
      */
     private updateHelper(): void {
         // Remove old visuals
@@ -158,22 +236,53 @@ export class SectionPlane {
 
         // Create new visuals if enabled
         if (this.enabled) {
-            // Get plane center point
             const planeCenter = new THREE.Vector3()
             this.plane.coplanarPoint(planeCenter)
 
-            // Create elegant thin rectangular outline using LineSegments
-            // Rectangle vertices in local space
-            const half = this.planeSize / 2
+            const { width, height, centerU, centerV, u, v } = this.getPlaneExtentFromBounds()
+            // Swap width/height to match PlaneGeometry orientation (90° correction)
+            const halfW = height / 2
+            const halfH = width / 2
+
+            const quaternion = new THREE.Quaternion()
+            quaternion.setFromUnitVectors(
+                new THREE.Vector3(0, 0, 1),
+                this.plane.normal.clone()
+            )
+
+            // Mesh center = plane point + offset to bounds center
+            const meshCenter = new THREE.Vector3()
+                .copy(planeCenter)
+                .addScaledVector(u, centerU)
+                .addScaledVector(v, centerV)
+
+            // Transparent filled plane - limited to building bounds (width/height swapped for orientation)
+            const planeGeometry = new THREE.PlaneGeometry(height, width)
+            const planeMaterial = new THREE.MeshBasicMaterial({
+                color: 0x4ecdc4,
+                transparent: true,
+                opacity: 0.15,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                depthTest: true,
+                clippingPlanes: [], // Don't clip the section plane visual itself
+            })
+            this.planeMesh = new THREE.Mesh(planeGeometry, planeMaterial)
+            this.planeMesh.position.copy(meshCenter)
+            this.planeMesh.quaternion.copy(quaternion)
+            this.planeMesh.renderOrder = 998
+            this.scene.add(this.planeMesh)
+
+            // Create rectangular outline - bounds of building
             const vertices = new Float32Array([
                 // Rectangle outline
-                -half, -half, 0, half, -half, 0,  // bottom
-                half, -half, 0, half, half, 0,   // right
-                half, half, 0, -half, half, 0,  // top
-                -half, half, 0, -half, -half, 0, // left
+                -halfW, -halfH, 0, halfW, -halfH, 0,   // bottom
+                halfW, -halfH, 0, halfW, halfH, 0,     // right
+                halfW, halfH, 0, -halfW, halfH, 0,    // top
+                -halfW, halfH, 0, -halfW, -halfH, 0,  // left
                 // Cross lines for subtle visual reference
-                -half * 0.1, 0, 0, half * 0.1, 0, 0,  // small center horizontal
-                0, -half * 0.1, 0, 0, half * 0.1, 0,  // small center vertical
+                -halfW * 0.1, 0, 0, halfW * 0.1, 0, 0,
+                0, -halfH * 0.1, 0, 0, halfH * 0.1, 0,
             ])
 
             const lineGeometry = new THREE.BufferGeometry()
@@ -185,19 +294,13 @@ export class SectionPlane {
                 opacity: 0.6,
                 depthWrite: false,
                 depthTest: true,
+                clippingPlanes: [], // Don't clip the section plane visual itself
             })
 
             this.planeOutline = new THREE.LineSegments(lineGeometry, lineMaterial) as unknown as THREE.Mesh
             this.planeOutline.renderOrder = 999
 
-            // Position and orient to match the plane
-            const quaternion = new THREE.Quaternion()
-            quaternion.setFromUnitVectors(
-                new THREE.Vector3(0, 0, 1), // Default plane normal
-                this.plane.normal.clone()
-            )
-
-            this.planeOutline.position.copy(planeCenter)
+            this.planeOutline.position.copy(meshCenter)
             this.planeOutline.quaternion.copy(quaternion)
 
             this.scene.add(this.planeOutline)
