@@ -10,7 +10,7 @@ import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
 import { SectionPlane } from '@/lib/section-plane'
-import ViewerToolbar, { type SectionMode } from './ViewerToolbar'
+import ViewerToolbar, { type SectionMode, type ColorMode } from './ViewerToolbar'
 import ZoomWindowOverlay from './ZoomWindowOverlay'
 import SectionDrawOverlay from './SectionDrawOverlay'
 import SectionDragOverlay from './SectionDragOverlay'
@@ -50,6 +50,7 @@ export default function IFCViewer() {
   const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
   const DOCK_RIGHT_OFFSET_PX = 400
   const [dockHeightPx, setDockHeightPx] = useState(260)
+  const [colorMode, setColorMode] = useState<ColorMode>('off')
 
   const getDockDoorLabel = useCallback((door: DoorContext) => {
     return (
@@ -170,9 +171,11 @@ export default function IFCViewer() {
   }, [])
 
   // Sync DoorListDock checkbox selection to 3D view: selected highlighted, rest dimmed
+  // Skip when color-by-geometry is active (it has its own visibility state)
   useEffect(() => {
     const vm = visibilityManagerRef.current
     if (!vm || doorContexts.length === 0) return
+    if (colorMode === 'geometry-type') return
 
     const run = async () => {
       if (dockSelectedDoorIds.size > 0) {
@@ -194,7 +197,7 @@ export default function IFCViewer() {
       triggerRenderRef.current?.()
     }
     run()
-  }, [dockSelectedDoorIds, doorContexts])
+  }, [dockSelectedDoorIds, doorContexts, colorMode])
 
   // File names for display
   const [archFileName, setArchFileName] = useState<string>('')
@@ -1356,6 +1359,13 @@ Section:
             sectionMode={sectionMode}
             isSectionActive={isSectionActive}
             onResetView={handleResetView}
+            visibilityManager={visibilityManagerRef.current}
+            doorContexts={doorContexts}
+            colorMode={colorMode}
+            onColorModeChange={(mode) => {
+              setColorMode(mode)
+              // useEffect will re-apply dock selection or reset when colorMode becomes 'off'
+            }}
           />
 
           {/* Spatial Hierarchy Panel */}

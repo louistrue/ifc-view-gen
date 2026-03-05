@@ -7,6 +7,7 @@ import { FragmentsModel, FragmentsModels, RenderedFaces } from '@thatopen/fragme
 import * as THREE from 'three'
 import type { ElementInfo } from './ifc-types'
 import type { SpatialNode } from './spatial-structure'
+import type { DoorContext } from './door-analyzer'
 import { getAllElementIds } from './spatial-structure'
 
 // Highlight colors for different states (aligned with bimdoer/ifc-validator)
@@ -235,6 +236,77 @@ export class ElementVisibilityManager {
 
         this.dimmedElements = null
         await this.fragmentsModel.resetHighlight()
+        await this.applyChanges()
+    }
+
+    /** Palette for geometry type coloring (distinct, visible colors) */
+    private static GEOMETRY_TYPE_COLORS = [
+        new THREE.Color(0x4ecdc4), // Teal
+        new THREE.Color(0xe74c3c), // Red
+        new THREE.Color(0x3498db), // Blue
+        new THREE.Color(0x2ecc71), // Green
+        new THREE.Color(0xf39c12), // Orange
+        new THREE.Color(0x9b59b6), // Purple
+        new THREE.Color(0x1abc9c), // Turquoise
+        new THREE.Color(0xe91e63), // Pink
+    ]
+
+    /**
+     * Color doors by geometry type, dim the rest (like selection)
+     */
+    async colorDoorsByGeometryType(doorContexts: DoorContext[]): Promise<void> {
+        this.isolatedElements = null
+        this.dimmedElements = null
+
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
+        }
+
+        const doorIds = new Set(doorContexts.map(d => d.door.expressID))
+        const byType = new Map<string, number[]>()
+        for (const ctx of doorContexts) {
+            const type = ctx.csetStandardCH?.geometryType || '—'
+            if (!byType.has(type)) byType.set(type, [])
+            byType.get(type)!.push(ctx.door.expressID)
+        }
+
+        const visibleIds = this.storeyFilterIds ?? this.allModelIds
+        const nonDoorIds = visibleIds.filter(id => !doorIds.has(id))
+
+        await this.fragmentsModel.resetVisible()
+        await this.fragmentsModel.resetHighlight()
+
+        if (this.storeyFilterIds && this.storeyFilterIds.length > 0) {
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            await this.fragmentsModel.setVisible(this.storeyFilterIds, true)
+        }
+        if (this.hiddenElements.size > 0) {
+            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        }
+
+        if (nonDoorIds.length > 0) {
+            await this.fragmentsModel.highlight(nonDoorIds, {
+                color: new THREE.Color(0xffffff),
+                renderedFaces: RenderedFaces.TWO,
+                opacity: 0.3,
+                transparent: true,
+            })
+        }
+
+        let colorIndex = 0
+        for (const [, ids] of byType) {
+            const color = ElementVisibilityManager.GEOMETRY_TYPE_COLORS[
+                colorIndex % ElementVisibilityManager.GEOMETRY_TYPE_COLORS.length
+            ]
+            await this.fragmentsModel.highlight(ids, {
+                color,
+                renderedFaces: RenderedFaces.TWO,
+                opacity: 1,
+                transparent: false,
+            })
+            colorIndex++
+        }
+
         await this.applyChanges()
     }
 

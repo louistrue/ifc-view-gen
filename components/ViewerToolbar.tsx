@@ -2,8 +2,12 @@
 
 import { useState, useEffect } from 'react'
 import type { NavigationManager } from '@/lib/navigation-manager'
+import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
+import type { DoorContext } from '@/lib/door-analyzer'
 
 export type SectionMode = 'off' | 'line' | 'drag-top' | 'drag-bottom'
+
+export type ColorMode = 'off' | 'geometry-type'
 
 interface ViewerToolbarProps {
     navigationManager: NavigationManager | null
@@ -11,6 +15,10 @@ interface ViewerToolbarProps {
     onResetView?: () => void
     sectionMode?: SectionMode
     isSectionActive?: boolean
+    visibilityManager?: ElementVisibilityManager | null
+    doorContexts?: DoorContext[]
+    colorMode?: ColorMode
+    onColorModeChange?: (mode: ColorMode) => void
 }
 
 function ScissorsIcon({ size = 20 }: { size?: number }) {
@@ -72,9 +80,29 @@ function CenterIcon({ size = 20 }: { size?: number }) {
     )
 }
 
-const roundButtonStyle = (active: boolean) => ({
-    width: '40px',
-    height: '40px',
+function PaintIcon({ size = 20 }: { size?: number }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M18.37 2.63 14 7l-1.59-1.59a2 2 0 0 0-2.82 0L8 7l9 9 1.59-1.59a2 2 0 0 0 0-2.82L17 10l4.37-4.37a2.12 2.12 0 1 0-3-3Z" />
+            <path d="M9 8c-2 3-4 3.5-7 4l8 10c2-1 6-5 6-7" />
+            <path d="M14.5 17.5 4.5 15" />
+        </svg>
+    )
+}
+
+function GeometryTypeIcon({ size = 20 }: { size?: number }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+            <path d="M3.27 6.96L12 12.01l8.73-5.05" />
+            <path d="M12 22.08V12" />
+        </svg>
+    )
+}
+
+const roundButtonStyle = (active: boolean, size: 40 | 48 = 48) => ({
+    width: `${size}px`,
+    height: `${size}px`,
     borderRadius: '50%',
     border: active ? '1px solid #5a8fc2' : '1px solid #555',
     backgroundColor: active ? '#3d5a80' : '#2a2a2a',
@@ -93,12 +121,21 @@ export default function ViewerToolbar({
     onResetView,
     sectionMode = 'off',
     isSectionActive = false,
+    visibilityManager,
+    doorContexts = [],
+    colorMode = 'off',
+    onColorModeChange,
 }: ViewerToolbarProps) {
     const [expanded, setExpanded] = useState(false)
+    const [colorExpanded, setColorExpanded] = useState(false)
 
     useEffect(() => {
         if (sectionMode === 'off') setExpanded(false)
     }, [sectionMode])
+
+    useEffect(() => {
+        if (colorMode === 'off') setColorExpanded(false)
+    }, [colorMode])
 
     const handleScissorsClick = () => {
         if (sectionMode !== 'off') {
@@ -120,8 +157,27 @@ export default function ViewerToolbar({
         setExpanded(false)
     }
 
+    const handleColorClick = () => {
+        if (colorMode !== 'off') {
+            onColorModeChange?.('off')
+        } else {
+            setColorExpanded((prev) => !prev)
+        }
+    }
+
+    const handleColorByGeometryType = async () => {
+        if (colorMode === 'geometry-type') {
+            onColorModeChange?.('off')
+        } else if (visibilityManager && doorContexts.length > 0) {
+            onColorModeChange?.('geometry-type')
+            await visibilityManager.colorDoorsByGeometryType(doorContexts)
+        }
+        setColorExpanded(false)
+    }
+
     const isSectionMode = sectionMode !== 'off'
     const isActive = isSectionActive || isSectionMode
+    const isColorActive = colorMode !== 'off'
 
     return (
         <div
@@ -159,59 +215,84 @@ export default function ViewerToolbar({
                 style={{
                     display: 'flex',
                     flexDirection: 'column',
-                    alignItems: 'center',
+                    alignItems: 'flex-start',
                     gap: '8px',
                 }}
             >
                 <button
-                    onClick={handleScissorsClick}
-                    title="Section"
-                    style={{
-                        ...roundButtonStyle(isActive),
-                        width: '48px',
-                        height: '48px',
-                    }}
+                    onClick={() => navigationManager?.setViewPreset('iso')}
+                    title="Center model"
+                    style={roundButtonStyle(false)}
                 >
                     <CenterIcon size={24} />
                 </button>
-                <button
-                    onClick={() => navigationManager?.setViewPreset('iso')}
-                    title="Center model"
+                <div
                     style={{
-                        ...roundButtonStyle(false),
-                        width: '48px',
-                        height: '48px',
+                        display: 'flex',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: '8px',
                     }}
                 >
-                    <ScissorsIcon size={24} />
-                </button>
+                    <button
+                        onClick={handleScissorsClick}
+                        title="Section"
+                        style={roundButtonStyle(isActive)}
+                    >
+                        <ScissorsIcon size={24} />
+                    </button>
+                    {expanded && (
+                        <>
+                            <button
+                                onClick={() => handleModeSelect('line')}
+                                title="Draw section line (2 clicks)"
+                                style={roundButtonStyle(sectionMode === 'line')}
+                            >
+                                <LineIcon size={24} />
+                            </button>
+                            <button
+                                onClick={() => handleModeSelect('drag-top')}
+                                title="Drag section from top"
+                                style={roundButtonStyle(sectionMode === 'drag-top')}
+                            >
+                                <ArrowDownIcon size={24} />
+                            </button>
+                            <button
+                                onClick={() => handleModeSelect('drag-bottom')}
+                                title="Drag section from bottom"
+                                style={roundButtonStyle(sectionMode === 'drag-bottom')}
+                            >
+                                <ArrowUpIcon size={24} />
+                            </button>
+                        </>
+                    )}
+                </div>
+                <div
+                    style={{
+                        display: 'flex',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: '8px',
+                    }}
+                >
+                    <button
+                        onClick={handleColorClick}
+                        title="Color"
+                        style={roundButtonStyle(isColorActive)}
+                    >
+                        <PaintIcon size={24} />
+                    </button>
+                    {colorExpanded && (
+                        <button
+                            onClick={handleColorByGeometryType}
+                            title="Nach Geometrietyp einfärben"
+                            style={roundButtonStyle(colorMode === 'geometry-type')}
+                        >
+                            <GeometryTypeIcon size={24} />
+                        </button>
+                    )}
+                </div>
             </div>
-
-            {expanded && (
-                <>
-                    <button
-                        onClick={() => handleModeSelect('line')}
-                        title="Draw section line (2 clicks)"
-                        style={roundButtonStyle(sectionMode === 'line')}
-                    >
-                        <LineIcon size={22} />
-                    </button>
-                    <button
-                        onClick={() => handleModeSelect('drag-top')}
-                        title="Drag section from top"
-                        style={roundButtonStyle(sectionMode === 'drag-top')}
-                    >
-                        <ArrowDownIcon size={22} />
-                    </button>
-                    <button
-                        onClick={() => handleModeSelect('drag-bottom')}
-                        title="Drag section from bottom"
-                        style={roundButtonStyle(sectionMode === 'drag-bottom')}
-                    >
-                        <ArrowUpIcon size={22} />
-                    </button>
-                </>
-            )}
         </div>
     )
 }
