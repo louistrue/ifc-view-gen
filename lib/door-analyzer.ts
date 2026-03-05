@@ -16,7 +16,7 @@ export interface DoorContext {
     storeyName: string | null  // Building storey name from spatial structure
     csetStandardCH?: {
         alTuernummer: string | null
-        informationType: string | null
+        geometryType: string | null
         massDurchgangsbreite: number | null
         massDurchgangshoehe: number | null
         massRohbreite: number | null
@@ -67,7 +67,7 @@ function parseIfcNumber(value: unknown): number | null {
 
 type CsetStandardCH = {
     alTuernummer: string | null
-    informationType: string | null
+    geometryType: string | null
     massDurchgangsbreite: number | null
     massDurchgangshoehe: number | null
     massRohbreite: number | null
@@ -83,7 +83,7 @@ type CsetStandardCH = {
 function emptyCsetStandardCH(): CsetStandardCH {
     return {
         alTuernummer: null,
-        informationType: null,
+        geometryType: null,
         massDurchgangsbreite: null,
         massDurchgangshoehe: null,
         massRohbreite: null,
@@ -100,23 +100,23 @@ function emptyCsetStandardCH(): CsetStandardCH {
 function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue: unknown) {
     const normalized = normalizeIfcPropName(propertyName)
 
-    if (normalized === 'al00tuernummer' || normalized === 'tuernummer') {
+    if (normalized === 'tuernummereindeutig') {
         const value = unwrapIfcValue(rawValue)
         if (typeof value === 'string' && value.trim()) {
             target.alTuernummer = value.trim()
         }
-    } else if (normalized === 'informationtype') {
+    } else if (normalized === 'geometrytype') {
         const value = unwrapIfcValue(rawValue)
         if (typeof value === 'string' && value.trim()) {
-            target.informationType = value.trim()
+            target.geometryType = value.trim()
         }
     } else if (normalized === 'massdurchgangsbreite') {
         target.massDurchgangsbreite = parseIfcNumber(rawValue)
-    } else if (normalized === 'massdurchgangshoehe') {
+    } else if (normalized === 'lh') {
         target.massDurchgangshoehe = parseIfcNumber(rawValue)
-    } else if (normalized === 'massrohbreite' || normalized === 'massrohebreite') {
+    } else if (normalized === 'rb') {
         target.massRohbreite = parseIfcNumber(rawValue)
-    } else if (normalized === 'massrohhoehe' || normalized === 'massrohehoehe') {
+    } else if (normalized === 'rh') {
         target.massRohhoehe = parseIfcNumber(rawValue)
     } else if (normalized === 'massaussenrahmenbreite') {
         target.massAussenrahmenBreite = parseIfcNumber(rawValue)
@@ -139,7 +139,7 @@ function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue:
 
 function hasCsetValues(data: CsetStandardCH): boolean {
     return data.alTuernummer !== null
-        || data.informationType !== null
+        || data.geometryType !== null
         || data.massDurchgangsbreite !== null
         || data.massDurchgangshoehe !== null
         || data.massRohbreite !== null
@@ -800,7 +800,7 @@ export async function analyzeDoors(
         // UI TYPE filter should use AL00_Tuernummer first.
         const doorTypeName =
             csetStandardCH?.alTuernummer
-            || csetStandardCH?.informationType
+            || csetStandardCH?.geometryType
             || baseDoorTypeName
 
         // Get storey name from spatial structure
