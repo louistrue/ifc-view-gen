@@ -17,6 +17,11 @@ export const HIGHLIGHT_COLORS = {
     filtered: new THREE.Color(0x4ecdc4),   // Teal for filtered doors
 }
 
+/** Hex colors for geometry type - same order as GEOMETRY_TYPE_COLORS in ElementVisibilityManager, for DoorListDock */
+export const GEOMETRY_TYPE_COLORS_HEX = [
+    '#4ecdc4', '#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e91e63',
+]
+
 export class ElementVisibilityManager {
     private fragmentsModel: FragmentsModel
     private fragmentsManager: FragmentsModels | null = null

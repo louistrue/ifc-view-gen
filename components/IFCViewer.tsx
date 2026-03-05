@@ -1223,6 +1223,8 @@ Section:
             scrollToDoorId={scrollToDoorId}
             onScrollToDoorHandled={() => setScrollToDoorId(null)}
             onStoreyFilterChange={handleStoreyFilterChange}
+            showColorColumn={colorMode === 'geometry-type'}
+            doorsForColorMap={doorContexts}
             dock
             dockHeightPx={dockHeightPx}
             onDockHeightChange={setDockHeightPx}
