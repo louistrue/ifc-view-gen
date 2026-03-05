@@ -13,7 +13,7 @@ import { SectionPlane } from '@/lib/section-plane'
 import ViewerToolbar, { type SectionMode } from './ViewerToolbar'
 import ZoomWindowOverlay from './ZoomWindowOverlay'
 import SectionDrawOverlay from './SectionDrawOverlay'
-import ViewPresets from './ViewPresets'
+import SectionDragOverlay from './SectionDragOverlay'
 import SpatialHierarchyPanel from './SpatialHierarchyPanel'
 import TypeFilterPanel from './TypeFilterPanel'
 import IFCClassFilterPanel from './IFCClassFilterPanel'
@@ -238,7 +238,7 @@ export default function IFCViewer() {
 
     const handlePointerDown = (e: PointerEvent) => {
       if (!showBatchProcessor || doorContexts.length === 0) return
-      if (zoomWindowActive || sectionMode === 'line') return
+      if (zoomWindowActive || sectionMode !== 'off') return
 
       pointerDownRef.x = e.clientX
       pointerDownRef.y = e.clientY
@@ -247,7 +247,7 @@ export default function IFCViewer() {
 
     const handlePointerUp = (e: PointerEvent) => {
       if (!showBatchProcessor || doorContexts.length === 0) return
-      if (zoomWindowActive || sectionMode === 'line') return
+      if (zoomWindowActive || sectionMode !== 'off') return
       if (!pointerDownRef.active) return
 
       const dx = e.clientX - pointerDownRef.x
@@ -949,6 +949,21 @@ Section:
           triggerRender={triggerRenderRef.current}
         />
 
+        {/* Section Drag Overlay - for drag from top/bottom */}
+        <SectionDragOverlay
+          active={sectionMode === 'drag-top' || sectionMode === 'drag-bottom'}
+          direction={sectionMode === 'drag-top' ? 'top' : 'bottom'}
+          onComplete={() => setSectionMode('off')}
+          onSectionEnabled={() => {
+            setIsSectionActive(true)
+            triggerRenderRef.current()
+          }}
+          sectionPlane={sectionPlaneRef.current}
+          camera={cameraRef.current}
+          containerRef={containerRef}
+          triggerRender={triggerRenderRef.current}
+        />
+
         {/* Landing UI overlay when no model loaded */}
         {!modelLoaded && !isLoading && (
           <div
@@ -1321,34 +1336,15 @@ Section:
           <ViewerToolbar
             navigationManager={navigationManagerRef.current}
             onSectionModeChange={(mode) => {
-              // Clear previous section when changing modes
-              if (sectionPlaneRef.current) {
-                sectionPlaneRef.current.disable()
-              }
-              // If turning off, clear section active state
-              if (mode === 'off') {
-                setIsSectionActive(false)
-              }
+              if (sectionPlaneRef.current) sectionPlaneRef.current.disable()
+              if (mode === 'off') setIsSectionActive(false)
               setSectionMode(mode)
-              triggerRenderRef.current() // Force render to show changes
+              triggerRenderRef.current()
             }}
             sectionMode={sectionMode}
             isSectionActive={isSectionActive}
-            onSpatialPanelToggle={() => setShowSpatialPanel(!showSpatialPanel)}
-            onTypeFilterToggle={() => setShowTypeFilter(!showTypeFilter)}
-            onIFCClassFilterToggle={() => setShowIFCClassFilter(!showIFCClassFilter)}
-            onZoomWindowToggle={() => setZoomWindowActive(!zoomWindowActive)}
             onResetView={handleResetView}
-            showSpatialPanel={showSpatialPanel}
-            showTypeFilter={showTypeFilter}
-            showIFCClassFilter={showIFCClassFilter}
-            zoomWindowActive={zoomWindowActive}
           />
-
-          {/* View Presets */}
-          {navigationManagerRef.current && (
-            <ViewPresets navigationManager={navigationManagerRef.current} />
-          )}
 
           {/* Spatial Hierarchy Panel */}
           {showSpatialPanel && spatialStructure && (
