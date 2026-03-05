@@ -9,6 +9,7 @@ interface SectionAdjustOverlayProps {
     sectionPlane: SectionPlane | null
     containerRef: React.RefObject<HTMLDivElement>
     triggerRender?: () => void
+    rightPaletteOffsetPx?: number
 }
 
 export default function SectionAdjustOverlay({
@@ -106,12 +107,12 @@ export default function SectionAdjustOverlay({
                 pointerEvents: shiftHeld ? 'auto' : 'none',
             }}
         >
-            {/* Help text top center when section is active */}
+            {/* Help text top center - between left edge and right palette */}
             <div
                 style={{
                     position: 'absolute',
                     top: '12px',
-                    left: '50%',
+                    left: `calc((100% - ${rightPaletteOffsetPx}px) / 2)`,
                     transform: 'translateX(-50%)',
                     padding: '6px 14px',
                     backgroundColor: 'rgba(32, 32, 32, 0.9)',

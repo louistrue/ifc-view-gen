@@ -948,6 +948,7 @@ Section:
           scene={sceneRef.current}
           containerRef={containerRef}
           triggerRender={triggerRenderRef.current}
+          rightPaletteOffsetPx={showBatchProcessor && doorContexts.length > 0 ? DOCK_RIGHT_OFFSET_PX : 0}
         />
 
         {/* Section Drag Overlay - for drag from top/bottom */}
@@ -963,6 +964,7 @@ Section:
           camera={cameraRef.current}
           containerRef={containerRef}
           triggerRender={triggerRenderRef.current}
+          rightPaletteOffsetPx={showBatchProcessor && doorContexts.length > 0 ? DOCK_RIGHT_OFFSET_PX : 0}
         />
 
         {/* Section Adjust Overlay - Shift+drag to move section when active */}
@@ -971,6 +973,7 @@ Section:
           sectionPlane={sectionPlaneRef.current}
           containerRef={containerRef}
           triggerRender={triggerRenderRef.current}
+          rightPaletteOffsetPx={showBatchProcessor && doorContexts.length > 0 ? DOCK_RIGHT_OFFSET_PX : 0}
         />
 
         {/* Landing UI overlay when no model loaded */}

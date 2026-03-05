@@ -15,6 +15,7 @@ interface SectionDragOverlayProps {
     camera: THREE.PerspectiveCamera | null
     containerRef: React.RefObject<HTMLDivElement>
     triggerRender?: () => void
+    rightPaletteOffsetPx?: number
 }
 
 export default function SectionDragOverlay({
@@ -26,6 +27,7 @@ export default function SectionDragOverlay({
     camera,
     containerRef,
     triggerRender,
+    rightPaletteOffsetPx = 0,
 }: SectionDragOverlayProps) {
     const [isDragging, setIsDragging] = useState(false)
     const [currentY, setCurrentY] = useState(0)
@@ -136,12 +138,12 @@ export default function SectionDragOverlay({
                 backgroundColor: 'rgba(0, 0, 0, 0.05)',
             }}
         >
-            {/* Help text top center */}
+            {/* Help text top center - between left edge and right palette */}
             <div
                 style={{
                     position: 'absolute',
                     top: '12px',
-                    left: '50%',
+                    left: `calc((100% - ${rightPaletteOffsetPx}px) / 2)`,
                     transform: 'translateX(-50%)',
                     padding: '6px 14px',
                     backgroundColor: 'rgba(32, 32, 32, 0.9)',

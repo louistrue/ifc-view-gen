@@ -16,6 +16,7 @@ interface SectionDrawOverlayProps {
     scene: THREE.Scene | null
     containerRef: React.RefObject<HTMLDivElement>  // Canvas container for dimension matching
     triggerRender?: () => void  // Callback to trigger scene render
+    rightPaletteOffsetPx?: number  // Right palette width when visible (for centering hint)
 }
 
 export default function SectionDrawOverlay({
@@ -28,6 +29,7 @@ export default function SectionDrawOverlay({
     scene,
     containerRef,
     triggerRender,
+    rightPaletteOffsetPx = 0,
 }: SectionDrawOverlayProps) {
     const [isDrawing, setIsDrawing] = useState(false)
     const [startPoint, setStartPoint] = useState({ x: 0, y: 0 })
@@ -200,12 +202,12 @@ export default function SectionDrawOverlay({
                 backgroundColor: 'rgba(0, 0, 0, 0.05)',
             }}
         >
-            {/* Help text top center */}
+            {/* Help text top center - between left edge and right palette */}
             <div
                 style={{
                     position: 'absolute',
                     top: '12px',
-                    left: '50%',
+                    left: `calc((100% - ${rightPaletteOffsetPx}px) / 2)`,
                     transform: 'translateX(-50%)',
                     padding: '6px 14px',
                     backgroundColor: 'rgba(32, 32, 32, 0.9)',
