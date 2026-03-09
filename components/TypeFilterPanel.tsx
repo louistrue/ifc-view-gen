@@ -24,6 +24,7 @@ export default function TypeFilterPanel({
   const visibleTypes = activeFilters
   const setVisibleTypes = onFiltersChange
   const isApplying = useRef(false) // Prevent double-calls
+  const pendingFiltersRef = useRef<Set<string> | null | undefined>(undefined) // undefined = none pending
 
   // Get unique product types from elements with counts
   // Only shows productTypeName from IfcRelDefinesByType - NOT IFC classes
@@ -68,7 +69,11 @@ export default function TypeFilterPanel({
 
   // Apply filter directly (not via useEffect)
   const applyFilter = async (types: Set<string> | null) => {
-    if (!visibilityManager || isApplying.current) return
+    if (!visibilityManager) return
+    if (isApplying.current) {
+      pendingFiltersRef.current = types
+      return
+    }
 
     isApplying.current = true
     try {
@@ -82,6 +87,11 @@ export default function TypeFilterPanel({
       }
     } finally {
       isApplying.current = false
+      const pending = pendingFiltersRef.current
+      pendingFiltersRef.current = undefined
+      if (pending !== undefined) {
+        applyFilter(pending)
+      }
     }
   }
 

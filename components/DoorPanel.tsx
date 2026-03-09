@@ -252,13 +252,13 @@ export default function DoorPanel({
         if (isolateFiltered && filteredDoors.length > 0) {
           const doorExpressIds = filteredDoors.map(d => d.door.expressID)
           if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.isolateElements(doorExpressIds)
+          await visibilityManager.isolateElements(doorExpressIds, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
           if (runId !== visibilitySyncRunIdRef.current) return
           isControllingVisibilityRef.current = true
         } else if (dimFiltered && filteredDoors.length > 0) {
           const doorExpressIds = filteredDoors.map(d => d.door.expressID)
           if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.dimNonSelectedElements(doorExpressIds)
+          await visibilityManager.dimNonSelectedElements(doorExpressIds, 0.3, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
           if (runId !== visibilitySyncRunIdRef.current) return
           isControllingVisibilityRef.current = true
         } else if (isControllingVisibilityRef.current) {
@@ -478,7 +478,7 @@ export default function DoorPanel({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             doorId: door.doorId,
-            doorType: door.csetStandardCH?.geometryType || door.doorTypeName || undefined,
+            doorType: door.doorTypeName ?? undefined,
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,

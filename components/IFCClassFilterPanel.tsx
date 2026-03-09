@@ -24,6 +24,7 @@ export default function IFCClassFilterPanel({
   const visibleClasses = activeFilters
   const setVisibleClasses = onFiltersChange
   const isApplying = useRef(false) // Prevent double-calls
+  const pendingFiltersRef = useRef<Set<string> | null | undefined>(undefined) // undefined = none pending
 
   // Get unique IFC class names from elements with counts
   // Only shows typeName (IFC class like IFCDOOR, IFCWALL, etc.)
@@ -60,7 +61,11 @@ export default function IFCClassFilterPanel({
 
   // Apply filter directly (not via useEffect)
   const applyFilter = async (classes: Set<string> | null) => {
-    if (!visibilityManager || isApplying.current) return
+    if (!visibilityManager) return
+    if (isApplying.current) {
+      pendingFiltersRef.current = classes
+      return
+    }
 
     isApplying.current = true
     try {
@@ -74,6 +79,11 @@ export default function IFCClassFilterPanel({
       }
     } finally {
       isApplying.current = false
+      const pending = pendingFiltersRef.current
+      pendingFiltersRef.current = undefined
+      if (pending !== undefined) {
+        applyFilter(pending)
+      }
     }
   }
 

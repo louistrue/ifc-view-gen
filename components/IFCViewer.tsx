@@ -50,6 +50,7 @@ export default function IFCViewer() {
   const DOCK_RIGHT_OFFSET_PX = 400
   const [dockHeightPx, setDockHeightPx] = useState(260)
   const [dockStoreyFilterActive, setDockStoreyFilterActive] = useState(false)
+  const [dockResetKey, setDockResetKey] = useState(0)
   const dockListContainerRef = useRef<HTMLDivElement | null>(null)
   const storeyOpIdRef = useRef(0)
 
@@ -210,7 +211,7 @@ export default function IFCViewer() {
             if (runId !== visibilitySyncRunIdRef.current) return
             vm.setSelectedElements(selectedExpressIds)
             if (runId !== visibilitySyncRunIdRef.current) return
-            await vm.dimNonSelectedElements(selectedExpressIds)
+            await vm.dimNonSelectedElements(selectedExpressIds, 0.3, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
           } else {
             if (runId !== visibilitySyncRunIdRef.current) return
             vm.setSelectedElements([])
@@ -549,6 +550,7 @@ export default function IFCViewer() {
     }
     setDockStoreyFilterActive(false)
     setDockSelectedDoorIds(new Set())
+    setDockResetKey(k => k + 1)
     // Reset class filters
     setActiveClassFilters(null)
     setActiveIFCClassFilters(null)
@@ -1229,6 +1231,7 @@ Section:
 
         {showBatchProcessor && doorContexts.length > 0 && (
           <DoorListDock
+            key={dockResetKey}
             doors={sortedDockDoors}
             selectedDoorIds={dockSelectedDoorIds}
             hoveredDoorId={dockHoveredDoorId}
