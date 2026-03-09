@@ -562,6 +562,7 @@ export default function IFCViewer() {
 
     if (type === 'arch') {
       setDoorContexts([])
+      setDockSelectedDoorIds(new Set())
       setArchFileName(file.name)
     } else {
       setElecFileName(file.name)
