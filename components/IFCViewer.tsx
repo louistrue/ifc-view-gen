@@ -629,6 +629,8 @@ export default function IFCViewer() {
       setDockStoreyFilterActive(false)
       setActiveClassFilters(null)
       setActiveIFCClassFilters(null)
+      setSectionMode('off')
+      setIsSectionActive(false)
     } else {
       setElecFileName(file.name)
     }
@@ -750,6 +752,7 @@ export default function IFCViewer() {
             rendererRef.current
           )
           manager.setOnChangeCallback(() => triggerRenderRef.current())
+          manager.clearAll()
           sectionPlaneManagerRef.current = manager
         }
 
