@@ -77,10 +77,19 @@ export class SectionPlane {
 
         // Convert screen perpendicular direction to world space normal
         // This gives us a plane that cuts INTO the screen along the drawn line
-        const normal = new THREE.Vector3()
+        let normal = new THREE.Vector3()
             .addScaledVector(cameraRight, perpDir2D.x)
             .addScaledVector(cameraUp, perpDir2D.y)
-            .normalize()
+
+        // Force vertical section: plane normal must be horizontal (Y-up: normal.y = 0)
+        // So the section plane is always vertical (90° to Z/Y-axis), like a wall
+        normal.y = 0
+        const lenSq = normal.x * normal.x + normal.z * normal.z
+        if (lenSq < 0.0001) {
+            normal.set(1, 0, 0)
+        } else {
+            normal.normalize()
+        }
 
         // Calculate where to place the plane
         // Unproject the line midpoint to find intersection with model
