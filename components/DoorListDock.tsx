@@ -577,6 +577,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Türnummer</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('door')}</span>}
                   </span>
                 </button>
               </div>
@@ -602,6 +603,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Geometrietyp</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('type')}</span>}
                   </span>
                 </button>
               </div>
@@ -632,6 +634,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Geschoss</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('storey')}</span>}
                   </span>
                 </button>
               </div>
@@ -662,6 +665,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Brandschutz</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('brandschutz')}</span>}
                   </span>
                 </button>
               </div>
@@ -692,6 +696,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Schallschutz</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('schallschutz')}</span>}
                   </span>
                 </button>
               </div>
@@ -722,6 +727,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">LB</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('lb')}</span>}
                   </span>
                 </button>
               </div>
@@ -746,6 +752,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">LH</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('lh')}</span>}
                   </span>
                 </button>
               </div>
@@ -770,6 +777,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">RB</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('rb')}</span>}
                   </span>
                 </button>
               </div>
@@ -794,6 +802,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">RH</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('rh')}</span>}
                   </span>
                 </button>
               </div>
@@ -818,6 +827,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">BRAM</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('bram')}</span>}
                   </span>
                 </button>
               </div>
@@ -842,6 +852,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">HRAM</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('hram')}</span>}
                   </span>
                 </button>
               </div>
@@ -879,6 +890,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">GUID</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('guid')}</span>}
                   </span>
                 </button>
               </div>
@@ -1102,6 +1114,11 @@ export default function DoorListDock({
           display: inline-flex;
           align-items: center;
           justify-content: center;
+        }
+
+        .header-sort-indicator {
+          flex-shrink: 0;
+          opacity: 0.8;
         }
 
         .header-row {
