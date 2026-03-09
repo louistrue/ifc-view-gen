@@ -1001,7 +1001,7 @@ export default function IFCViewer() {
               alert(`Keyboard Shortcuts:
 
 Views:
-  1-7 — View presets (Top, Bottom, Front, Back, Left, 3D)
+  1-7 — View presets (Top, Bottom, Front, Back, Left, Right, Iso)
   Z — Zoom window
 
 Section:
