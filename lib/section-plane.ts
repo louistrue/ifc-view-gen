@@ -67,71 +67,27 @@ export class SectionPlane {
         endPoint: { x: number; y: number },
         camera: THREE.PerspectiveCamera
     ): void {
-        // Get camera basis vectors
-        const cameraRight = new THREE.Vector3()
-        const cameraUp = new THREE.Vector3()
-        const viewDir = new THREE.Vector3()
-        camera.matrixWorld.extractBasis(cameraRight, cameraUp, viewDir)
-        viewDir.negate() // Camera looks in -Z direction
-
-        // Calculate line direction in screen space (NDC)
-        const lineDir2D = new THREE.Vector2(
-            endPoint.x - startPoint.x,
-            endPoint.y - startPoint.y
-        ).normalize()
-
-        // The section plane normal is perpendicular to the drawn line in screen space
-        // Perpendicular in 2D: rotate 90 degrees
-        const perpDir2D = new THREE.Vector2(-lineDir2D.y, lineDir2D.x)
-
-        // Convert screen perpendicular direction to world space normal
-        // This gives us a plane that cuts INTO the screen along the drawn line
-        let normal = new THREE.Vector3()
-            .addScaledVector(cameraRight, perpDir2D.x)
-            .addScaledVector(cameraUp, perpDir2D.y)
-
-        // Force vertical section: plane normal must be horizontal (Y-up: normal.y = 0)
-        // So the section plane is always vertical (90° to Z/Y-axis), like a wall
-        normal.y = 0
-        const lenSq = normal.x * normal.x + normal.z * normal.z
-        if (lenSq < 0.0001) {
-            normal.set(1, 0, 0)
-        } else {
-            normal.normalize()
-        }
-
-        // Calculate where to place the plane
-        // Unproject the line midpoint to find intersection with model
-        const midPoint2D = {
-            x: (startPoint.x + endPoint.x) / 2,
-            y: (startPoint.y + endPoint.y) / 2
-        }
-
-        const nearPoint = new THREE.Vector3(midPoint2D.x, midPoint2D.y, 0).unproject(camera)
-        const farPoint = new THREE.Vector3(midPoint2D.x, midPoint2D.y, 1).unproject(camera)
-
-        // Create ray through midpoint
-        const ray = new THREE.Ray()
-        ray.origin.copy(nearPoint)
-        ray.direction.copy(farPoint).sub(nearPoint).normalize()
-
-        // Intersect with a plane at model center (perpendicular to view)
+        // Unproject to world positions (same logic as setFromWorldLine) so both use identical normal formula
         const boundsCenter = this.originalBounds.getCenter(new THREE.Vector3())
-        const targetPlane = new THREE.Plane()
-        targetPlane.setFromNormalAndCoplanarPoint(viewDir, boundsCenter)
+        const viewDir = new THREE.Vector3()
+        camera.getWorldDirection(viewDir)
+        const viewPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(viewDir, boundsCenter)
 
-        const planePoint = new THREE.Vector3()
-        const intersected = ray.intersectPlane(targetPlane, planePoint)
-
-        if (!intersected) {
-            planePoint.copy(boundsCenter)
+        const toWorld = (ndc: { x: number; y: number }) => {
+            const near = new THREE.Vector3(ndc.x, ndc.y, 0).unproject(camera)
+            const far = new THREE.Vector3(ndc.x, ndc.y, 1).unproject(camera)
+            const dir = new THREE.Vector3().subVectors(far, near).normalize()
+            const ray = new THREE.Ray(near, dir)
+            const point = new THREE.Vector3()
+            ray.intersectPlane(viewPlane, point)
+            return point
         }
 
-        // Set the section plane with the perpendicular normal
-        this.plane.setFromNormalAndCoplanarPoint(normal, planePoint)
+        const startWorld = toWorld(startPoint)
+        const endWorld = toWorld(endPoint)
 
-        // Update helper visualization
-        this.updateHelper()
+        // Use same normal formula as setFromWorldLine for consistent visible side
+        this.setFromWorldLine(startWorld, endWorld)
     }
 
     /**
@@ -151,7 +107,7 @@ export class SectionPlane {
         if (lenSq < 0.0001) {
             this.plane.setFromNormalAndCoplanarPoint(new THREE.Vector3(1, 0, 0), startWorld)
         } else {
-            const normal = new THREE.Vector3(-dirZ, 0, dirX).normalize()
+            const normal = new THREE.Vector3(dirZ, 0, -dirX).normalize()
             const midPoint = new THREE.Vector3().addVectors(startWorld, endWorld).multiplyScalar(0.5)
             this.plane.setFromNormalAndCoplanarPoint(normal, midPoint)
         }

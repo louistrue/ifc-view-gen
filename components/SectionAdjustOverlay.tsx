@@ -50,8 +50,11 @@ export default function SectionAdjustOverlay({
             const size = bounds.getSize(new THREE.Vector3())
             const maxDim = Math.max(size.x, size.y, size.z)
             const sensitivity = (maxDim / rect.height) * 2
-            const offsetDelta = deltaY * sensitivity
-
+            let offsetDelta = deltaY * sensitivity
+            // Line sections (vertical planes): invert so drag-down = section moves down in screen
+            if (Math.abs(plane.getPlane().normal.y) < 0.1) {
+                offsetDelta = -offsetDelta
+            }
             plane.offset(offsetDelta)
             triggerRender?.()
         },
