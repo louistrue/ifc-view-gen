@@ -223,6 +223,8 @@ export default function DoorListDock({
 
    const resizingRef = useRef<{ key: ColKey; startX: number; startWidth: number } | null>(null)
    const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+   const colResizeHandlersRef = useRef<{ move: (e: MouseEvent) => void; end: () => void } | null>(null)
+   const heightResizeHandlersRef = useRef<{ move: (e: MouseEvent) => void; end: () => void } | null>(null)
 
    const onResizeMove = useCallback((e: MouseEvent) => {
      const r = resizingRef.current
@@ -235,8 +237,12 @@ export default function DoorListDock({
 
    const onResizeEnd = useCallback(() => {
      resizingRef.current = null
-     window.removeEventListener('mousemove', onResizeMove)
-     window.removeEventListener('mouseup', onResizeEnd)
+     const h = colResizeHandlersRef.current
+     if (h) {
+       window.removeEventListener('mousemove', h.move)
+       window.removeEventListener('mouseup', h.end)
+       colResizeHandlersRef.current = null
+     }
      document.body.classList.remove('col-resizing')
    }, [])
 
@@ -245,6 +251,7 @@ export default function DoorListDock({
      e.stopPropagation()
      const startWidth = colWidths[key]
      resizingRef.current = { key, startX: e.clientX, startWidth }
+     colResizeHandlersRef.current = { move: onResizeMove, end: onResizeEnd }
      document.body.classList.add('col-resizing')
      window.addEventListener('mousemove', onResizeMove)
      window.addEventListener('mouseup', onResizeEnd)
@@ -265,10 +272,14 @@ export default function DoorListDock({
 
    const onHeightResizeEnd = useCallback(() => {
      heightResizeRef.current = null
-     window.removeEventListener('mousemove', onHeightResizeMove)
-     window.removeEventListener('mouseup', onHeightResizeEnd)
+     const h = heightResizeHandlersRef.current
+     if (h) {
+       window.removeEventListener('mousemove', h.move)
+       window.removeEventListener('mouseup', h.end)
+       heightResizeHandlersRef.current = null
+     }
      document.body.classList.remove('dock-height-resizing')
-   }, [onHeightResizeMove])
+   }, [])
 
    const onHeightResizeStart = useCallback(
      (e: React.MouseEvent) => {
@@ -276,12 +287,34 @@ export default function DoorListDock({
        e.stopPropagation()
        if (!onDockHeightChange) return
        heightResizeRef.current = { startY: e.clientY, startHeight: dockHeightPx }
+       heightResizeHandlersRef.current = { move: onHeightResizeMove, end: onHeightResizeEnd }
        document.body.classList.add('dock-height-resizing')
        window.addEventListener('mousemove', onHeightResizeMove)
        window.addEventListener('mouseup', onHeightResizeEnd)
      },
      [onDockHeightChange, dockHeightPx, onHeightResizeMove, onHeightResizeEnd]
    )
+
+   useEffect(() => {
+     return () => {
+       const colH = colResizeHandlersRef.current
+       if (colH) {
+         window.removeEventListener('mousemove', colH.move)
+         window.removeEventListener('mouseup', colH.end)
+         colResizeHandlersRef.current = null
+       }
+       const heightH = heightResizeHandlersRef.current
+       if (heightH) {
+         window.removeEventListener('mousemove', heightH.move)
+         window.removeEventListener('mouseup', heightH.end)
+         heightResizeHandlersRef.current = null
+       }
+       document.body.classList.remove('col-resizing')
+       document.body.classList.remove('dock-height-resizing')
+       resizingRef.current = null
+       heightResizeRef.current = null
+     }
+   }, [])
 
    const formatNum = useCallback((n: number | null | undefined) =>
      n != null && Number.isFinite(n) ? String(n) : '—', [])
