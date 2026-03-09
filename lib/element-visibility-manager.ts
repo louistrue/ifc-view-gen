@@ -400,6 +400,8 @@ export class ElementVisibilityManager {
         this.storeyFilterIds = null
         this.transparencyMap.clear()
 
+        this.clearAllHighlights()
+
         await this.fragmentsModel.resetVisible()
         await this.fragmentsModel.resetHighlight()
         await this.applyChanges()
