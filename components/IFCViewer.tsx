@@ -545,6 +545,7 @@ export default function IFCViewer() {
       visibilityManagerRef.current.resetAllVisibility()
     }
     setDockStoreyFilterActive(false)
+    setDockSelectedDoorIds(new Set())
     // Reset class filters
     setActiveClassFilters(null)
     setActiveIFCClassFilters(null)
