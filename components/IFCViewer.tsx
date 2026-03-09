@@ -49,6 +49,8 @@ export default function IFCViewer() {
   const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
   const DOCK_RIGHT_OFFSET_PX = 400
   const [dockHeightPx, setDockHeightPx] = useState(260)
+  const [dockStoreyFilterActive, setDockStoreyFilterActive] = useState(false)
+  const dockListContainerRef = useRef<HTMLDivElement | null>(null)
 
   const getDockDoorLabel = useCallback((door: DoorContext) => {
     return (
@@ -159,12 +161,20 @@ export default function IFCViewer() {
     const vm = visibilityManagerRef.current
     const spatial = spatialStructureRef.current
     if (!vm) return
+    setDockStoreyFilterActive(storeyNames.size > 0)
     if (storeyNames.size === 0) {
       vm.clearStoreyFilter()
     } else if (spatial) {
       const ids = getStoreyElementIdsByNames(spatial, storeyNames)
       vm.filterByStorey(ids)
     }
+    triggerRenderRef.current?.()
+  }, [])
+
+  const handleClearDockFilters = useCallback(() => {
+    const vm = visibilityManagerRef.current
+    if (vm) vm.clearStoreyFilter()
+    setDockStoreyFilterActive(false)
     triggerRenderRef.current?.()
   }, [])
 
@@ -520,6 +530,7 @@ export default function IFCViewer() {
     if (visibilityManagerRef.current) {
       visibilityManagerRef.current.resetAllVisibility()
     }
+    setDockStoreyFilterActive(false)
     // Reset class filters
     setActiveClassFilters(null)
     setActiveIFCClassFilters(null)
@@ -1209,9 +1220,12 @@ Section:
             onShowSingleDoor={handleDockShowSingleDoor}
             sortIndicator={dockSortIndicator}
             onSetSort={setDockSort}
+            hasActiveFilters={dockStoreyFilterActive}
+            onClearFilters={handleClearDockFilters}
             scrollToDoorId={scrollToDoorId}
             onScrollToDoorHandled={() => setScrollToDoorId(null)}
             onStoreyFilterChange={handleStoreyFilterChange}
+            listContainerRef={dockListContainerRef}
             dock
             dockHeightPx={dockHeightPx}
             onDockHeightChange={setDockHeightPx}
