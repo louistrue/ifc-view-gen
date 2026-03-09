@@ -51,6 +51,7 @@ export default function IFCViewer() {
   const [dockHeightPx, setDockHeightPx] = useState(260)
   const [dockStoreyFilterActive, setDockStoreyFilterActive] = useState(false)
   const dockListContainerRef = useRef<HTMLDivElement | null>(null)
+  const storeyOpIdRef = useRef(0)
 
   const getDockDoorLabel = useCallback((door: DoorContext) => {
     return (
@@ -157,23 +158,36 @@ export default function IFCViewer() {
     dockShowSingleDoorRef.current?.(door, view)
   }, [])
 
-  const handleStoreyFilterChange = useCallback((storeyNames: Set<string>) => {
+  const handleStoreyFilterChange = useCallback(async (storeyNames: Set<string>) => {
     const vm = visibilityManagerRef.current
     const spatial = spatialStructureRef.current
     if (!vm) return
-    setDockStoreyFilterActive(storeyNames.size > 0)
+
+    storeyOpIdRef.current += 1
+    const opId = storeyOpIdRef.current
+
     if (storeyNames.size === 0) {
-      vm.clearStoreyFilter()
+      await vm.clearStoreyFilter()
     } else if (spatial) {
       const ids = getStoreyElementIdsByNames(spatial, storeyNames)
-      vm.filterByStorey(ids)
+      await vm.filterByStorey(ids)
     }
+
+    if (opId !== storeyOpIdRef.current) return
+    setDockStoreyFilterActive(storeyNames.size > 0)
     triggerRenderRef.current?.()
   }, [])
 
-  const handleClearDockFilters = useCallback(() => {
+  const handleClearDockFilters = useCallback(async () => {
     const vm = visibilityManagerRef.current
-    if (vm) vm.clearStoreyFilter()
+    if (!vm) return
+
+    storeyOpIdRef.current += 1
+    const opId = storeyOpIdRef.current
+
+    await vm.clearStoreyFilter()
+
+    if (opId !== storeyOpIdRef.current) return
     setDockStoreyFilterActive(false)
     triggerRenderRef.current?.()
   }, [])
