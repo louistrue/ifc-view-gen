@@ -187,7 +187,14 @@ export class NavigationManager {
     // Calculate distance to fit the object in view (with small margin)
     const fitHeightDistance = fitSize / (2 * Math.tan(fov / 2))
     const fitWidthDistance = fitSize / (2 * Math.tan(fov / 2) * aspect)
-    const distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.1 // 10% margin
+    let distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.1 // 10% margin
+
+    // For iso: center 1/3 from top, more zoom in
+    const target = new THREE.Vector3(center.x, center.y, center.z)
+    if (preset === 'iso') {
+      distance *= 0.5 //  more zoom in
+      target.y += size.y / 6 // 1/3 from top (center.y + size.y/6 = point 1/3 down from top)
+    }
 
     let position: THREE.Vector3
 
@@ -217,9 +224,9 @@ export class NavigationManager {
         // Position camera at 45 degrees from all axes
         const isoDistance = distance / Math.sqrt(3) * 1.5 // Adjust for isometric
         position = new THREE.Vector3(
-          center.x + isoDistance,
-          center.y + isoDistance,
-          center.z + isoDistance
+          target.x + isoDistance,
+          target.y + isoDistance,
+          target.z + isoDistance
         )
     }
 
@@ -227,9 +234,9 @@ export class NavigationManager {
       position.x,
       position.y,
       position.z,
-      center.x,
-      center.y,
-      center.z,
+      target.x,
+      target.y,
+      target.z,
       true // smooth transition
     )
   }

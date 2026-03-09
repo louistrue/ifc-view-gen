@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import type { CSSProperties, MutableRefObject, RefObject } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
+import { GEOMETRY_TYPE_COLORS_HEX } from '@/lib/element-visibility-manager'
 
 type SortField = 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
 type ViewKind = 'front' | 'back' | 'plan'
@@ -152,6 +153,10 @@ export type DoorListDockProps = {
   // sync storey filter to 3D model visibility
   onStoreyFilterChange?: (storeyNames: Set<string>) => void
 
+  // show color column when geometry-type coloring is active
+  showColorColumn?: boolean
+  doorsForColorMap?: DoorContext[] // same order as used for 3D coloring
+
   // layout / limits
   maxItems?: number
 
@@ -181,6 +186,8 @@ export default function DoorListDock({
   hasActiveFilters,
   onClearFilters,
   onStoreyFilterChange,
+  showColorColumn = false,
+  doorsForColorMap = [],
   maxItems = 2000,
   dock = false,
   dockHeightPx = 260,
@@ -210,6 +217,19 @@ export default function DoorListDock({
      for (const c of COLS) init[c.key] = c.initial
      return init
    })
+
+   const geometryTypeToColor = useMemo(() => {
+     const map = new Map<string, string>()
+     let idx = 0
+     for (const d of doorsForColorMap) {
+       const t = d.csetStandardCH?.geometryType || '—'
+       if (!map.has(t)) {
+         map.set(t, GEOMETRY_TYPE_COLORS_HEX[idx % GEOMETRY_TYPE_COLORS_HEX.length])
+         idx++
+       }
+     }
+     return map
+   }, [doorsForColorMap])
 
    const gridTemplate = useMemo(
      () => COLS.map(c => `${Math.max(c.min, colWidths[c.key])}px`).join(' '),
@@ -930,7 +950,14 @@ export default function DoorListDock({
                 {getDoorLabel(door)}
               </button>
 
-              <div className="door-cell muted" title={door.csetStandardCH?.geometryType || ''}>
+              <div className="door-cell muted door-cell-type" title={door.csetStandardCH?.geometryType || ''}>
+                {showColorColumn && (() => {
+                  const type = door.csetStandardCH?.geometryType || '—'
+                  const hex = geometryTypeToColor.get(type)
+                  return hex ? (
+                    <span className="color-swatch" style={{ backgroundColor: hex }} />
+                  ) : null
+                })()}
                 {door.csetStandardCH?.geometryType || '—'}
               </div>
 
@@ -1340,6 +1367,20 @@ export default function DoorListDock({
         .door-cell-guid {
           font-size: 10px;
           font-family: ui-monospace, monospace;
+        }
+
+        .door-cell-type {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .color-swatch {
+          width: 14px;
+          height: 14px;
+          border-radius: 3px;
+          border: 1px solid rgba(255,255,255,0.2);
+          flex-shrink: 0;
         }
 
         .door-actions {

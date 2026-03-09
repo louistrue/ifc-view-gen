@@ -74,6 +74,8 @@ export default function DoorPanel({
   const listContainerRef = useRef<HTMLDivElement>(null)
   const isControllingVisibilityRef = useRef(false)
   const visibilitySyncRunIdRef = useRef(0)
+  const visibilityManagerRef = useRef(visibilityManager)
+  visibilityManagerRef.current = visibilityManager
 
   // SVG render options
   const [options, setOptions] = useState<SVGRenderOptions>({
@@ -275,12 +277,19 @@ export default function DoorPanel({
 
     return () => {
       visibilitySyncRunIdRef.current += 1
-      if (isControllingVisibilityRef.current && visibilityManager) {
-        visibilityManager.clearSelectionAndDimState()
-        isControllingVisibilityRef.current = false
-      }
     }
   }, [filteredDoors, isolateFiltered, dimFiltered, visibilityManager])
+
+  // Unmount-only cleanup: reset visibility state when DoorPanel unmounts
+  useEffect(() => {
+    return () => {
+      const vm = visibilityManagerRef.current
+      if (vm) {
+        vm.clearSelectionAndDimState().catch(() => {})
+      }
+      isControllingVisibilityRef.current = false
+    }
+  }, [])
 
   // Handle hover - highlight in 3D
   const handleDoorHover = useCallback((doorId: string | null) => {

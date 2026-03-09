@@ -59,7 +59,7 @@ export default function IFCClassFilterPanel({
     )
   }, [classCategories, searchQuery])
 
-  // Apply filter directly (not via useEffect)
+  // Apply filter directly (not via useEffect). Uses shared queue so TypeFilterPanel etc. don't race.
   const applyFilter = async (classes: Set<string> | null) => {
     if (!visibilityManager) return
     if (isApplying.current) {
@@ -68,22 +68,31 @@ export default function IFCClassFilterPanel({
     }
 
     isApplying.current = true
+    let pending: Set<string> | null | undefined
+    let capturedError: unknown
     try {
-      if (classes === null) {
-        console.log('IFCClassFilter: Resetting to show all')
-        await visibilityManager.clearIFCClassFilters()
-      } else {
-        const classesToShow = Array.from(classes)
-        console.log('IFCClassFilter: Filtering to:', classesToShow)
-        await visibilityManager.filterByIFCClass(classesToShow)
-      }
+      await visibilityManager.enqueueFilterUpdate(async () => {
+        if (classes === null) {
+          console.log('IFCClassFilter: Resetting to show all')
+          await visibilityManager!.clearIFCClassFilters()
+        } else {
+          const classesToShow = Array.from(classes)
+          console.log('IFCClassFilter: Filtering to:', classesToShow)
+          await visibilityManager!.filterByIFCClass(classesToShow)
+        }
+      })
+    } catch (err) {
+      capturedError = err
     } finally {
       isApplying.current = false
-      const pending = pendingFiltersRef.current
+      pending = pendingFiltersRef.current
       pendingFiltersRef.current = undefined
-      if (pending !== undefined) {
-        applyFilter(pending)
-      }
+    }
+    if (pending !== undefined) {
+      await applyFilter(pending)
+    }
+    if (capturedError !== undefined) {
+      throw capturedError
     }
   }
 

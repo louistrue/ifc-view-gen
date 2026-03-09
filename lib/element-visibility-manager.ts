@@ -7,6 +7,7 @@ import { FragmentsModel, FragmentsModels, RenderedFaces } from '@thatopen/fragme
 import * as THREE from 'three'
 import type { ElementInfo } from './ifc-types'
 import type { SpatialNode } from './spatial-structure'
+import type { DoorContext } from './door-analyzer'
 import { getAllElementIds } from './spatial-structure'
 
 // Highlight colors for different states (aligned with bimdoer/ifc-validator)
@@ -15,6 +16,11 @@ export const HIGHLIGHT_COLORS = {
     selected: new THREE.Color(0x0099ff),   // Blue for selection (ifc-validator style)
     filtered: new THREE.Color(0x4ecdc4),   // Teal for filtered doors
 }
+
+/** Hex colors for geometry type - same order as GEOMETRY_TYPE_COLORS in ElementVisibilityManager, for DoorListDock */
+export const GEOMETRY_TYPE_COLORS_HEX = [
+    '#4ecdc4', '#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e91e63',
+]
 
 export class ElementVisibilityManager {
     private fragmentsModel: FragmentsModel
@@ -77,6 +83,26 @@ export class ElementVisibilityManager {
      */
     setRenderCallback(callback: () => void): void {
         this.onRenderNeeded = callback
+    }
+
+    /** Queue for serializing filter updates from IFCClassFilterPanel, TypeFilterPanel, etc. */
+    private filterQueue: Promise<void> = Promise.resolve()
+
+    /**
+     * Run a filter mutation sequentially. All filter writes (ifcClassFilters, typeFilters)
+     * should go through this so concurrent calls from different panels don't race.
+     */
+    async enqueueFilterUpdate<T>(fn: () => Promise<T>): Promise<T> {
+        const prev = this.filterQueue
+        let resolveNext!: () => void
+        const next = new Promise<void>((r) => { resolveNext = r })
+        this.filterQueue = next
+        try {
+            await prev
+            return await fn()
+        } finally {
+            resolveNext()
+        }
     }
 
     /**
@@ -243,6 +269,87 @@ export class ElementVisibilityManager {
         await this.applyChanges()
     }
 
+    /** Palette for geometry type coloring (distinct, visible colors) */
+    private static GEOMETRY_TYPE_COLORS = [
+        new THREE.Color(0x4ecdc4), // Teal
+        new THREE.Color(0xe74c3c), // Red
+        new THREE.Color(0x3498db), // Blue
+        new THREE.Color(0x2ecc71), // Green
+        new THREE.Color(0xf39c12), // Orange
+        new THREE.Color(0x9b59b6), // Purple
+        new THREE.Color(0x1abc9c), // Turquoise
+        new THREE.Color(0xe91e63), // Pink
+    ]
+
+    /**
+     * Color doors by geometry type.
+     * @param doorContexts - Door contexts to color
+     * @param hideNonDoors - If true, hide non-doors instead of dimming (e.g. when door filter is already active)
+     */
+    async colorDoorsByGeometryType(doorContexts: DoorContext[], hideNonDoors: boolean = false): Promise<void> {
+        this.isolatedElements = null
+        this.dimmedElements = null
+
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
+        }
+
+        const doorIds = new Set(doorContexts.map(d => d.door.expressID))
+        const byType = new Map<string, number[]>()
+        for (const ctx of doorContexts) {
+            const type = ctx.csetStandardCH?.geometryType || '—'
+            if (!byType.has(type)) byType.set(type, [])
+            byType.get(type)!.push(ctx.door.expressID)
+        }
+
+        const visibleIds = this.storeyFilterIds ?? this.allModelIds
+        const nonDoorIds = visibleIds.filter(id => !doorIds.has(id))
+
+        await this.fragmentsModel.resetVisible()
+        await this.fragmentsModel.resetHighlight()
+
+        if (this.storeyFilterIds && this.storeyFilterIds.length > 0) {
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            await this.fragmentsModel.setVisible(this.storeyFilterIds, true)
+        }
+        if (this.hiddenElements.size > 0) {
+            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        }
+
+        if (hideNonDoors) {
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            const doorIdsToShow = this.storeyFilterIds
+                ? Array.from(doorIds).filter(id => this.storeyFilterIds!.includes(id))
+                : Array.from(doorIds)
+            if (doorIdsToShow.length > 0) {
+                await this.fragmentsModel.setVisible(doorIdsToShow, true)
+            }
+        } else if (nonDoorIds.length > 0) {
+            await this.fragmentsModel.highlight(nonDoorIds, {
+                color: new THREE.Color(0xffffff),
+                renderedFaces: RenderedFaces.TWO,
+                opacity: 0.3,
+                transparent: true,
+            })
+        }
+
+        let colorIndex = 0
+        for (const [, ids] of byType) {
+            const color = ElementVisibilityManager.GEOMETRY_TYPE_COLORS[
+                colorIndex % ElementVisibilityManager.GEOMETRY_TYPE_COLORS.length
+            ]
+            await this.fragmentsModel.highlight(ids, {
+                color,
+                renderedFaces: RenderedFaces.TWO,
+                opacity: 1,
+                transparent: false,
+            })
+            colorIndex++
+        }
+
+        await this.applyChanges()
+    }
+
     /**
      * Compute visible IDs as intersection of all active filters (storey, type, IFC class)
      * excluding hiddenElements. Used by all visibility paths.
@@ -306,16 +413,22 @@ export class ElementVisibilityManager {
     /**
      * Clear only dock-driven visibility state (selection, dim, isolate) without
      * affecting storey/type/IFC class filters. Re-applies visibility from remaining filters.
+     * Avoids resetHighlight when only clearing selection/isolation so geometry-type coloring
+     * (from colorDoorsByGeometryType) is preserved. resetHighlight is only called when
+     * clearing dim, since dim uses the same highlight channel and must be removed.
      */
     async clearSelectionAndDimState(): Promise<void> {
         for (const localId of this.selectedElements) {
             this.removeHighlightMesh(localId)
         }
         this.selectedElements.clear()
+        const hadDim = this.dimmedElements !== null
         this.dimmedElements = null
         this.isolatedElements = null
 
-        await this.fragmentsModel.resetHighlight()
+        if (hadDim) {
+            await this.fragmentsModel.resetHighlight()
+        }
         await this.reapplyVisibilityFromFilters()
         await this.applyChanges()
     }
@@ -379,6 +492,16 @@ export class ElementVisibilityManager {
         }
 
         await this.applyVisibilityFromFilters()
+        await this.applyChanges()
+    }
+
+    /**
+     * Clear only geometry-type coloring (highlight). Keeps visibility filters (IFC class, storey, type).
+     * Use when turning off Colorize while Filter may still be active.
+     */
+    async clearGeometryColoring(): Promise<void> {
+        await this.fragmentsModel.resetHighlight()
+        await this.reapplyVisibilityFromFilters()
         await this.applyChanges()
     }
 
@@ -646,7 +769,7 @@ export class ElementVisibilityManager {
         // Create a group to hold highlight visuals
         const highlightGroup = new THREE.Group()
         highlightGroup.userData.isHighlightGroup = true
-        highlightGroup.renderOrder = 1 // Render after main model so highlights stay on top
+        highlightGroup.renderOrder = 1000 // Render on top of geometry coloring (fragments highlight)
 
         // 1. Create a wireframe box around the element
         const boxGeometry = new THREE.BoxGeometry(size.x * scale, size.y * scale, size.z * scale)
