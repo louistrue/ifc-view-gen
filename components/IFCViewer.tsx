@@ -261,7 +261,7 @@ export default function IFCViewer() {
     }
     run()
     return () => {
-      visibilitySyncRunIdRef.current = -1
+      visibilitySyncRunIdRef.current += 1
     }
   }, [dockSelectedDoorIds, doorContexts, colorMode, doorFilterActive])
 
