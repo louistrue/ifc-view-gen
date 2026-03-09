@@ -207,13 +207,17 @@ export default function ViewerToolbar({
     const handleDoorFilterClick = async () => {
         if (!visibilityManager) return
         if (doorFilterActive) {
-            await visibilityManager.clearIFCClassFilters()
-            if (colorMode === 'geometry-type' && doorContexts.length > 0) {
-                await visibilityManager.colorDoorsByGeometryType(doorContexts, false)
-            }
+            await visibilityManager.enqueueFilterUpdate(async () => {
+                await visibilityManager!.clearIFCClassFilters()
+                if (colorMode === 'geometry-type' && doorContexts.length > 0) {
+                    await visibilityManager!.colorDoorsByGeometryType(doorContexts, false)
+                }
+            })
             onDoorFilterChange?.(false)
         } else {
-            await visibilityManager.filterByIFCClass(['IFCDOOR'])
+            await visibilityManager.enqueueFilterUpdate(async () => {
+                await visibilityManager!.filterByIFCClass(['IFCDOOR'])
+            })
             onDoorFilterChange?.(true)
         }
         onTriggerRender?.()

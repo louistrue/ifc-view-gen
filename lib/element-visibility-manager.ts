@@ -85,6 +85,26 @@ export class ElementVisibilityManager {
         this.onRenderNeeded = callback
     }
 
+    /** Queue for serializing filter updates from IFCClassFilterPanel, TypeFilterPanel, etc. */
+    private filterQueue: Promise<void> = Promise.resolve()
+
+    /**
+     * Run a filter mutation sequentially. All filter writes (ifcClassFilters, typeFilters)
+     * should go through this so concurrent calls from different panels don't race.
+     */
+    async enqueueFilterUpdate<T>(fn: () => Promise<T>): Promise<T> {
+        const prev = this.filterQueue
+        let resolveNext!: () => void
+        const next = new Promise<void>((r) => { resolveNext = r })
+        this.filterQueue = next
+        try {
+            await prev
+            return await fn()
+        } finally {
+            resolveNext()
+        }
+    }
+
     /**
      * Apply visibility changes and trigger render
      */

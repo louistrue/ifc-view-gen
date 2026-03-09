@@ -67,7 +67,7 @@ export default function TypeFilterPanel({
     )
   }, [typeCategories, searchQuery])
 
-  // Apply filter directly (not via useEffect)
+  // Apply filter directly (not via useEffect). Uses shared queue so IFCClassFilterPanel etc. don't race.
   const applyFilter = async (types: Set<string> | null) => {
     if (!visibilityManager) return
     if (isApplying.current) {
@@ -78,14 +78,16 @@ export default function TypeFilterPanel({
     isApplying.current = true
     let pending: Set<string> | null | undefined
     try {
-      if (types === null) {
-        console.log('ClassFilter: Resetting to show all')
-        await visibilityManager.clearTypeFilters()
-      } else {
-        const typesToShow = Array.from(types)
-        console.log('ClassFilter: Filtering to:', typesToShow)
-        await visibilityManager.filterByType(typesToShow)
-      }
+      await visibilityManager.enqueueFilterUpdate(async () => {
+        if (types === null) {
+          console.log('ClassFilter: Resetting to show all')
+          await visibilityManager!.clearTypeFilters()
+        } else {
+          const typesToShow = Array.from(types)
+          console.log('ClassFilter: Filtering to:', typesToShow)
+          await visibilityManager!.filterByType(typesToShow)
+        }
+      })
     } finally {
       isApplying.current = false
       pending = pendingFiltersRef.current
