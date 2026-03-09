@@ -461,7 +461,8 @@ export class ElementVisibilityManager {
 
         await this.fragmentsModel.setVisible(this.allModelIds, false)
         if (elementIds.length > 0) {
-            await this.fragmentsModel.setVisible(elementIds, true)
+            const visibleStoreyIds = elementIds.filter(id => !this.hiddenElements.has(id))
+            await this.fragmentsModel.setVisible(visibleStoreyIds, true)
         }
         await this.applyChanges()
     }
