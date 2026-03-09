@@ -353,7 +353,7 @@ export default function DoorListDock({
      doorsForTypeOptions.forEach(d => {
        s.add(d.csetStandardCH?.geometryType || '—')
      })
-     typeFilterSet.forEach(v => s.add(v))
+     typeFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForTypeOptions, typeFilterSet])
 
@@ -362,7 +362,7 @@ export default function DoorListDock({
      doorsForStoreyOptions.forEach(d => {
        s.add(d.storeyName || '—')
      })
-     storeyFilterSet.forEach(v => s.add(v))
+     storeyFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForStoreyOptions, storeyFilterSet])
 
@@ -371,7 +371,7 @@ export default function DoorListDock({
      doorsForBrandschutzOptions.forEach(d => {
        s.add(d.csetStandardCH?.feuerwiderstand || '—')
      })
-     brandschutzFilterSet.forEach(v => s.add(v))
+     brandschutzFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForBrandschutzOptions, brandschutzFilterSet])
 
@@ -380,7 +380,7 @@ export default function DoorListDock({
      doorsForSchallschutzOptions.forEach(d => {
        s.add(d.csetStandardCH?.bauschalldaemmmass || '—')
      })
-     schallschutzFilterSet.forEach(v => s.add(v))
+     schallschutzFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForSchallschutzOptions, schallschutzFilterSet])
 
@@ -394,7 +394,7 @@ export default function DoorListDock({
 
    const onHeaderCheckboxChange = useCallback(() => {
      if (allVisibleSelected) {
-       visibleDoors.forEach(d => onToggleSelect(d.doorId))
+       visibleDoors.forEach(d => { onToggleSelect(d.doorId) })
      } else {
        visibleDoors.forEach(d => {
          if (!selectedDoorIds.has(d.doorId)) onToggleSelect(d.doorId)
