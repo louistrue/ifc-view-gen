@@ -171,13 +171,17 @@ export default function IFCViewer() {
     const opId = storeyOpIdRef.current
 
     if (storeyNames.size === 0) {
+      if (storeyOpIdRef.current !== opId) return
       await vm.clearStoreyFilter()
+      if (storeyOpIdRef.current !== opId) return
     } else if (spatial) {
       const ids = getStoreyElementIdsByNames(spatial, storeyNames)
+      if (storeyOpIdRef.current !== opId) return
       await vm.filterByStorey(ids)
+      if (storeyOpIdRef.current !== opId) return
     }
 
-    if (opId !== storeyOpIdRef.current) return
+    if (storeyOpIdRef.current !== opId) return
     setDockStoreyFilterActive(storeyNames.size > 0)
     triggerRenderRef.current?.()
   }, [])
