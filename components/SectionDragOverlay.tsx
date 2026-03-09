@@ -80,7 +80,7 @@ export default function SectionDragOverlay({
 
         const lastPlane = sectionPlaneManager.getLastPlane()
         if (lastPlane) {
-            lastPlane.setByDirection(direction === 'top' ? 'bottom' : 'top', worldY)
+            lastPlane.setHorizontalWorldY(worldY)
         }
         setCurrentY(localY)
         triggerRender?.()

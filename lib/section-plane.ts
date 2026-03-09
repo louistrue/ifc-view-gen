@@ -131,6 +131,17 @@ export class SectionPlane {
     }
 
     /**
+     * Update only the world Y position of a horizontal section plane.
+     * Preserves the current normal (including flip) so user flips are not overwritten during drag.
+     */
+    setHorizontalWorldY(worldY: number): void {
+        const center = this.originalBounds.getCenter(new THREE.Vector3())
+        const point = new THREE.Vector3(center.x, worldY, center.z)
+        this.plane.setFromNormalAndCoplanarPoint(this.plane.normal.clone(), point)
+        this.updateHelper()
+    }
+
+    /**
      * Set plane from world position and camera view direction
      */
     setFromPointAndView(point: THREE.Vector3, camera: THREE.PerspectiveCamera): void {
