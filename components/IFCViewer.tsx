@@ -586,6 +586,8 @@ export default function IFCViewer() {
     if (visibilityManagerRef.current) {
       visibilityManagerRef.current.resetAllVisibility()
     }
+    setColorMode('off')
+    setDoorFilterActive(false)
     setDockStoreyFilterActive(false)
     setDockSelectedDoorIds(new Set())
     setDockResetKey(k => k + 1)
