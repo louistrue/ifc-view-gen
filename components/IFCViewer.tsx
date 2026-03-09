@@ -207,22 +207,30 @@ export default function IFCViewer() {
     const vm = visibilityManagerRef.current
     if (!vm || doorContexts.length === 0) return
 
-    // Always sync selection highlights (visible on top of geometry coloring)
     const selectedExpressIds = dockSelectedDoorIds.size > 0
       ? doorContexts
           .filter(d => dockSelectedDoorIds.has(d.doorId))
           .map(d => d.door.expressID)
       : []
+
+    // Dim/reset only when not in color-by-geometry or door filter mode
+    if (colorMode === 'geometry-type' || doorFilterActive) {
+      vm.clearSelectionAndDimState().then(() => {
+        if (selectedExpressIds.length > 0) {
+          vm.setSelectedElements(selectedExpressIds)
+        } else {
+          vm.setSelectedElements([])
+        }
+        triggerRenderRef.current?.()
+      })
+      return
+    }
+
+    // Always sync selection highlights (visible on top of geometry coloring)
     if (selectedExpressIds.length > 0) {
       vm.setSelectedElements(selectedExpressIds)
     } else {
       vm.setSelectedElements([])
-    }
-
-    // Dim/reset only when not in color-by-geometry or door filter mode
-    if (colorMode === 'geometry-type' || doorFilterActive) {
-      vm.clearSelectionAndDimState().then(() => triggerRenderRef.current?.())
-      return
     }
 
     visibilitySyncRunIdRef.current += 1
