@@ -17,6 +17,7 @@ export default function SectionAdjustOverlay({
     sectionPlane,
     containerRef,
     triggerRender,
+    rightPaletteOffsetPx = 0,
 }: SectionAdjustOverlayProps) {
     const [isDragging, setIsDragging] = useState(false)
     const [shiftHeld, setShiftHeld] = useState(false)
