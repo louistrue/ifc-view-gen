@@ -76,6 +76,7 @@ export default function TypeFilterPanel({
     }
 
     isApplying.current = true
+    let pending: Set<string> | null | undefined
     try {
       if (types === null) {
         console.log('ClassFilter: Resetting to show all')
@@ -87,15 +88,14 @@ export default function TypeFilterPanel({
       }
     } finally {
       isApplying.current = false
-      const pending = pendingFiltersRef.current
+      pending = pendingFiltersRef.current
       pendingFiltersRef.current = undefined
-      if (pending !== undefined) {
-        try {
-          await applyFilter(pending)
-        } catch (err) {
-          console.error('TypeFilter: Error applying pending filter:', err)
-          throw err
-        }
+    }
+    if (pending !== undefined) {
+      try {
+        await applyFilter(pending)
+      } catch (err) {
+        console.error('TypeFilter: Error applying pending filter:', err)
       }
     }
   }
