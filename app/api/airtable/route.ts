@@ -11,7 +11,7 @@ const FIELD_RESOLUTION_CACHE_TTL_MS = 5 * 60 * 1000
 type ResolvedFields = {
   doorId: string
   alTuernummer?: string
-  infoType?: string
+  geometryType?: string
   massDurchgangsbreite?: string
   massDurchgangshoehe?: string
   massRohbreite?: string
@@ -345,8 +345,12 @@ async function updateDoorRecord(
 
   const normalizedTuernummer = sanitizeChoiceValue(data.alTuernummer) || sanitizeChoiceValue(data.doorType)
   if (normalizedTuernummer && fieldsMap.alTuernummer) fields[fieldsMap.alTuernummer] = normalizedTuernummer
-  if (normalizedInfoType && fieldsMap.infoType) fields[fieldsMap.infoType] = normalizedInfoType
-  else if (normalizedDoorType && fieldsMap.infoType) fields[fieldsMap.infoType] = normalizedDoorType
+  if (fieldsMap.geometryType) {
+    const geometryTypeField = tableFieldsByName[fieldsMap.geometryType]
+    const mapped = pickAirtableSelectValue(normalizedGeometryType, geometryTypeField) ||
+      pickAirtableSelectValue(normalizedDoorType, geometryTypeField)
+    if (mapped) fields[fieldsMap.geometryType] = mapped
+  }
 
   if (typeof data.massDurchgangsbreite === 'number' && fieldsMap.massDurchgangsbreite) fields[fieldsMap.massDurchgangsbreite] = data.massDurchgangsbreite
   if (typeof data.massDurchgangshoehe === 'number' && fieldsMap.massDurchgangshoehe) fields[fieldsMap.massDurchgangshoehe] = data.massDurchgangshoehe
@@ -420,7 +424,7 @@ async function updateDoorRecord(
       const maybeRestrictedSelectFields = [
         fieldsMap.schallschutzManuell,
         fieldsMap.brandschutzManuell,
-        fieldsMap.infoType,
+        fieldsMap.geometryType,
       ].filter((name): name is string => Boolean(name))
 
       let removed = 0
@@ -517,7 +521,7 @@ export async function POST(request: NextRequest) {
       resolvedFields = {
         doorId: pickField(availableFields, FIELD_CANDIDATES.doorId) || '',
         alTuernummer: pickField(availableFields, FIELD_CANDIDATES.alTuernummer),
-        infoType: pickField(availableFields, FIELD_CANDIDATES.infoType),
+        geometryType: pickField(availableFields, FIELD_CANDIDATES.geometryType),
         massDurchgangsbreite: pickField(availableFields, FIELD_CANDIDATES.massDurchgangsbreite),
         massDurchgangshoehe: pickField(availableFields, FIELD_CANDIDATES.massDurchgangshoehe),
         massRohbreite: pickField(availableFields, FIELD_CANDIDATES.massRohbreite),
@@ -554,7 +558,7 @@ export async function POST(request: NextRequest) {
       alTuernummer: resolvedFields.alTuernummer,
       brandschutz: resolvedFields.brandschutzManuell,
       schallschutz: resolvedFields.schallschutzManuell,
-      infoType: resolvedFields.infoType,
+      geometryType: resolvedFields.geometryType,
       frontView: resolvedFields.frontView,
       backView: resolvedFields.backView,
       topView: resolvedFields.topView,

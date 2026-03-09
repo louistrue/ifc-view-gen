@@ -42,7 +42,7 @@ export default function SpatialHierarchyPanel({
         // Recursively find all storeys and special categories
         const findStoreys = (node: SpatialNode) => {
             // Include both storeys and the "Unassigned" category
-            if (node.type === 'IfcBuildingStorey' || (node.type === 'Category' && node.id === -99999)) {
+            if (node.type === 'IfcBuildingStorey' || (node.type === 'Category' && (node.id === -99999 || node.name === '—' || (node.name != null && node.name.startsWith('Unassigned'))))) {
                 const trackedIds = getAllElementIds(node)
                 const allIds = getAllModelElementIds(node)
                 if (allIds.length > 0) {

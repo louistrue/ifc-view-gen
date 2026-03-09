@@ -74,7 +74,7 @@ export default function TypeFilterPanel({
     try {
       if (types === null) {
         console.log('ClassFilter: Resetting to show all')
-        await visibilityManager.resetAllVisibility()
+        await visibilityManager.clearTypeFilters()
       } else {
         const typesToShow = Array.from(types)
         console.log('ClassFilter: Filtering to:', typesToShow)

@@ -35,7 +35,7 @@ function filterDoorsWithExclude(
   opts: {
     doorFilter: string
     typeFilterSet: Set<string>
-    storeyFilterSet: Set<string>
+    storeyFilter: Set<string> | null
     brandschutzFilterSet: Set<string>
     schallschutzFilterSet: Set<string>
     lbFilter: string
@@ -68,9 +68,9 @@ function filterDoorsWithExclude(
       const type = door.csetStandardCH?.geometryType || '—'
       if (!opts.typeFilterSet.has(type)) return false
     }
-    if (opts.exclude !== 'storey' && opts.storeyFilterSet.size > 0) {
+    if (opts.exclude !== 'storey' && opts.storeyFilter != null && opts.storeyFilter.size > 0) {
       const storey = door.storeyName || '—'
-      if (!opts.storeyFilterSet.has(storey)) return false
+      if (!opts.storeyFilter.has(storey)) return false
     }
     if (opts.exclude !== 'brandschutz' && opts.brandschutzFilterSet.size > 0) {
       const brand = door.csetStandardCH?.feuerwiderstand || '—'
@@ -201,7 +201,7 @@ export default function DoorListDock({
 }: DoorListDockProps) {
    const [doorFilter, setDoorFilter] = useState('')
    const [typeFilterSet, setTypeFilterSet] = useState<Set<string>>(new Set())
-   const [storeyFilterSet, setStoreyFilterSet] = useState<Set<string>>(new Set())
+   const [storeyFilter, setStoreyFilter] = useState<Set<string> | null>(null)
    const [brandschutzFilterSet, setBrandschutzFilterSet] = useState<Set<string>>(new Set())
    const [schallschutzFilterSet, setSchallschutzFilterSet] = useState<Set<string>>(new Set())
    const [lbFilter, setLbFilter] = useState('')
@@ -243,6 +243,8 @@ export default function DoorListDock({
 
    const resizingRef = useRef<{ key: ColKey; startX: number; startWidth: number } | null>(null)
    const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+   const colResizeHandlersRef = useRef<{ move: (e: MouseEvent) => void; end: () => void } | null>(null)
+   const heightResizeHandlersRef = useRef<{ move: (e: MouseEvent) => void; end: () => void } | null>(null)
 
    const onResizeMove = useCallback((e: MouseEvent) => {
      const r = resizingRef.current
@@ -255,8 +257,12 @@ export default function DoorListDock({
 
    const onResizeEnd = useCallback(() => {
      resizingRef.current = null
-     window.removeEventListener('mousemove', onResizeMove)
-     window.removeEventListener('mouseup', onResizeEnd)
+     const h = colResizeHandlersRef.current
+     if (h) {
+       window.removeEventListener('mousemove', h.move)
+       window.removeEventListener('mouseup', h.end)
+       colResizeHandlersRef.current = null
+     }
      document.body.classList.remove('col-resizing')
    }, [])
 
@@ -265,6 +271,7 @@ export default function DoorListDock({
      e.stopPropagation()
      const startWidth = colWidths[key]
      resizingRef.current = { key, startX: e.clientX, startWidth }
+     colResizeHandlersRef.current = { move: onResizeMove, end: onResizeEnd }
      document.body.classList.add('col-resizing')
      window.addEventListener('mousemove', onResizeMove)
      window.addEventListener('mouseup', onResizeEnd)
@@ -285,10 +292,14 @@ export default function DoorListDock({
 
    const onHeightResizeEnd = useCallback(() => {
      heightResizeRef.current = null
-     window.removeEventListener('mousemove', onHeightResizeMove)
-     window.removeEventListener('mouseup', onHeightResizeEnd)
+     const h = heightResizeHandlersRef.current
+     if (h) {
+       window.removeEventListener('mousemove', h.move)
+       window.removeEventListener('mouseup', h.end)
+       heightResizeHandlersRef.current = null
+     }
      document.body.classList.remove('dock-height-resizing')
-   }, [onHeightResizeMove])
+   }, [])
 
    const onHeightResizeStart = useCallback(
      (e: React.MouseEvent) => {
@@ -296,12 +307,34 @@ export default function DoorListDock({
        e.stopPropagation()
        if (!onDockHeightChange) return
        heightResizeRef.current = { startY: e.clientY, startHeight: dockHeightPx }
+       heightResizeHandlersRef.current = { move: onHeightResizeMove, end: onHeightResizeEnd }
        document.body.classList.add('dock-height-resizing')
        window.addEventListener('mousemove', onHeightResizeMove)
        window.addEventListener('mouseup', onHeightResizeEnd)
      },
      [onDockHeightChange, dockHeightPx, onHeightResizeMove, onHeightResizeEnd]
    )
+
+   useEffect(() => {
+     return () => {
+       const colH = colResizeHandlersRef.current
+       if (colH) {
+         window.removeEventListener('mousemove', colH.move)
+         window.removeEventListener('mouseup', colH.end)
+         colResizeHandlersRef.current = null
+       }
+       const heightH = heightResizeHandlersRef.current
+       if (heightH) {
+         window.removeEventListener('mousemove', heightH.move)
+         window.removeEventListener('mouseup', heightH.end)
+         heightResizeHandlersRef.current = null
+       }
+       document.body.classList.remove('col-resizing')
+       document.body.classList.remove('dock-height-resizing')
+       resizingRef.current = null
+       heightResizeRef.current = null
+     }
+   }, [])
 
    const formatNum = useCallback((n: number | null | undefined) =>
      n != null && Number.isFinite(n) ? String(n) : '—', [])
@@ -310,7 +343,7 @@ export default function DoorListDock({
      () => ({
        doorFilter,
        typeFilterSet,
-       storeyFilterSet,
+       storeyFilter,
        brandschutzFilterSet,
        schallschutzFilterSet,
        lbFilter,
@@ -323,7 +356,7 @@ export default function DoorListDock({
        getDoorLabel,
        formatNum,
      }),
-     [doorFilter, typeFilterSet, storeyFilterSet, brandschutzFilterSet, schallschutzFilterSet, lbFilter, lhFilter, rbFilter, rhFilter, bramFilter, hramFilter, guidFilter, getDoorLabel, formatNum]
+     [doorFilter, typeFilterSet, storeyFilter, brandschutzFilterSet, schallschutzFilterSet, lbFilter, lhFilter, rbFilter, rhFilter, bramFilter, hramFilter, guidFilter, getDoorLabel, formatNum]
    )
 
    const filteredDoors = useMemo(
@@ -354,7 +387,7 @@ export default function DoorListDock({
    const clearLocalFilters = () => {
      setDoorFilter('')
      setTypeFilterSet(new Set())
-     setStoreyFilterSet(new Set())
+     setStoreyFilter(null)
      setBrandschutzFilterSet(new Set())
      setSchallschutzFilterSet(new Set())
      setLbFilter('')
@@ -366,14 +399,14 @@ export default function DoorListDock({
      setGuidFilter('')
    }
 
-   const hasLocalFilters = doorFilter || typeFilterSet.size > 0 || storeyFilterSet.size > 0 || brandschutzFilterSet.size > 0 || schallschutzFilterSet.size > 0 || lbFilter || lhFilter || rbFilter || rhFilter || bramFilter || hramFilter || guidFilter
+   const hasLocalFilters = doorFilter || typeFilterSet.size > 0 || (storeyFilter != null && storeyFilter.size > 0) || brandschutzFilterSet.size > 0 || schallschutzFilterSet.size > 0 || lbFilter || lhFilter || rbFilter || rhFilter || bramFilter || hramFilter || guidFilter
 
    const uniqueTypeValues = useMemo(() => {
      const s = new Set<string>()
      doorsForTypeOptions.forEach(d => {
        s.add(d.csetStandardCH?.geometryType || '—')
      })
-     typeFilterSet.forEach(v => s.add(v))
+     typeFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForTypeOptions, typeFilterSet])
 
@@ -382,16 +415,16 @@ export default function DoorListDock({
      doorsForStoreyOptions.forEach(d => {
        s.add(d.storeyName || '—')
      })
-     storeyFilterSet.forEach(v => s.add(v))
+     storeyFilter?.forEach(v => { s.add(v) })
      return Array.from(s).sort()
-   }, [doorsForStoreyOptions, storeyFilterSet])
+   }, [doorsForStoreyOptions, storeyFilter])
 
    const uniqueBrandschutzValues = useMemo(() => {
      const s = new Set<string>()
      doorsForBrandschutzOptions.forEach(d => {
        s.add(d.csetStandardCH?.feuerwiderstand || '—')
      })
-     brandschutzFilterSet.forEach(v => s.add(v))
+     brandschutzFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForBrandschutzOptions, brandschutzFilterSet])
 
@@ -400,7 +433,7 @@ export default function DoorListDock({
      doorsForSchallschutzOptions.forEach(d => {
        s.add(d.csetStandardCH?.bauschalldaemmmass || '—')
      })
-     schallschutzFilterSet.forEach(v => s.add(v))
+     schallschutzFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForSchallschutzOptions, schallschutzFilterSet])
 
@@ -414,7 +447,7 @@ export default function DoorListDock({
 
    const onHeaderCheckboxChange = useCallback(() => {
      if (allVisibleSelected) {
-       visibleDoors.forEach(d => onToggleSelect(d.doorId))
+       visibleDoors.forEach(d => { onToggleSelect(d.doorId) })
      } else {
        visibleDoors.forEach(d => {
          if (!selectedDoorIds.has(d.doorId)) onToggleSelect(d.doorId)
@@ -442,8 +475,8 @@ export default function DoorListDock({
    }, [scrollToDoorId, onScrollToDoorHandled])
 
    useEffect(() => {
-     onStoreyFilterChange?.(storeyFilterSet)
-   }, [storeyFilterSet, onStoreyFilterChange])
+     onStoreyFilterChange?.(storeyFilter === null ? new Set() : storeyFilter)
+   }, [storeyFilter, onStoreyFilterChange])
 
    useEffect(() => {
      if (!dropdownOpenKey) return
@@ -474,6 +507,26 @@ export default function DoorListDock({
      },
      []
    )
+
+   const toggleStoreyFilter = useCallback((value: string) => {
+     setStoreyFilter(prev => {
+       const isChecked = prev === null || prev.has(value)
+       if (isChecked) {
+         if (prev === null) {
+           const all = new Set(doorsForStoreyOptions.map(d => d.storeyName || '—'))
+           all.delete(value)
+           return all.size === 0 ? null : all
+         }
+         const next = new Set(prev)
+         next.delete(value)
+         return next.size === 0 ? null : next
+       } else {
+         const next = prev === null ? new Set<string>() : new Set(prev)
+         next.add(value)
+         return next
+       }
+     })
+   }, [doorsForStoreyOptions])
 
    return (
     <div
@@ -590,7 +643,7 @@ export default function DoorListDock({
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'storey' ? null : 'storey')}>
                   <span className="header-label-wrap">
-                    {storeyFilterSet.size > 0 && (
+                    {storeyFilter != null && storeyFilter.size > 0 && (
                       <span className="header-filter-icon" title="Filter aktiv">
                         <FilterIcon />
                       </span>
@@ -603,7 +656,7 @@ export default function DoorListDock({
                 <div className="header-dropdown">
                   {uniqueStoreyValues.map(v => (
                     <label key={v} className="header-dropdown-item">
-                      <input type="checkbox" checked={storeyFilterSet.size === 0 || storeyFilterSet.has(v)} onChange={() => toggleDropdownValue('storey', v, setStoreyFilterSet)} />
+                      <input type="checkbox" checked={storeyFilter === null || storeyFilter.has(v)} onChange={() => toggleStoreyFilter(v)} />
                       <span>{v}</span>
                     </label>
                   ))}

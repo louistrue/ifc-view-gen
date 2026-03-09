@@ -66,7 +66,7 @@ export default function IFCClassFilterPanel({
     try {
       if (classes === null) {
         console.log('IFCClassFilter: Resetting to show all')
-        await visibilityManager.resetAllVisibility()
+        await visibilityManager.clearIFCClassFilters()
       } else {
         const classesToShow = Array.from(classes)
         console.log('IFCClassFilter: Filtering to:', classesToShow)

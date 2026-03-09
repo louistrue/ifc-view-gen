@@ -638,7 +638,7 @@ export function getStoreyElementIdsByNames(root: SpatialNode | null, storeyNames
 
     const collect = (node: SpatialNode) => {
         const isStorey = node.type === 'IfcBuildingStorey'
-        const isUnassigned = node.type === 'Category' && node.id === -99999
+        const isUnassigned = node.type === 'Category' && (node.id === -99999 || node.name === '—' || (node.name != null && node.name.startsWith('Unassigned')))
 
         if (isStorey || isUnassigned) {
             const nameMatches = storeyNames.has(node.name)

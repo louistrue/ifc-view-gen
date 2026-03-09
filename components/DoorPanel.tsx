@@ -72,6 +72,8 @@ export default function DoorPanel({
 
   // Refs
   const listContainerRef = useRef<HTMLDivElement>(null)
+  const isControllingVisibilityRef = useRef(false)
+  const visibilitySyncRunIdRef = useRef(0)
 
   // SVG render options
   const [options, setOptions] = useState<SVGRenderOptions>({
@@ -242,14 +244,41 @@ export default function DoorPanel({
   useEffect(() => {
     if (!visibilityManager) return
 
-    if (isolateFiltered && filteredDoors.length > 0) {
-      const doorExpressIds = filteredDoors.map(d => d.door.expressID)
-      visibilityManager.isolateElements(doorExpressIds)
-    } else if (dimFiltered && filteredDoors.length > 0) {
-      const doorExpressIds = filteredDoors.map(d => d.door.expressID)
-      visibilityManager.dimNonSelectedElements(doorExpressIds)
-    } else {
-      visibilityManager.resetAllVisibility()
+    visibilitySyncRunIdRef.current += 1
+    const runId = visibilitySyncRunIdRef.current
+
+    const run = async () => {
+      try {
+        if (isolateFiltered && filteredDoors.length > 0) {
+          const doorExpressIds = filteredDoors.map(d => d.door.expressID)
+          if (runId !== visibilitySyncRunIdRef.current) return
+          await visibilityManager.isolateElements(doorExpressIds)
+          if (runId !== visibilitySyncRunIdRef.current) return
+          isControllingVisibilityRef.current = true
+        } else if (dimFiltered && filteredDoors.length > 0) {
+          const doorExpressIds = filteredDoors.map(d => d.door.expressID)
+          if (runId !== visibilitySyncRunIdRef.current) return
+          await visibilityManager.dimNonSelectedElements(doorExpressIds)
+          if (runId !== visibilitySyncRunIdRef.current) return
+          isControllingVisibilityRef.current = true
+        } else if (isControllingVisibilityRef.current) {
+          if (runId !== visibilitySyncRunIdRef.current) return
+          await visibilityManager.clearSelectionAndDimState()
+          if (runId !== visibilitySyncRunIdRef.current) return
+          isControllingVisibilityRef.current = false
+        }
+      } catch (err) {
+        console.error('[DoorPanel] Visibility sync error:', err)
+      }
+    }
+    run()
+
+    return () => {
+      visibilitySyncRunIdRef.current += 1
+      if (isControllingVisibilityRef.current && visibilityManager) {
+        visibilityManager.clearSelectionAndDimState()
+        isControllingVisibilityRef.current = false
+      }
     }
   }, [filteredDoors, isolateFiltered, dimFiltered, visibilityManager])
 

@@ -52,6 +52,9 @@ export default function IFCViewer() {
   const [dockHeightPx, setDockHeightPx] = useState(260)
   const [colorMode, setColorMode] = useState<ColorMode>('off')
   const [doorFilterActive, setDoorFilterActive] = useState(false)
+  const [dockStoreyFilterActive, setDockStoreyFilterActive] = useState(false)
+  const dockListContainerRef = useRef<HTMLDivElement | null>(null)
+  const storeyOpIdRef = useRef(0)
 
   const getDockDoorLabel = useCallback((door: DoorContext) => {
     return (
@@ -158,16 +161,37 @@ export default function IFCViewer() {
     dockShowSingleDoorRef.current?.(door, view)
   }, [])
 
-  const handleStoreyFilterChange = useCallback((storeyNames: Set<string>) => {
+  const handleStoreyFilterChange = useCallback(async (storeyNames: Set<string>) => {
     const vm = visibilityManagerRef.current
     const spatial = spatialStructureRef.current
     if (!vm) return
+
+    storeyOpIdRef.current += 1
+    const opId = storeyOpIdRef.current
+
     if (storeyNames.size === 0) {
-      vm.clearStoreyFilter()
+      await vm.clearStoreyFilter()
     } else if (spatial) {
       const ids = getStoreyElementIdsByNames(spatial, storeyNames)
-      vm.filterByStorey(ids)
+      await vm.filterByStorey(ids)
     }
+
+    if (opId !== storeyOpIdRef.current) return
+    setDockStoreyFilterActive(storeyNames.size > 0)
+    triggerRenderRef.current?.()
+  }, [])
+
+  const handleClearDockFilters = useCallback(async () => {
+    const vm = visibilityManagerRef.current
+    if (!vm) return
+
+    storeyOpIdRef.current += 1
+    const opId = storeyOpIdRef.current
+
+    await vm.clearStoreyFilter()
+
+    if (opId !== storeyOpIdRef.current) return
+    setDockStoreyFilterActive(false)
     triggerRenderRef.current?.()
   }, [])
 
@@ -178,13 +202,12 @@ export default function IFCViewer() {
     const vm = visibilityManagerRef.current
     if (!vm || doorContexts.length === 0) return
 
+    // Always sync selection highlights (visible on top of geometry coloring)
     const selectedExpressIds = dockSelectedDoorIds.size > 0
       ? doorContexts
           .filter(d => dockSelectedDoorIds.has(d.doorId))
           .map(d => d.door.expressID)
       : []
-
-    // Always sync selection highlights (visible on top of geometry coloring)
     if (selectedExpressIds.length > 0) {
       vm.setSelectedElements(selectedExpressIds)
     } else {
@@ -197,13 +220,39 @@ export default function IFCViewer() {
       return
     }
 
+    visibilitySyncRunIdRef.current += 1
+    const runId = visibilitySyncRunIdRef.current
+
     const run = async () => {
-      if (selectedExpressIds.length > 0) {
-        await vm.dimNonSelectedElements(selectedExpressIds)
-      } else {
-        await vm.resetAllVisibility()
+      try {
+        if (dockSelectedDoorIds.size > 0) {
+          const selectedExpressIds = doorContexts
+            .filter(d => dockSelectedDoorIds.has(d.doorId))
+            .map(d => d.door.expressID)
+          if (selectedExpressIds.length > 0) {
+            if (runId !== visibilitySyncRunIdRef.current) return
+            vm.setSelectedElements(selectedExpressIds)
+            if (runId !== visibilitySyncRunIdRef.current) return
+            await vm.dimNonSelectedElements(selectedExpressIds)
+          } else {
+            if (runId !== visibilitySyncRunIdRef.current) return
+            vm.setSelectedElements([])
+            if (runId !== visibilitySyncRunIdRef.current) return
+            await vm.clearSelectionAndDimState()
+          }
+        } else {
+          if (runId !== visibilitySyncRunIdRef.current) return
+          vm.setSelectedElements([])
+          if (runId !== visibilitySyncRunIdRef.current) return
+          triggerRenderRef.current?.()
+          if (runId !== visibilitySyncRunIdRef.current) return
+          await vm.clearSelectionAndDimState()
+        }
+        if (runId !== visibilitySyncRunIdRef.current) return
+        triggerRenderRef.current?.()
+      } catch (err) {
+        console.error('[IFCViewer] Visibility sync error:', err)
       }
-      triggerRenderRef.current?.()
     }
     run()
   }, [dockSelectedDoorIds, doorContexts, colorMode, doorFilterActive])
@@ -220,6 +269,7 @@ export default function IFCViewer() {
   const batchProcessorVisibleRef = useRef(false)
   const fragmentsManagerRef = useRef<any>(null) // Fragments manager for update() in render loop
   const triggerRenderRef = useRef<() => void>(() => { }) // Function to trigger a render
+  const visibilitySyncRunIdRef = useRef(0)
   const isLoadingRef = useRef(false) // Prevent double-loading from React StrictMode
 
   // Spatial structure
@@ -307,11 +357,23 @@ export default function IFCViewer() {
       pointerDownRef.active = false
     }
 
+    const handlePointerCancel = () => {
+      pointerDownRef.active = false
+    }
+
+    const handleBlur = () => {
+      pointerDownRef.active = false
+    }
+
     canvas.addEventListener('pointerdown', handlePointerDown)
     document.addEventListener('pointerup', handlePointerUp)
+    document.addEventListener('pointercancel', handlePointerCancel)
+    window.addEventListener('blur', handleBlur)
     return () => {
       canvas.removeEventListener('pointerdown', handlePointerDown)
       document.removeEventListener('pointerup', handlePointerUp)
+      document.removeEventListener('pointercancel', handlePointerCancel)
+      window.removeEventListener('blur', handleBlur)
     }
   }, [showBatchProcessor, doorContexts, zoomWindowActive, sectionMode, toggleDockDoorSelection])
 
@@ -505,6 +567,8 @@ export default function IFCViewer() {
     if (visibilityManagerRef.current) {
       visibilityManagerRef.current.resetAllVisibility()
     }
+    setDockStoreyFilterActive(false)
+    setDockSelectedDoorIds(new Set())
     // Reset class filters
     setActiveClassFilters(null)
     setActiveIFCClassFilters(null)
@@ -536,6 +600,7 @@ export default function IFCViewer() {
 
     if (type === 'arch') {
       setDoorContexts([])
+      setDockSelectedDoorIds(new Set())
       setArchFileName(file.name)
     } else {
       setElecFileName(file.name)
@@ -1220,11 +1285,14 @@ Section:
             onShowSingleDoor={handleDockShowSingleDoor}
             sortIndicator={dockSortIndicator}
             onSetSort={setDockSort}
+            hasActiveFilters={dockStoreyFilterActive}
+            onClearFilters={handleClearDockFilters}
             scrollToDoorId={scrollToDoorId}
             onScrollToDoorHandled={() => setScrollToDoorId(null)}
             onStoreyFilterChange={handleStoreyFilterChange}
             showColorColumn={colorMode === 'geometry-type'}
             doorsForColorMap={doorContexts}
+            listContainerRef={dockListContainerRef}
             dock
             dockHeightPx={dockHeightPx}
             onDockHeightChange={setDockHeightPx}
