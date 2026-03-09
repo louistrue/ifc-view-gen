@@ -68,6 +68,7 @@ export default function IFCClassFilterPanel({
     }
 
     isApplying.current = true
+    let pending: Set<string> | null | undefined
     try {
       if (classes === null) {
         console.log('IFCClassFilter: Resetting to show all')
@@ -79,16 +80,11 @@ export default function IFCClassFilterPanel({
       }
     } finally {
       isApplying.current = false
-      const pending = pendingFiltersRef.current
+      pending = pendingFiltersRef.current
       pendingFiltersRef.current = undefined
-      if (pending !== undefined) {
-        try {
-          await applyFilter(pending)
-        } catch (err) {
-          console.error('IFCClassFilter: Error applying pending filter:', err)
-          throw err
-        }
-      }
+    }
+    if (pending !== undefined) {
+      await applyFilter(pending)
     }
   }
 
