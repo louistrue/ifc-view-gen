@@ -498,7 +498,9 @@ export class SectionPlaneManager {
 
     setRenderer(renderer: THREE.WebGLRenderer): void {
         this.renderer = renderer
-        this.planes.forEach(p => p.setRenderer(renderer))
+        this.planes.forEach((p) => {
+            p.setRenderer(renderer)
+        })
     }
 
     setOnChangeCallback(callback: () => void): void {
@@ -507,7 +509,9 @@ export class SectionPlaneManager {
 
     setBounds(bounds: THREE.Box3): void {
         this.bounds.copy(bounds)
-        this.planes.forEach(p => p.setBounds(bounds))
+        this.planes.forEach((p) => {
+            p.setBounds(bounds)
+        })
         this.triggerChange()
     }
 
@@ -627,11 +631,15 @@ export class SectionPlaneManager {
         const activeIdx = this.activeIndex < 0 || this.activeIndex >= this.planes.length
             ? this.planes.length - 1
             : this.activeIndex
-        this.planes.forEach((p, i) => p.setHighlighted(i === activeIdx))
+        this.planes.forEach((p, i) => {
+            p.setHighlighted(i === activeIdx)
+        })
     }
 
     clearHighlights(): void {
-        this.planes.forEach(p => p.setHighlighted(false))
+        this.planes.forEach((p) => {
+            p.setHighlighted(false)
+        })
     }
 
     getBounds(): THREE.Box3 {
@@ -656,7 +664,9 @@ export class SectionPlaneManager {
     }
 
     clearAll(): void {
-        this.planes.forEach(p => p.disable())
+        this.planes.forEach((p) => {
+            p.disable()
+        })
         this.planes = []
         this.activeIndex = -1
         if (this.renderer) {
