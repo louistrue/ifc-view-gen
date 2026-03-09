@@ -72,6 +72,7 @@ export default function DoorPanel({
 
   // Refs
   const listContainerRef = useRef<HTMLDivElement>(null)
+  const isControllingVisibilityRef = useRef(false)
 
   // SVG render options
   const [options, setOptions] = useState<SVGRenderOptions>({
@@ -245,11 +246,21 @@ export default function DoorPanel({
     if (isolateFiltered && filteredDoors.length > 0) {
       const doorExpressIds = filteredDoors.map(d => d.door.expressID)
       visibilityManager.isolateElements(doorExpressIds)
+      isControllingVisibilityRef.current = true
     } else if (dimFiltered && filteredDoors.length > 0) {
       const doorExpressIds = filteredDoors.map(d => d.door.expressID)
       visibilityManager.dimNonSelectedElements(doorExpressIds)
-    } else {
+      isControllingVisibilityRef.current = true
+    } else if (isControllingVisibilityRef.current) {
       visibilityManager.resetAllVisibility()
+      isControllingVisibilityRef.current = false
+    }
+
+    return () => {
+      if (isControllingVisibilityRef.current && visibilityManager) {
+        visibilityManager.resetAllVisibility()
+        isControllingVisibilityRef.current = false
+      }
     }
   }, [filteredDoors, isolateFiltered, dimFiltered, visibilityManager])
 
