@@ -207,12 +207,9 @@ export default function ViewerToolbar({
     const handleDoorFilterClick = async () => {
         if (!visibilityManager) return
         if (doorFilterActive) {
+            await visibilityManager.clearIFCClassFilters()
             if (colorMode === 'geometry-type' && doorContexts.length > 0) {
-                // Nur Door-Filter aufheben, Colorize beibehalten
-                await visibilityManager.clearIFCClassFilters()
                 await visibilityManager.colorDoorsByGeometryType(doorContexts, false)
-            } else {
-                await visibilityManager.resetAllVisibility()
             }
             onDoorFilterChange?.(false)
         } else {
