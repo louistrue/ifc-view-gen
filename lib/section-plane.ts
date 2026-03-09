@@ -55,6 +55,7 @@ export class SectionPlane {
      */
     setBounds(bounds: THREE.Box3): void {
         this.originalBounds.copy(bounds)
+        this.updateHelper()
     }
 
     /**
