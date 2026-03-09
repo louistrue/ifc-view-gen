@@ -468,11 +468,13 @@ export default function DoorListDock({
    }, [filteredDoors, selectedDoorIds, onToggleSelect])
 
    useEffect(() => {
-     if (!scrollToDoorId || !onScrollToDoorHandled) return
+     if (!scrollToDoorId) return
      const el = scrollContainerRef.current?.querySelector(`[data-door-id="${scrollToDoorId}"]`)
-     el?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
-     onScrollToDoorHandled()
-   }, [scrollToDoorId, onScrollToDoorHandled])
+     if (el) {
+       el.scrollIntoView({ block: 'nearest', behavior: 'auto' })
+       onScrollToDoorHandled?.()
+     }
+   }, [scrollToDoorId])
 
    useEffect(() => {
      onStoreyFilterChange?.(storeyFilter === null ? new Set() : storeyFilter)
@@ -578,6 +580,7 @@ export default function DoorListDock({
                     checked={allVisibleSelected}
                     disabled={visibleDoors.length === 0}
                     onChange={onHeaderCheckboxChange}
+                    aria-label="Select all visible doors"
                   />
                   <span className="checkmark" />
                 </label>
@@ -926,6 +929,7 @@ export default function DoorListDock({
                   type="checkbox"
                   checked={selectedDoorIds.has(door.doorId)}
                   onChange={() => onToggleSelect(door.doorId)}
+                  aria-label={`Select door ${getDoorLabel(door)}`}
                 />
                 <span className="checkmark" />
               </label>
@@ -975,13 +979,13 @@ export default function DoorListDock({
               </div>
 
               <div className="door-actions">
-                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'front')} title="Front view">
+                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'front')} title="Front view" aria-label="Show front view">
                   F
                 </button>
-                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'back')} title="Back view">
+                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'back')} title="Back view" aria-label="Show back view">
                   B
                 </button>
-                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'plan')} title="Plan view">
+                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'plan')} title="Plan view" aria-label="Show plan view">
                   P
                 </button>
               </div>
