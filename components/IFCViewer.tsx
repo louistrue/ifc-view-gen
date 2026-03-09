@@ -618,6 +618,11 @@ export default function IFCViewer() {
       setDoorContexts([])
       setDockSelectedDoorIds(new Set())
       setArchFileName(file.name)
+      setColorMode('off')
+      setDoorFilterActive(false)
+      setDockStoreyFilterActive(false)
+      setActiveClassFilters(null)
+      setActiveIFCClassFilters(null)
     } else {
       setElecFileName(file.name)
     }
