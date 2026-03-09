@@ -393,16 +393,22 @@ export class ElementVisibilityManager {
     /**
      * Clear only dock-driven visibility state (selection, dim, isolate) without
      * affecting storey/type/IFC class filters. Re-applies visibility from remaining filters.
+     * Avoids resetHighlight when only clearing selection/isolation so geometry-type coloring
+     * (from colorDoorsByGeometryType) is preserved. resetHighlight is only called when
+     * clearing dim, since dim uses the same highlight channel and must be removed.
      */
     async clearSelectionAndDimState(): Promise<void> {
         for (const localId of this.selectedElements) {
             this.removeHighlightMesh(localId)
         }
         this.selectedElements.clear()
+        const hadDim = this.dimmedElements !== null
         this.dimmedElements = null
         this.isolatedElements = null
 
-        await this.fragmentsModel.resetHighlight()
+        if (hadDim) {
+            await this.fragmentsModel.resetHighlight()
+        }
         await this.reapplyVisibilityFromFilters()
         await this.applyChanges()
     }
