@@ -345,8 +345,12 @@ async function updateDoorRecord(
 
   const normalizedTuernummer = sanitizeChoiceValue(data.alTuernummer) || sanitizeChoiceValue(data.doorType)
   if (normalizedTuernummer && fieldsMap.alTuernummer) fields[fieldsMap.alTuernummer] = normalizedTuernummer
-  if (normalizedGeometryType && fieldsMap.geometryType) fields[fieldsMap.geometryType] = normalizedGeometryType
-  else if (normalizedDoorType && fieldsMap.geometryType) fields[fieldsMap.geometryType] = normalizedDoorType
+  if (fieldsMap.geometryType) {
+    const geometryTypeField = tableFieldsByName[fieldsMap.geometryType]
+    const mapped = pickAirtableSelectValue(normalizedGeometryType, geometryTypeField) ||
+      pickAirtableSelectValue(normalizedDoorType, geometryTypeField)
+    if (mapped) fields[fieldsMap.geometryType] = mapped
+  }
 
   if (typeof data.massDurchgangsbreite === 'number' && fieldsMap.massDurchgangsbreite) fields[fieldsMap.massDurchgangsbreite] = data.massDurchgangsbreite
   if (typeof data.massDurchgangshoehe === 'number' && fieldsMap.massDurchgangshoehe) fields[fieldsMap.massDurchgangshoehe] = data.massDurchgangshoehe
