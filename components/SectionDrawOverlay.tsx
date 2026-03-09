@@ -47,20 +47,29 @@ export default function SectionDrawOverlay({
         }
     }, [containerRef])
 
-    // Constrain point to horizontal or vertical when Shift is held
+    // Snap to 0°, 90°, 180°, 270° on XY plane when Shift is held
+    const SNAP_ANGLES = [0, Math.PI / 2, Math.PI, -Math.PI / 2] as const
+
     const getConstrainedPoint = useCallback((start: { x: number; y: number }, current: { x: number; y: number }, shift: boolean) => {
         if (!shift) return current
-        
+
         const dx = current.x - start.x
         const dy = current.y - start.y
-        
-        // Snap to nearest horizontal or vertical
-        if (Math.abs(dx) > Math.abs(dy)) {
-            // Horizontal constraint
-            return { x: current.x, y: start.y }
-        } else {
-            // Vertical constraint
-            return { x: start.x, y: current.y }
+        const length = Math.sqrt(dx * dx + dy * dy)
+        if (length < 0.001) return current
+
+        const angle = Math.atan2(dy, dx)
+        const snapAngle = SNAP_ANGLES.reduce((best, a) => {
+            let diffBest = Math.abs(angle - best)
+            if (diffBest > Math.PI) diffBest = 2 * Math.PI - diffBest
+            let diffA = Math.abs(angle - a)
+            if (diffA > Math.PI) diffA = 2 * Math.PI - diffA
+            return diffA < diffBest ? a : best
+        })
+
+        return {
+            x: start.x + length * Math.cos(snapAngle),
+            y: start.y + length * Math.sin(snapAngle),
         }
     }, [])
 
