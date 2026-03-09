@@ -33,7 +33,7 @@ export default function SectionAdjustOverlay({
 
     const handlePointerMove = useCallback(
         (e: PointerEvent) => {
-            const plane = sectionPlaneManager?.getLastPlane()
+            const plane = sectionPlaneManager?.getActivePlane()
             if (!isDragging || !plane) return
             if (!e.shiftKey) {
                 setIsDragging(false)
@@ -67,12 +67,23 @@ export default function SectionAdjustOverlay({
 
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Shift') setShiftHeld(true)
+            if (e.key === 'Shift') {
+                setShiftHeld(true)
+                sectionPlaneManager?.updateHighlights()
+                triggerRender?.()
+            }
+            if (e.key === 'Tab' && sectionPlaneManager && sectionPlaneManager.getPlanes().length > 1) {
+                e.preventDefault()
+                sectionPlaneManager.cycleActivePlane(e.shiftKey ? -1 : 1)
+                triggerRender?.()
+            }
         }
         const onKeyUp = (e: KeyboardEvent) => {
             if (e.key === 'Shift') {
                 setShiftHeld(false)
                 setIsDragging(false)
+                sectionPlaneManager?.clearHighlights()
+                triggerRender?.()
             }
         }
         window.addEventListener('keydown', onKeyDown)
@@ -81,7 +92,7 @@ export default function SectionAdjustOverlay({
             window.removeEventListener('keydown', onKeyDown)
             window.removeEventListener('keyup', onKeyUp)
         }
-    }, [])
+    }, [sectionPlaneManager, triggerRender])
 
     useEffect(() => {
         if (!active) return
@@ -128,7 +139,7 @@ export default function SectionAdjustOverlay({
                     pointerEvents: 'none',
                 }}
             >
-                F — Flip  •  Shift — Schieben
+                F — Flip  •  Shift — Schieben  •  Shift+Tab / Tab — Ebene wechseln
             </div>
             {isDragging && (
                 <div

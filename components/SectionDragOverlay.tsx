@@ -109,7 +109,7 @@ export default function SectionDragOverlay({
                 onComplete()
             }
             if ((e.key === 'f' || e.key === 'F') && sectionPlaneManager?.hasAnyEnabled()) {
-                sectionPlaneManager.getLastPlane()?.flip()
+                sectionPlaneManager.getActivePlane()?.flip()
                 triggerRender?.()
             }
         }

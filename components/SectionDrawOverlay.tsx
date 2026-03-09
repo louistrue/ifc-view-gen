@@ -216,7 +216,7 @@ export default function SectionDrawOverlay({
             }
             // F to flip section
             if ((e.key === 'f' || e.key === 'F') && sectionPlaneManager?.hasAnyEnabled()) {
-                sectionPlaneManager.getLastPlane()?.flip()
+                sectionPlaneManager.getActivePlane()?.flip()
             }
         }
 

@@ -538,7 +538,7 @@ export default function IFCViewer() {
 
       // F key to flip section direction (only when a section exists)
       if ((e.key === 'f' || e.key === 'F') && sectionPlaneManagerRef.current?.hasAnyEnabled()) {
-        sectionPlaneManagerRef.current.getLastPlane()?.flip()
+        sectionPlaneManagerRef.current.getActivePlane()?.flip()
       }
     }
     window.addEventListener('keydown', handleKeyDown)

@@ -15,6 +15,7 @@ export class SectionPlane {
     private originalBounds: THREE.Box3
     private onChangeCallback: (() => void) | null = null
     private managed: boolean = false
+    private highlighted: boolean = false
 
     constructor(scene: THREE.Scene, bounds: THREE.Box3, renderer?: THREE.WebGLRenderer, managed = false) {
         this.scene = scene
@@ -255,8 +256,9 @@ export class SectionPlane {
 
             // Transparent filled plane - limited to building bounds (width/height swapped for orientation)
             const planeGeometry = new THREE.PlaneGeometry(height, width)
+            const fillColor = this.highlighted ? 0x6effff : 0x4ecdc4
             const planeMaterial = new THREE.MeshBasicMaterial({
-                color: 0x4ecdc4,
+                color: fillColor,
                 transparent: true,
                 opacity: 0.25,
                 side: THREE.DoubleSide,
@@ -286,7 +288,7 @@ export class SectionPlane {
             lineGeometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
 
             const lineMaterial = new THREE.LineBasicMaterial({
-                color: 0x4ecdc4,
+                color: fillColor,
                 transparent: true,
                 opacity: 0.6,
                 depthWrite: false,
@@ -413,6 +415,21 @@ export class SectionPlane {
     }
 
     /**
+     * Set highlighted state (e.g. when this plane is selected for Shift+drag)
+     */
+    setHighlighted(active: boolean): void {
+        if (this.highlighted === active) return
+        this.highlighted = active
+        const color = active ? 0x6effff : 0x4ecdc4
+        if (this.planeMesh?.material && this.planeMesh.material instanceof THREE.MeshBasicMaterial) {
+            this.planeMesh.material.color.setHex(color)
+        }
+        if (this.planeOutline?.material && this.planeOutline.material instanceof THREE.LineBasicMaterial) {
+            this.planeOutline.material.color.setHex(color)
+        }
+    }
+
+    /**
      * Flip the section direction
      */
     flip(): void {
@@ -513,6 +530,7 @@ export class SectionPlaneManager {
         plane.setFromScreenLine(startPoint, endPoint, camera)
         plane.enable()
         this.planes.push(plane)
+        this.activeIndex = this.planes.length - 1
         this.applyAll()
         this.triggerChange()
         return plane
@@ -527,6 +545,7 @@ export class SectionPlaneManager {
         plane.setFromWorldLine(startWorld, endWorld)
         plane.enable()
         this.planes.push(plane)
+        this.activeIndex = this.planes.length - 1
         this.applyAll()
         this.triggerChange()
         return plane
@@ -541,6 +560,7 @@ export class SectionPlaneManager {
         plane.setByDirection(direction, worldY)
         plane.enable()
         this.planes.push(plane)
+        this.activeIndex = this.planes.length - 1
         this.applyAll()
         this.triggerChange()
         return plane
@@ -554,6 +574,40 @@ export class SectionPlaneManager {
         return this.planes.length > 0 ? this.planes[this.planes.length - 1] : null
     }
 
+    private activeIndex: number = -1
+
+    getActivePlane(): SectionPlane | null {
+        if (this.planes.length === 0) return null
+        const i = this.activeIndex < 0 || this.activeIndex >= this.planes.length
+            ? this.planes.length - 1
+            : this.activeIndex
+        return this.planes[i]
+    }
+
+    setActiveIndex(i: number): void {
+        this.activeIndex = Math.max(-1, Math.min(i, this.planes.length - 1))
+        this.updateHighlights()
+    }
+
+    cycleActivePlane(direction: 1 | -1): void {
+        if (this.planes.length <= 1) return
+        const idx = this.activeIndex < 0 ? this.planes.length - 1 : this.activeIndex
+        this.activeIndex = (idx + direction + this.planes.length) % this.planes.length
+        this.updateHighlights()
+        this.triggerChange()
+    }
+
+    updateHighlights(): void {
+        const activeIdx = this.activeIndex < 0 || this.activeIndex >= this.planes.length
+            ? this.planes.length - 1
+            : this.activeIndex
+        this.planes.forEach((p, i) => p.setHighlighted(i === activeIdx))
+    }
+
+    clearHighlights(): void {
+        this.planes.forEach(p => p.setHighlighted(false))
+    }
+
     getBounds(): THREE.Box3 {
         return this.bounds.clone()
     }
@@ -562,6 +616,10 @@ export class SectionPlaneManager {
         const last = this.planes.pop()
         if (last) {
             last.disable()
+            if (this.activeIndex >= this.planes.length) {
+                this.activeIndex = Math.max(-1, this.planes.length - 1)
+            }
+            this.updateHighlights()
             this.applyAll()
             this.triggerChange()
         }
@@ -574,6 +632,7 @@ export class SectionPlaneManager {
     clearAll(): void {
         this.planes.forEach(p => p.disable())
         this.planes = []
+        this.activeIndex = -1
         if (this.renderer) {
             this.renderer.clippingPlanes = []
         }
