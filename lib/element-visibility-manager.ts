@@ -157,20 +157,27 @@ export class ElementVisibilityManager {
 
     /**
      * Isolate elements (hide everything else)
+     * @param options.shouldAbort - if returns true, bail without committing (caller can pass runId check)
      */
-    async isolateElements(localIds: number[]): Promise<void> {
-        this.isolatedElements = new Set(localIds)
+    async isolateElements(localIds: number[], options?: { shouldAbort?: () => boolean }): Promise<void> {
+        const check = () => options?.shouldAbort?.() ?? false
+        if (check()) return
 
         // Ensure we have all model IDs cached
         if (this.allModelIds.length === 0) {
             await this.cacheAllModelIds()
         }
+        if (check()) return
 
         // Hide ALL elements in the entire model
         await this.fragmentsModel.setVisible(this.allModelIds, false)
+        if (check()) return
 
         // Then show only the isolated elements
         await this.fragmentsModel.setVisible(localIds, true)
+        if (check()) return
+
+        this.isolatedElements = new Set(localIds)
         await this.applyChanges()
     }
 
@@ -190,21 +197,25 @@ export class ElementVisibilityManager {
     /**
      * Dim non-selected elements (show all, but non-selected with reduced opacity)
      * Uses Fragments highlight API with dimmed material
+     * @param options.shouldAbort - if returns true, bail without committing (caller can pass runId check)
      */
-    async dimNonSelectedElements(selectedIds: number[], dimOpacity: number = 0.3): Promise<void> {
-        this.isolatedElements = null
-        this.dimmedElements = { selectedIds: new Set(selectedIds), dimOpacity }
+    async dimNonSelectedElements(selectedIds: number[], dimOpacity: number = 0.3, options?: { shouldAbort?: () => boolean }): Promise<void> {
+        const check = () => options?.shouldAbort?.() ?? false
+        if (check()) return
 
         if (this.allModelIds.length === 0) {
             await this.cacheAllModelIds()
         }
+        if (check()) return
 
         const visibleIds = this.computeVisibleIdsFromFilters()
         const selectedSet = new Set(selectedIds)
         const nonSelectedIds = visibleIds.filter(id => !selectedSet.has(id))
 
         await this.applyVisibilityFromFilters()
+        if (check()) return
         await this.fragmentsModel.resetHighlight()
+        if (check()) return
 
         if (nonSelectedIds.length > 0) {
             await this.fragmentsModel.highlight(nonSelectedIds, {
@@ -214,6 +225,10 @@ export class ElementVisibilityManager {
                 transparent: true,
             })
         }
+        if (check()) return
+
+        this.isolatedElements = null
+        this.dimmedElements = { selectedIds: new Set(selectedIds), dimOpacity }
         await this.applyChanges()
     }
 
@@ -236,6 +251,11 @@ export class ElementVisibilityManager {
         let ids = this.storeyFilterIds != null
             ? [...this.storeyFilterIds]
             : [...this.allModelIds]
+
+        const isolated = this.isolatedElements
+        if (isolated) {
+            ids = ids.filter(id => isolated.has(id))
+        }
 
         if (this.typeFilters.size > 0) {
             ids = ids.filter(id => {

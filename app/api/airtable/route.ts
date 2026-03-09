@@ -421,11 +421,15 @@ async function updateDoorRecord(
     const error = await updateRes.text()
     if (error.includes('INVALID_MULTIPLE_CHOICE_OPTIONS')) {
       const retryFields: Record<string, unknown> = { ...fields }
-      const maybeRestrictedSelectFields = [
+      const candidateNames = [
         fieldsMap.schallschutzManuell,
         fieldsMap.brandschutzManuell,
         fieldsMap.geometryType,
       ].filter((name): name is string => Boolean(name))
+      const maybeRestrictedSelectFields = candidateNames.filter((name) => {
+        const field = tableFieldsByName[name]
+        return field && (field.type === 'singleSelect' || field.type === 'multipleSelects')
+      })
 
       let removed = 0
       for (const fieldName of maybeRestrictedSelectFields) {

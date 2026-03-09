@@ -97,8 +97,19 @@ function emptyCsetStandardCH(): CsetStandardCH {
     }
 }
 
+const CSET_PROP_ALIASES: Record<string, string> = {
+    al00tuernummer: 'tuernummereindeutig',
+    tuernummer: 'tuernummereindeutig',
+    massdurchgangshoehe: 'lh',
+    massrohbreite: 'rb',
+    massrohebreite: 'rb',
+    massrohhoehe: 'rh',
+    massrohehoehe: 'rh',
+}
+
 function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue: unknown) {
-    const normalized = normalizeIfcPropName(propertyName)
+    let normalized = normalizeIfcPropName(propertyName)
+    normalized = CSET_PROP_ALIASES[normalized] ?? normalized
 
     if (normalized === 'tuernummereindeutig') {
         const value = unwrapIfcValue(rawValue)

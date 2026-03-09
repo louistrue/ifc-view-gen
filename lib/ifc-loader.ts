@@ -263,8 +263,19 @@ function parseIfcNumber(raw: any): number | null {
     return null
 }
 
+const CSET_PROP_ALIASES: Record<string, string> = {
+    al00tuernummer: 'tuernummereindeutig',
+    tuernummer: 'tuernummereindeutig',
+    massdurchgangshoehe: 'lh',
+    massrohbreite: 'rb',
+    massrohebreite: 'rb',
+    massrohhoehe: 'rh',
+    massrohehoehe: 'rh',
+}
+
 function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nominalValue: any): void {
-    const normalized = normalizeIfcName(propName)
+    let normalized = normalizeIfcName(propName)
+    normalized = CSET_PROP_ALIASES[normalized] ?? normalized
     if (normalized === 'tuernummereindeutig') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) {

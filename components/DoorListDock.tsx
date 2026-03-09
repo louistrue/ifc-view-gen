@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
-import type { CSSProperties, RefObject } from 'react'
+import type { CSSProperties, MutableRefObject, RefObject } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
 
 type SortField = 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
@@ -162,7 +162,7 @@ export type DoorListDockProps = {
   onDockHeightChange?: (heightPx: number) => void
   minDockHeightPx?: number
   maxDockHeightPx?: number
-  listContainerRef?: RefObject<HTMLDivElement | null>
+  listContainerRef?: MutableRefObject<HTMLDivElement | null>
   scrollToDoorId?: string | null
   onScrollToDoorHandled?: () => void
 }
@@ -448,11 +448,13 @@ export default function DoorListDock({
    }, [filteredDoors, selectedDoorIds, onToggleSelect])
 
    useEffect(() => {
-     if (!scrollToDoorId || !onScrollToDoorHandled) return
+     if (!scrollToDoorId) return
      const el = scrollContainerRef.current?.querySelector(`[data-door-id="${scrollToDoorId}"]`)
-     el?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
-     onScrollToDoorHandled()
-   }, [scrollToDoorId, onScrollToDoorHandled])
+     if (el) {
+       el.scrollIntoView({ block: 'nearest', behavior: 'auto' })
+       onScrollToDoorHandled?.()
+     }
+   }, [scrollToDoorId])
 
    useEffect(() => {
      onStoreyFilterChange?.(storeyFilter === null ? new Set() : storeyFilter)
@@ -521,7 +523,7 @@ export default function DoorListDock({
       }
       ref={(el) => {
         scrollContainerRef.current = el
-        if (listContainerRef) (listContainerRef as any).current = el
+        if (listContainerRef) listContainerRef.current = el
       }}
     >
       <div className="door-list-scroll-area">
@@ -558,6 +560,7 @@ export default function DoorListDock({
                     checked={allVisibleSelected}
                     disabled={visibleDoors.length === 0}
                     onChange={onHeaderCheckboxChange}
+                    aria-label="Select all visible doors"
                   />
                   <span className="checkmark" />
                 </label>
@@ -574,6 +577,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Türnummer</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('door')}</span>}
                   </span>
                 </button>
               </div>
@@ -599,6 +603,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Geometrietyp</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('type')}</span>}
                   </span>
                 </button>
               </div>
@@ -629,6 +634,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Geschoss</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('storey')}</span>}
                   </span>
                 </button>
               </div>
@@ -659,6 +665,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Brandschutz</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('brandschutz')}</span>}
                   </span>
                 </button>
               </div>
@@ -689,6 +696,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">Schallschutz</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('schallschutz')}</span>}
                   </span>
                 </button>
               </div>
@@ -719,6 +727,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">LB</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('lb')}</span>}
                   </span>
                 </button>
               </div>
@@ -743,6 +752,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">LH</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('lh')}</span>}
                   </span>
                 </button>
               </div>
@@ -767,6 +777,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">RB</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('rb')}</span>}
                   </span>
                 </button>
               </div>
@@ -791,6 +802,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">RH</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('rh')}</span>}
                   </span>
                 </button>
               </div>
@@ -815,6 +827,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">BRAM</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('bram')}</span>}
                   </span>
                 </button>
               </div>
@@ -839,6 +852,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">HRAM</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('hram')}</span>}
                   </span>
                 </button>
               </div>
@@ -876,6 +890,7 @@ export default function DoorListDock({
                       </span>
                     )}
                     <span className="label-text">GUID</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('guid')}</span>}
                   </span>
                 </button>
               </div>
@@ -906,6 +921,7 @@ export default function DoorListDock({
                   type="checkbox"
                   checked={selectedDoorIds.has(door.doorId)}
                   onChange={() => onToggleSelect(door.doorId)}
+                  aria-label={`Select door ${getDoorLabel(door)}`}
                 />
                 <span className="checkmark" />
               </label>
@@ -948,13 +964,13 @@ export default function DoorListDock({
               </div>
 
               <div className="door-actions">
-                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'front')} title="Front view">
+                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'front')} title="Front view" aria-label="Show front view">
                   F
                 </button>
-                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'back')} title="Back view">
+                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'back')} title="Back view" aria-label="Show back view">
                   B
                 </button>
-                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'plan')} title="Plan view">
+                <button className="action-button compact" onClick={() => onShowSingleDoor(door, 'plan')} title="Plan view" aria-label="Show plan view">
                   P
                 </button>
               </div>
@@ -1098,6 +1114,11 @@ export default function DoorListDock({
           display: inline-flex;
           align-items: center;
           justify-content: center;
+        }
+
+        .header-sort-indicator {
+          flex-shrink: 0;
+          opacity: 0.8;
         }
 
         .header-row {
