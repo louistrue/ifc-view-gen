@@ -310,11 +310,23 @@ export default function IFCViewer() {
       pointerDownRef.active = false
     }
 
+    const handlePointerCancel = () => {
+      pointerDownRef.active = false
+    }
+
+    const handleBlur = () => {
+      pointerDownRef.active = false
+    }
+
     canvas.addEventListener('pointerdown', handlePointerDown)
     document.addEventListener('pointerup', handlePointerUp)
+    document.addEventListener('pointercancel', handlePointerCancel)
+    window.addEventListener('blur', handleBlur)
     return () => {
       canvas.removeEventListener('pointerdown', handlePointerDown)
       document.removeEventListener('pointerup', handlePointerUp)
+      document.removeEventListener('pointercancel', handlePointerCancel)
+      window.removeEventListener('blur', handleBlur)
     }
   }, [showBatchProcessor, doorContexts, zoomWindowActive, sectionMode, toggleDockDoorSelection])
 
