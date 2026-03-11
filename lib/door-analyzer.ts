@@ -839,16 +839,19 @@ export async function analyzeDoors(
  * Get all meshes for a door context
  * Prefers detailed geometry from web-ifc if available, falls back to Fragments geometry
  */
-export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
+export function getContextMeshes(
+    context: DoorContext,
+    options: { includeHostWall?: boolean } = {}
+): THREE.Mesh[] {
+    const { includeHostWall = true } = options
+
     // Use detailed geometry if available (from web-ifc, high quality)
     if (context.detailedGeometry) {
         const { doorMeshes, wallMeshes, deviceMeshes } = context.detailedGeometry
-        const totalVerts = [...doorMeshes, ...deviceMeshes].reduce(
-            (sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0
-        )
 
-        // Return door meshes + device meshes (not wall - too large for SVG)
-        return [...doorMeshes, ...deviceMeshes]
+        return includeHostWall
+            ? [...doorMeshes, ...wallMeshes, ...deviceMeshes]
+            : [...doorMeshes, ...deviceMeshes]
     }
 
     // Fallback to Fragments geometry (simplified)
@@ -856,6 +859,11 @@ export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
     const doorMeshes = collectMeshesFromElement(context.door)
 
     meshes.push(...doorMeshes)
+
+    if (includeHostWall && context.hostWall) {
+        const wallMeshes = collectMeshesFromElement(context.hostWall)
+        meshes.push(...wallMeshes)
+    }
 
     for (const device of context.nearbyDevices) {
         const deviceMeshes = collectMeshesFromElement(device)
@@ -972,4 +980,3 @@ export async function loadDetailedGeometry(
     }
 
 }
-

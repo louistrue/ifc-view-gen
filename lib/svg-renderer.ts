@@ -61,6 +61,12 @@ interface ProjectedPolygon {
     depth: number
 }
 
+interface ProjectedPoint3D {
+    x: number
+    y: number
+    z: number
+}
+
 /**
  * Setup orthographic camera for door elevation view
  */
@@ -119,7 +125,10 @@ function getElementColor(
 ): string {
     if (expressID === context.door.expressID) {
         return options.doorColor
-    } else if (context.wall && expressID === context.wall.expressID) {
+    } else if (
+        (context.hostWall && expressID === context.hostWall.expressID) ||
+        (context.wall && expressID === context.wall.expressID)
+    ) {
         return options.wallColor
     } else {
         return options.deviceColor
@@ -134,7 +143,7 @@ function projectPoint(
     camera: THREE.OrthographicCamera,
     width: number,
     height: number
-): { x: number; y: number; z: number } {
+): ProjectedPoint3D {
     const projected = point.clone().project(camera)
     return {
         x: (projected.x + 1) * width / 2,
@@ -144,52 +153,82 @@ function projectPoint(
 }
 
 /**
- * Clip a line segment against the near (-1) and far (1) planes in NDC Z-space
+ * Interpolate between 2 projected points.
  */
-function clipLineZ(
-    p1: { x: number; y: number; z: number },
-    p2: { x: number; y: number; z: number }
-): { p1: { x: number; y: number; z: number }, p2: { x: number; y: number; z: number } } | null {
-    // Check if both outside
-    if ((p1.z < -1 && p2.z < -1) || (p1.z > 1 && p2.z > 1)) {
+function interpolateProjectedPoint(start: ProjectedPoint3D, end: ProjectedPoint3D, t: number): ProjectedPoint3D {
+    return {
+        x: start.x + (end.x - start.x) * t,
+        y: start.y + (end.y - start.y) * t,
+        z: start.z + (end.z - start.z) * t,
+    }
+}
+
+type FrustumPlane = (point: ProjectedPoint3D) => number
+
+const FRUSTUM_PLANES: FrustumPlane[] = [
+    (point) => point.x + 1,
+    (point) => 1 - point.x,
+    (point) => point.y + 1,
+    (point) => 1 - point.y,
+    (point) => point.z + 1,
+    (point) => 1 - point.z,
+]
+
+/**
+ * Clip a polygon in NDC space against the orthographic frustum.
+ */
+function clipPolygonToFrustum(points: ProjectedPoint3D[]): ProjectedPoint3D[] {
+    let clipped = points
+
+    for (const plane of FRUSTUM_PLANES) {
+        if (clipped.length === 0) {
+            break
+        }
+
+        const output: ProjectedPoint3D[] = []
+
+        for (let i = 0; i < clipped.length; i++) {
+            const current = clipped[i]
+            const previous = clipped[(i + clipped.length - 1) % clipped.length]
+            const currentDist = plane(current)
+            const previousDist = plane(previous)
+            const currentInside = currentDist >= 0
+            const previousInside = previousDist >= 0
+
+            if (currentInside !== previousInside) {
+                const denominator = previousDist - currentDist
+                const t = Math.abs(denominator) < 1e-9 ? 0 : previousDist / denominator
+                output.push(interpolateProjectedPoint(previous, current, t))
+            }
+
+            if (currentInside) {
+                output.push(current)
+            }
+        }
+
+        clipped = output
+    }
+
+    return clipped
+}
+
+/**
+ * Clip a line segment in NDC space against the full orthographic frustum.
+ */
+function clipLineToFrustum(
+    p1: ProjectedPoint3D,
+    p2: ProjectedPoint3D
+): { p1: ProjectedPoint3D, p2: ProjectedPoint3D } | null {
+    const clipped = clipPolygonToFrustum([p1, p2])
+
+    if (clipped.length < 2) {
         return null
     }
 
-    // Check if both inside
-    if (p1.z >= -1 && p1.z <= 1 && p2.z >= -1 && p2.z <= 1) {
-        return { p1, p2 }
+    return {
+        p1: clipped[0],
+        p2: clipped[clipped.length - 1],
     }
-
-    // Clipper function for one point
-    const clip = (start: typeof p1, end: typeof p1, planeZ: number): typeof p1 => {
-        const t = (planeZ - start.z) / (end.z - start.z)
-        return {
-            x: start.x + (end.x - start.x) * t,
-            y: start.y + (end.y - start.y) * t,
-            z: planeZ
-        }
-    }
-
-    let resP1 = { ...p1 }
-    let resP2 = { ...p2 }
-
-    // Clip against Near (-1)
-    if (resP1.z < -1) {
-        if (resP2.z < -1) return null
-        resP1 = clip(resP1, resP2, -1)
-    } else if (resP2.z < -1) {
-        resP2 = clip(resP2, resP1, -1)
-    }
-
-    // Clip against Far (1)
-    if (resP1.z > 1) {
-        if (resP2.z > 1) return null
-        resP1 = clip(resP1, resP2, 1)
-    } else if (resP2.z > 1) {
-        resP2 = clip(resP2, resP1, 1)
-    }
-
-    return { p1: resP1, p2: resP2 }
 }
 
 /**
@@ -203,7 +242,7 @@ function extractEdges(
     color: string,
     width: number,
     height: number,
-    clipZ: boolean = false
+    clipToFrustum: boolean = false
 ): ProjectedEdge[] {
     const edges: ProjectedEdge[] = []
 
@@ -314,37 +353,18 @@ function extractEdges(
         const proj1 = projectPoint(p1, camera, width, height)
         const proj2 = projectPoint(p2, camera, width, height)
 
-        // Clip against view frustum (Z-depth) if enabled
-        if (clipZ) {
-            const clipped = clipLineZ(proj1, proj2)
+        const clipped = clipToFrustum ? clipLineToFrustum(proj1, proj2) : { p1: proj1, p2: proj2 }
+        if (!clipped) continue
 
-            if (clipped) {
-                // Average depth for sorting
-                const depth = (clipped.p1.z + clipped.p2.z) / 2
-
-                edges.push({
-                    x1: clipped.p1.x,
-                    y1: clipped.p1.y,
-                    x2: clipped.p2.x,
-                    y2: clipped.p2.y,
-                    color,
-                    depth
-                })
-            }
-        } else {
-            // No clipping, just add the edge
-            // Note: We might still want to soft check if it's wildly behind camera
-            // but for elevation view with controlled camera, it should be fine.
-            const depth = (proj1.z + proj2.z) / 2
-            edges.push({
-                x1: proj1.x,
-                y1: proj1.y,
-                x2: proj2.x,
-                y2: proj2.y,
-                color,
-                depth
-            })
-        }
+        const depth = (clipped.p1.z + clipped.p2.z) / 2
+        edges.push({
+            x1: clipped.p1.x,
+            y1: clipped.p1.y,
+            x2: clipped.p2.x,
+            y2: clipped.p2.y,
+            color,
+            depth
+        })
     }
 
     return edges
@@ -358,7 +378,8 @@ function extractPolygons(
     camera: THREE.OrthographicCamera,
     color: string,
     width: number,
-    height: number
+    height: number,
+    clipToFrustum: boolean = false
 ): ProjectedPolygon[] {
     const polygons: ProjectedPolygon[] = []
 
@@ -405,37 +426,24 @@ function extractPolygons(
             return
         }
 
-        const proj1 = projectPoint(p1, camera, width, height)
-        const proj2 = projectPoint(p2, camera, width, height)
-        const proj3 = projectPoint(p3, camera, width, height)
+        const projectedPoints = [
+            projectPoint(p1, camera, width, height),
+            projectPoint(p2, camera, width, height),
+            projectPoint(p3, camera, width, height),
+        ]
+        const clippedPoints = clipToFrustum
+            ? clipPolygonToFrustum(projectedPoints)
+            : projectedPoints
 
-        // Simple culling for polygons: 
-        // Only strict culling if we wanted to enforce frustum (Plan View)
-        // But extracting polygons is also used for Elevation.
-        // Let's rely on standard painters algo (depth sort) and not clip strictly unless needed.
-        // Actually, for Plan view section cut, we probably SHOULD clip polygons too, but 
-        // passing `clipZ` to extractPolygons is also needed.
-
-        // For now, let's just relax the check to be always valid unless wildly out?
-        // Or better: Revert to previous logic (no check) if we don't care.
-        // But for Plan View, we DO care about near/far clip.
-
-        // Let's assume polygons are mostly for fills and less critical for "No edges" error.
-        // But to be safe, let's keep it permissive for now, or just check Z roughly.
-        // If we want clipping logic here, we'd need to pass a flag too.
-        // I will revert strict check and allow all polygons, 
-        // relying on the fact that edges carry the main visual info.
-        // If polygons are outside, they usually don't render or get covered.
+        if (clippedPoints.length < 3) {
+            return
+        }
 
         // Average depth for sorting
-        const depth = (proj1.z + proj2.z + proj3.z) / 3
+        const depth = clippedPoints.reduce((sum, point) => sum + point.z, 0) / clippedPoints.length
 
         polygons.push({
-            points: [
-                { x: proj1.x, y: proj1.y },
-                { x: proj2.x, y: proj2.y },
-                { x: proj3.x, y: proj3.y }
-            ],
+            points: clippedPoints.map((point) => ({ x: point.x, y: point.y })),
             color,
             depth
         })
@@ -454,43 +462,42 @@ function extractPolygons(
     return polygons
 }
 
-/**
- * Generate SVG string from edges and polygons
- * Normalizes coordinates to fit within the viewport
- */
-function generateSVGString(
+function collectProjectedGeometry(
+    meshes: THREE.Mesh[],
+    context: DoorContext,
+    options: Required<SVGRenderOptions>,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    clipToFrustum: boolean
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const edges: ProjectedEdge[] = []
+    const polygons: ProjectedPolygon[] = []
+
+    for (const mesh of meshes) {
+        try {
+            const expressID = mesh.userData.expressID
+            const color = getElementColor(expressID, context, options)
+            const posCount = mesh.geometry?.attributes?.position?.count || 0
+            if (posCount === 0) continue
+
+            edges.push(...extractEdges(mesh, camera, options.lineColor, width, height, clipToFrustum))
+
+            if (options.showFills) {
+                polygons.push(...extractPolygons(mesh, camera, color, width, height, clipToFrustum))
+            }
+        } catch (error) {
+            console.warn('Failed to extract geometry from mesh:', error)
+        }
+    }
+
+    return { edges, polygons }
+}
+
+function getBoundsFromProjectedGeometry(
     edges: ProjectedEdge[],
-    polygons: ProjectedPolygon[],
-    options: Required<SVGRenderOptions>
-): string {
-    const { width, height, lineWidth, showFills, backgroundColor, fontSize, fontFamily, showLegend, showLabels } = options
-
-    // ... rest of function identical, just checking for activeContext usage ...
-    // Since generateSVGString logic involves calculating bounds and scaling, 
-    // it will naturally fit the *clipped* content.
-    // If we clipped everything above 1.2m, the bounds will shrink to fit the door/near items.
-
-    // Check if legend is actually needed (only if more than 1 item)
-    // We need to know context for this, but context is activeContext. 
-    // Ideally we would pass context to this function, but using the global activeContext is the current pattern.
-    const hasDevices = activeContext ? activeContext.nearbyDevices.length > 0 : false
-    const showLegendActual = showLegend && hasDevices // Only show legend if we have devices (so > 1 item with Door)
-
-    // Calculate Title Block area
-    // Reserve lines for text + legend if needed
-    // Text takes about 2 lines (View/Type + Opening)
-    // Legend takes about 1 line if shown
-    const textLines = 3 // View, ID/Type, Opening
-    const legendHeight = showLegendActual ? (fontSize + 10) : 0
-
-    const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
-
-    // Reserve space for Vorderansicht label in plan views (arrow + text = ~60px)
-    const vorderansichtReserve = (activeViewType === 'Plan') ? 100 : 0
-
-    const viewHeight = height - titleBlockHeight - vorderansichtReserve
-
-    // Compute bounding box of all edges
+    polygons: ProjectedPolygon[]
+): ProjectedBounds | null {
     let minX = Infinity, maxX = -Infinity
     let minY = Infinity, maxY = -Infinity
 
@@ -509,6 +516,215 @@ function generateSVGString(
             maxY = Math.max(maxY, p.y)
         }
     }
+
+    if (minX === Infinity) {
+        return null
+    }
+
+    return { minX, maxX, minY, maxY }
+}
+
+function getMeshesBoundingBox(meshes: THREE.Mesh[]): THREE.Box3 {
+    const combinedBBox = new THREE.Box3()
+
+    for (const mesh of meshes) {
+        if (!mesh.geometry) continue
+        ; (mesh.geometry as THREE.BufferGeometry).boundingBox = null
+        mesh.geometry.computeBoundingBox()
+        if (mesh.geometry.boundingBox) {
+            combinedBBox.union(mesh.geometry.boundingBox)
+        }
+    }
+
+    return combinedBBox
+}
+
+interface ProjectedBounds {
+    minX: number
+    maxX: number
+    minY: number
+    maxY: number
+}
+
+function clipEdgeToBounds(edge: ProjectedEdge, bounds: ProjectedBounds): ProjectedEdge | null {
+    let t0 = 0
+    let t1 = 1
+
+    const dx = edge.x2 - edge.x1
+    const dy = edge.y2 - edge.y1
+
+    const clipTest = (p: number, q: number): boolean => {
+        if (Math.abs(p) < 1e-9) {
+            return q >= 0
+        }
+
+        const r = q / p
+        if (p < 0) {
+            if (r > t1) return false
+            if (r > t0) t0 = r
+        } else {
+            if (r < t0) return false
+            if (r < t1) t1 = r
+        }
+
+        return true
+    }
+
+    if (
+        !clipTest(-dx, edge.x1 - bounds.minX) ||
+        !clipTest(dx, bounds.maxX - edge.x1) ||
+        !clipTest(-dy, edge.y1 - bounds.minY) ||
+        !clipTest(dy, bounds.maxY - edge.y1)
+    ) {
+        return null
+    }
+
+    const x1 = edge.x1 + t0 * dx
+    const y1 = edge.y1 + t0 * dy
+    const x2 = edge.x1 + t1 * dx
+    const y2 = edge.y1 + t1 * dy
+    const z1 = edge.depth
+    const z2 = edge.depth
+
+    return {
+        ...edge,
+        x1,
+        y1,
+        x2,
+        y2,
+        depth: (z1 + z2) / 2,
+    }
+}
+
+function clipPolygonToBounds(points: { x: number; y: number }[], bounds: ProjectedBounds): { x: number; y: number }[] {
+    type Point2D = { x: number; y: number }
+
+    const clipAgainstEdge = (
+        input: Point2D[],
+        inside: (point: Point2D) => boolean,
+        intersect: (start: Point2D, end: Point2D) => Point2D
+    ): Point2D[] => {
+        if (input.length === 0) return input
+
+        const output: Point2D[] = []
+        for (let i = 0; i < input.length; i++) {
+            const current = input[i]
+            const previous = input[(i + input.length - 1) % input.length]
+            const currentInside = inside(current)
+            const previousInside = inside(previous)
+
+            if (currentInside !== previousInside) {
+                output.push(intersect(previous, current))
+            }
+
+            if (currentInside) {
+                output.push(current)
+            }
+        }
+
+        return output
+    }
+
+    let clipped = points
+
+    clipped = clipAgainstEdge(
+        clipped,
+        (point) => point.x >= bounds.minX,
+        (start, end) => {
+            const t = (bounds.minX - start.x) / ((end.x - start.x) || 1)
+            return { x: bounds.minX, y: start.y + (end.y - start.y) * t }
+        }
+    )
+    clipped = clipAgainstEdge(
+        clipped,
+        (point) => point.x <= bounds.maxX,
+        (start, end) => {
+            const t = (bounds.maxX - start.x) / ((end.x - start.x) || 1)
+            return { x: bounds.maxX, y: start.y + (end.y - start.y) * t }
+        }
+    )
+    clipped = clipAgainstEdge(
+        clipped,
+        (point) => point.y >= bounds.minY,
+        (start, end) => {
+            const t = (bounds.minY - start.y) / ((end.y - start.y) || 1)
+            return { x: start.x + (end.x - start.x) * t, y: bounds.minY }
+        }
+    )
+    clipped = clipAgainstEdge(
+        clipped,
+        (point) => point.y <= bounds.maxY,
+        (start, end) => {
+            const t = (bounds.maxY - start.y) / ((end.y - start.y) || 1)
+            return { x: start.x + (end.x - start.x) * t, y: bounds.maxY }
+        }
+    )
+
+    return clipped
+}
+
+/**
+ * Generate SVG string from edges and polygons
+ * Normalizes coordinates to fit within the viewport
+ */
+function generateSVGString(
+    edges: ProjectedEdge[],
+    polygons: ProjectedPolygon[],
+    options: Required<SVGRenderOptions>,
+    fitGeometry?: {
+        edges: ProjectedEdge[]
+        polygons: ProjectedPolygon[]
+    }
+): string {
+    const { width, height, lineWidth, showFills, backgroundColor, fontSize, fontFamily, showLegend, showLabels } = options
+
+    // ... rest of function identical, just checking for activeContext usage ...
+    // Since generateSVGString logic involves calculating bounds and scaling, 
+    // it will naturally fit the *clipped* content.
+    // If we clipped everything above 1.2m, the bounds will shrink to fit the door/near items.
+
+    // Check if legend is actually needed (only if more than 1 item)
+    // We need to know context for this, but context is activeContext. 
+    // Ideally we would pass context to this function, but using the global activeContext is the current pattern.
+    const hasDevices = activeContext ? activeContext.nearbyDevices.length > 0 : false
+    const hasWall = activeContext ? Boolean(activeContext.hostWall || activeContext.wall) : false
+    const showLegendActual = showLegend && (hasDevices || hasWall)
+
+    // Calculate Title Block area
+    // Reserve lines for text + legend if needed
+    // Text takes about 2 lines (View/Type + Opening)
+    // Legend takes about 1 line if shown
+    const textLines = 3 // View, ID/Type, Opening
+    const legendHeight = showLegendActual ? (fontSize + 10) : 0
+
+    const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
+
+    // Reserve space for Vorderansicht label in plan views (arrow + text = ~60px)
+    const vorderansichtReserve = (activeViewType === 'Plan') ? 100 : 0
+
+    const viewHeight = height - titleBlockHeight - vorderansichtReserve
+
+    const fitBounds = getBoundsFromProjectedGeometry(
+        fitGeometry?.edges ?? edges,
+        fitGeometry?.polygons ?? polygons
+    )
+
+    const renderEdges = fitBounds
+        ? edges.map((edge) => clipEdgeToBounds(edge, fitBounds)).filter((edge): edge is ProjectedEdge => edge !== null)
+        : edges
+    const renderPolygons = fitBounds
+        ? polygons
+            .map((polygon) => {
+                const clippedPoints = clipPolygonToBounds(polygon.points, fitBounds)
+                return clippedPoints.length >= 3 ? { ...polygon, points: clippedPoints } : null
+            })
+            .filter((polygon): polygon is ProjectedPolygon => polygon !== null)
+        : polygons
+
+    let minX = fitBounds?.minX ?? Infinity
+    let maxX = fitBounds?.maxX ?? -Infinity
+    let minY = fitBounds?.minY ?? Infinity
+    let maxY = fitBounds?.maxY ?? -Infinity
 
     // If nothing to draw
     if (minX === Infinity) {
@@ -539,10 +755,10 @@ function generateSVGString(
     const transformY = (y: number) => (y - minY) * scale + offsetY
 
     // Sort polygons by depth (back to front)
-    polygons.sort((a, b) => b.depth - a.depth)
+    renderPolygons.sort((a, b) => b.depth - a.depth)
 
     // Sort edges by depth (back to front)
-    edges.sort((a, b) => b.depth - a.depth)
+    renderEdges.sort((a, b) => b.depth - a.depth)
 
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
@@ -552,7 +768,7 @@ function generateSVGString(
 
     // Draw filled polygons first (if enabled)
     if (showFills) {
-        for (const poly of polygons) {
+        for (const poly of renderPolygons) {
             const pathData = poly.points.map((p, i) =>
                 `${i === 0 ? 'M' : 'L'} ${transformX(p.x).toFixed(2)} ${transformY(p.y).toFixed(2)}`
             ).join(' ') + ' Z'
@@ -567,7 +783,7 @@ function generateSVGString(
 
     // Draw edges with transformed coordinates
     let dashedCount = 0
-    for (const edge of edges) {
+    for (const edge of renderEdges) {
         const x1 = transformX(edge.x1)
         const y1 = transformY(edge.y1)
         const x2 = transformX(edge.x2)
@@ -681,8 +897,9 @@ function renderTitleBlock(
     // 3. Legend (Conditional)
     // Only show if we have devices (total items > 1, since Door is always there)
     const hasDevices = context.nearbyDevices.length > 0
+    const hasWall = Boolean(context.hostWall || context.wall)
 
-    if (showLegend && hasDevices) {
+    if (showLegend && (hasDevices || hasWall)) {
         currentY += 10 // Extra spacing for legend
         const legendSize = fontSize * 0.8
 
@@ -693,8 +910,11 @@ function renderTitleBlock(
         let legendX = leftX + 80
         const items = [
             { color: options.doorColor, text: 'Tür' },
-            // { color: options.wallColor, text: 'Wand' }, 
         ]
+
+        if (hasWall) {
+            items.push({ color: options.wallColor, text: 'Wand' })
+        }
 
         if (hasDevices) {
             items.push({ color: options.deviceColor, text: 'Elektro' })
@@ -884,8 +1104,10 @@ function renderElevationFromMeshes(
     isBackView: boolean,
     opts: Required<SVGRenderOptions>
 ): string {
-    const meshes = getContextMeshes(context)
-    if (meshes.length === 0) {
+    const renderMeshes = getContextMeshes(context, { includeHostWall: true })
+    const fitMeshes = getContextMeshes(context, { includeHostWall: false })
+
+    if (renderMeshes.length === 0) {
         throw new Error('No meshes available for rendering')
     }
 
@@ -916,34 +1138,30 @@ function renderElevationFromMeshes(
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
 
-    // Collect edges and polygons from all meshes
-    const allEdges: ProjectedEdge[] = []
-    const allPolygons: ProjectedPolygon[] = []
-
-    for (const mesh of meshes) {
-        try {
-            const expressID = mesh.userData.expressID
-            const color = getElementColor(expressID, context, opts)
-            const posCount = mesh.geometry?.attributes?.position?.count || 0
-            if (posCount === 0) continue
-
-            const edges = extractEdges(mesh, camera, opts.lineColor, width, height, false)
-            allEdges.push(...edges)
-
-            if (opts.showFills) {
-                const polygons = extractPolygons(mesh, camera, color, width, height)
-                allPolygons.push(...polygons)
-            }
-        } catch (error) {
-            console.warn(`Failed to extract geometry from mesh:`, error)
-        }
-    }
+    const renderGeometry = collectProjectedGeometry(
+        renderMeshes,
+        context,
+        opts,
+        camera,
+        width,
+        height,
+        true
+    )
+    const fitGeometry = collectProjectedGeometry(
+        fitMeshes,
+        context,
+        opts,
+        camera,
+        width,
+        height,
+        true
+    )
 
 
     activeContext = context
     activeViewType = isBackView ? 'Back' : 'Front'
 
-    return generateSVGString(allEdges, allPolygons, opts)
+    return generateSVGString(renderGeometry.edges, renderGeometry.polygons, opts, fitGeometry)
 }
 
 /**
@@ -956,7 +1174,7 @@ function renderElevationFromBoundingBox(
     doorWidth: number,
     doorHeight: number
 ): string {
-    const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
+    const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, wallColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
 
     const padding = 60
     const labelHeight = showLabels ? 80 : 0
@@ -969,10 +1187,15 @@ function renderElevationFromBoundingBox(
 
     const scale = Math.min(availableWidth / totalWidth, availableHeight / totalHeight)
 
+    const scaledTotalWidth = totalWidth * scale
+    const scaledTotalHeight = totalHeight * scale
     const scaledWidth = doorWidth * scale
     const scaledHeight = doorHeight * scale
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledHeight) / 2
+    const wallOffsetX = (svgWidth - scaledTotalWidth) / 2
+    const wallOffsetY = padding + (availableHeight - scaledTotalHeight) / 2
+    const hasWall = Boolean(context.hostWall?.boundingBox)
 
     activeContext = context
     activeViewType = isBackView ? 'Back' : 'Front'
@@ -980,7 +1203,17 @@ function renderElevationFromBoundingBox(
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
   <rect width="100%" height="100%" fill="${backgroundColor}"/>
-  
+`
+
+    if (hasWall) {
+        svg += `
+  <!-- Host wall context (cropped to existing elevation window) -->
+  <rect x="${wallOffsetX}" y="${wallOffsetY}" width="${scaledTotalWidth}" height="${scaledTotalHeight}"
+        fill="${wallColor}" fill-opacity="0.18" stroke="${lineColor}" stroke-width="${lineWidth * 0.6}" opacity="0.6"/>
+`
+    }
+
+    svg += `
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledHeight}" 
         fill="${doorColor}" fill-opacity="0.2" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
@@ -1454,26 +1687,17 @@ function renderPlanFromMeshes(
     context: DoorContext,
     opts: Required<SVGRenderOptions>
 ): string {
-    const meshes = getContextMeshes(context)
-    if (meshes.length === 0) {
+    const renderMeshes = getContextMeshes(context, { includeHostWall: true })
+    const cropMeshes = getContextMeshes(context, { includeHostWall: false })
+
+    if (renderMeshes.length === 0) {
         throw new Error('No meshes available for rendering')
     }
 
     const door = context.door
     const normal = context.normal.clone().normalize()
 
-    // Calculate ACTUAL geometry bounding box from ALL meshes
-    // This ensures we use the same coordinate space as the mesh edges
-    const combinedBBox = new THREE.Box3()
-    for (const mesh of meshes) {
-        if (mesh.geometry) {
-            ; (mesh.geometry as THREE.BufferGeometry).boundingBox = null
-            mesh.geometry.computeBoundingBox()
-            if (mesh.geometry.boundingBox) {
-                combinedBBox.union(mesh.geometry.boundingBox)
-            }
-        }
-    }
+    const combinedBBox = getMeshesBoundingBox(cropMeshes)
 
     // Use actual geometry bounds, fallback to context if empty
     const hasGeometryBounds = !combinedBBox.isEmpty()
@@ -1548,41 +1772,37 @@ function renderPlanFromMeshes(
     camera.updateMatrixWorld()
 
 
-    // Collect edges and polygons from all meshes
-    const allEdges: ProjectedEdge[] = []
-    const allPolygons: ProjectedPolygon[] = []
-
-    for (const mesh of meshes) {
-        try {
-            const expressID = mesh.userData.expressID
-            const color = getElementColor(expressID, context, opts)
-            const posCount = mesh.geometry?.attributes?.position?.count || 0
-            if (posCount === 0) continue
-
-            // Enable clipping for plan view at cut height
-            const edges = extractEdges(mesh, camera, opts.lineColor, frustumWidth, frustumHeight, true)
-            allEdges.push(...edges)
-
-            if (opts.showFills) {
-                const polygons = extractPolygons(mesh, camera, color, frustumWidth, frustumHeight)
-                allPolygons.push(...polygons)
-            }
-        } catch (error) {
-            console.warn(`Failed to extract geometry from mesh:`, error)
-        }
-    }
+    const renderGeometry = collectProjectedGeometry(
+        renderMeshes,
+        context,
+        opts,
+        camera,
+        frustumWidth,
+        frustumHeight,
+        true
+    )
+    const fitGeometry = collectProjectedGeometry(
+        cropMeshes,
+        context,
+        opts,
+        camera,
+        frustumWidth,
+        frustumHeight,
+        true
+    )
 
     // Add door swing arc edges if OperationType is available
     // Use the ACTUAL geometry center for arc calculation to match mesh coordinates
     if (context.openingDirection) {
         const arcEdges = calculateSwingArcEdges(context, camera, frustumWidth, frustumHeight, actualCenter, actualSize, isWidthAlongX)
-        allEdges.push(...arcEdges)
+        renderGeometry.edges.push(...arcEdges)
+        fitGeometry.edges.push(...arcEdges)
     }
 
     activeContext = context
     activeViewType = 'Plan'
 
-    return generateSVGString(allEdges, allPolygons, opts)
+    return generateSVGString(renderGeometry.edges, renderGeometry.polygons, opts, fitGeometry)
 }
 
 /**
@@ -1595,7 +1815,7 @@ function renderPlanFromBoundingBox(
     doorThickness: number,
     doorHeight: number
 ): string {
-    const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
+    const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, wallColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
 
     const padding = 60
     const labelHeight = showLabels ? 80 : 0
@@ -1608,10 +1828,22 @@ function renderPlanFromBoundingBox(
 
     const scale = Math.min(availableWidth / totalWidth, availableHeight / totalDepth)
 
+    const scaledTotalWidth = totalWidth * scale
     const scaledWidth = doorWidth * scale
     const scaledThickness = doorThickness * scale
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledThickness) / 2
+    const wallOffsetX = (svgWidth - scaledTotalWidth) / 2
+
+    let scaledWallThickness = scaledThickness
+    if (context.hostWall?.boundingBox) {
+        const wallSize = context.hostWall.boundingBox.getSize(new THREE.Vector3())
+        const normal = context.normal.clone().normalize()
+        const isNormalAlongX = Math.abs(normal.x) > Math.abs(normal.z)
+        const wallThicknessMeters = isNormalAlongX ? wallSize.x : wallSize.z
+        scaledWallThickness = Math.min(Math.max(wallThicknessMeters * scale, scaledThickness), totalDepth * scale)
+    }
+    const wallOffsetY = offsetY + (scaledThickness - scaledWallThickness) / 2
 
     activeContext = context
     activeViewType = 'Plan'
@@ -1623,6 +1855,10 @@ function renderPlanFromBoundingBox(
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
   <rect width="100%" height="100%" fill="${backgroundColor}"/>
   
+  ${context.hostWall?.boundingBox ? `<!-- Host wall context (cropped to existing plan window) -->
+  <rect x="${wallOffsetX}" y="${wallOffsetY}" width="${scaledTotalWidth}" height="${scaledWallThickness}"
+        fill="${wallColor}" fill-opacity="0.2" stroke="${lineColor}" stroke-width="${lineWidth * 0.6}" opacity="0.6"/>` : ''}
+
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 
         fill="${doorColor}" fill-opacity="0.3" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
