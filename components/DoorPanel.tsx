@@ -95,6 +95,8 @@ export default function DoorPanel({
     showLabels: true,
     fontSize: 14,
     fontFamily: 'Arial',
+    wallRevealSide: 0.12,
+    wallRevealTop: 0.04,
   })
 
   useEffect(() => {
@@ -998,6 +1000,14 @@ export default function DoorPanel({
             <div className="option-row">
               <label>Line Width</label>
               <input type="number" min="0.5" max="5" step="0.5" value={options.lineWidth || 1.5} onChange={(e) => setOptions({ ...options, lineWidth: parseFloat(e.target.value) })} />
+            </div>
+            <div className="option-row">
+              <label>Wall Sides %</label>
+              <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealSide ?? 0.12) * 100)} onChange={(e) => setOptions({ ...options, wallRevealSide: parseFloat(e.target.value) / 100 })} />
+            </div>
+            <div className="option-row">
+              <label>Wall Top %</label>
+              <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealTop ?? 0.04) * 100)} onChange={(e) => setOptions({ ...options, wallRevealTop: parseFloat(e.target.value) / 100 })} />
             </div>
             <div className="option-row checkbox">
               <label>

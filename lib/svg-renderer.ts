@@ -17,6 +17,10 @@ export interface SVGRenderOptions {
     showLabels?: boolean
     fontSize?: number
     fontFamily?: string
+    /** Wall reveal on each side as a fraction of door width (0–0.5, default 0.12 = 12 %) */
+    wallRevealSide?: number
+    /** Wall reveal above the door as a fraction of door height (0–0.5, default 0.04 = 4 %) */
+    wallRevealTop?: number
 }
 
 /** Escape user-derived strings for safe use in SVG text content (prevents XSS) */
@@ -43,6 +47,8 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     showLabels: true,
     fontSize: 14,
     fontFamily: 'Arial',
+    wallRevealSide: 0.12,
+    wallRevealTop: 0.04,
 }
 
 interface ProjectedEdge {
@@ -819,6 +825,8 @@ function generateSVGString(
         fontFamily,
         showLegend,
         showLabels,
+        wallRevealSide,
+        wallRevealTop,
     } = options
 
     const hasDevices = activeContext ? activeContext.nearbyDevices.length > 0 : false
@@ -903,8 +911,8 @@ function generateSVGString(
     // the door geometry and can never be covered by door fills.
     let wallBandsSvg = ''
     if (showFills && hasWall) {
-        const bandW = Math.max(scaledWidth * 0.12, 30)
-        const bandH = Math.max(scaledHeight * 0.04, 20)
+        const bandW = Math.max(scaledWidth * wallRevealSide, 10)
+        const bandH = Math.max(scaledHeight * wallRevealTop, 8)
         const opacity = 0.65
         const stroke = options.lineColor
         const sw = (lineWidth * 0.75).toFixed(2)

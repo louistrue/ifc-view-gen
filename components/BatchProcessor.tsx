@@ -65,6 +65,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     showLabels: true,
     fontSize: 14,
     fontFamily: 'Arial',
+    wallRevealSide: 0.12,
+    wallRevealTop: 0.04,
   })
 
   useEffect(() => {
@@ -522,6 +524,28 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               step="0.1"
               value={options.margin || 0.5}
               onChange={(e) => setOptions({ ...options, margin: parseFloat(e.target.value) })}
+            />
+          </div>
+          <div className="control-group">
+            <label>Wall Sides %</label>
+            <input
+              type="number"
+              min="0"
+              max="50"
+              step="1"
+              value={Math.round((options.wallRevealSide ?? 0.12) * 100)}
+              onChange={(e) => setOptions({ ...options, wallRevealSide: parseFloat(e.target.value) / 100 })}
+            />
+          </div>
+          <div className="control-group">
+            <label>Wall Top %</label>
+            <input
+              type="number"
+              min="0"
+              max="50"
+              step="1"
+              value={Math.round((options.wallRevealTop ?? 0.04) * 100)}
+              onChange={(e) => setOptions({ ...options, wallRevealTop: parseFloat(e.target.value) / 100 })}
             />
           </div>
           <div className="control-group">
