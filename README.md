@@ -91,6 +91,9 @@ npm run start
 Create a `.env.local` file for local development:
 
 ```bash
+# Required in production for Airtable session handling
+SESSION_SECRET=replace_with_a_long_random_string_at_least_32_chars
+
 # Airtable Integration (optional)
 AIRTABLE_TOKEN=your_personal_access_token
 AIRTABLE_BASE_ID=your_base_id

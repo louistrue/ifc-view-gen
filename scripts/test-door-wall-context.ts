@@ -1,8 +1,8 @@
 import * as assert from 'node:assert/strict'
 import * as THREE from 'three'
 import { renderDoorViews, type SVGRenderOptions } from '../lib/svg-renderer'
-import type { DoorContext } from '../lib/door-analyzer'
-import type { ElementInfo } from '../lib/ifc-types'
+import { analyzeDoors, type DoorContext } from '../lib/door-analyzer'
+import type { ElementInfo, LoadedIFCModel } from '../lib/ifc-types'
 
 function createMesh(expressID: number, geometry: THREE.BufferGeometry): THREE.Mesh {
     geometry.computeBoundingBox()
@@ -19,6 +19,20 @@ function createBoxMesh(
     center: THREE.Vector3
 ): THREE.Mesh {
     const geometry = new THREE.BoxGeometry(width, height, depth)
+    geometry.translate(center.x, center.y, center.z)
+    return createMesh(expressID, geometry)
+}
+
+function createRotatedBoxMesh(
+    expressID: number,
+    width: number,
+    height: number,
+    depth: number,
+    center: THREE.Vector3,
+    rotationY: number
+): THREE.Mesh {
+    const geometry = new THREE.BoxGeometry(width, height, depth)
+    geometry.rotateY(rotationY)
     geometry.translate(center.x, center.y, center.z)
     return createMesh(expressID, geometry)
 }
@@ -142,6 +156,41 @@ async function main() {
             `${viewName} door fill geometry changed when wall context was added`
         )
     }
+
+    const shiftedBoundsContext = buildContext(false)
+    shiftedBoundsContext.center = shiftedBoundsContext.center.clone().add(new THREE.Vector3(5, 0, 0))
+    shiftedBoundsContext.door.boundingBox = shiftedBoundsContext.door.boundingBox!.clone().translate(new THREE.Vector3(5, 0, 0))
+
+    const baselineFront = await renderDoorViews(withoutWall, options)
+    const shiftedFront = await renderDoorViews(shiftedBoundsContext, options)
+
+    for (const viewName of ['front', 'back'] as const) {
+        const baselineDoorPaths = extractPathDataByFill(baselineFront[viewName], options.doorColor!)
+        const shiftedDoorPaths = extractPathDataByFill(shiftedFront[viewName], options.doorColor!)
+        assert.deepEqual(
+            shiftedDoorPaths,
+            baselineDoorPaths,
+            `${viewName} elevation changed when only fragment-space bounds were shifted`
+        )
+    }
+
+    const rotatedDoorMesh = createRotatedBoxMesh(10, 1, 2.1, 0.12, new THREE.Vector3(0, 1.05, 0), Math.PI / 4)
+    const rotatedDoor = makeElement(10, 'IFCDOOR', rotatedDoorMesh)
+    const rotatedModel: LoadedIFCModel = {
+        group: new THREE.Group(),
+        elements: [rotatedDoor],
+        modelID: 0,
+        api: null,
+    }
+    ;(rotatedModel as LoadedIFCModel & { fragmentsModel: { getItemsData: () => Promise<unknown[]> } }).fragmentsModel = {
+        getItemsData: async () => [],
+    }
+    const [rotatedContext] = await analyzeDoors(rotatedModel)
+    assert.ok(rotatedContext, 'Rotated door should produce a door context')
+
+    const expectedNormal = new THREE.Vector3(Math.SQRT1_2, 0, Math.SQRT1_2)
+    const normalAlignment = Math.abs(rotatedContext.normal.clone().normalize().dot(expectedNormal))
+    assert.ok(normalAlignment > 0.95, `Rotated door normal should follow mesh orientation, got ${rotatedContext.normal.toArray().join(', ')}`)
 
     console.log('Door wall context SVG test passed')
 }

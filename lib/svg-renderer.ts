@@ -1112,15 +1112,20 @@ function renderElevationFromMeshes(
     }
 
     const door = context.door
-    const bbox = door.boundingBox!
-    const size = bbox.getSize(new THREE.Vector3())
-    const center = context.center.clone()
+    const combinedBBox = getMeshesBoundingBox(fitMeshes)
+    const hasGeometryBounds = !combinedBBox.isEmpty()
+    const actualCenter = hasGeometryBounds
+        ? combinedBBox.getCenter(new THREE.Vector3())
+        : context.center.clone()
+    const actualSize = hasGeometryBounds
+        ? combinedBBox.getSize(new THREE.Vector3())
+        : door.boundingBox!.getSize(new THREE.Vector3())
     const normal = context.normal.clone().normalize()
 
     // Determine view dimensions
     const isNormalAlongX = Math.abs(normal.x) > Math.abs(normal.z)
-    const viewWidth = isNormalAlongX ? size.z : size.x
-    const viewHeight = size.y
+    const viewWidth = isNormalAlongX ? actualSize.z : actualSize.x
+    const viewHeight = actualSize.y
     const margin = Math.max(opts.margin, 0.25)
     const width = viewWidth + margin * 2
     const height = viewHeight + margin * 2
@@ -1132,9 +1137,9 @@ function renderElevationFromMeshes(
 
     const distance = Math.max(width, height) * 2
     const viewDir = isBackView ? normal.clone().negate() : normal.clone()
-    camera.position.copy(center).add(viewDir.multiplyScalar(distance))
+    camera.position.copy(actualCenter).add(viewDir.multiplyScalar(distance))
     camera.up.set(0, 1, 0)
-    camera.lookAt(center)
+    camera.lookAt(actualCenter)
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
 

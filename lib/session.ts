@@ -12,12 +12,18 @@ export const defaultSession: SessionData = {
   isAuthenticated: false,
 };
 
-if (!process.env.SESSION_SECRET) {
+const sessionSecret =
+  process.env.SESSION_SECRET ??
+  (process.env.NODE_ENV === 'production'
+    ? undefined
+    : 'dev-only-session-secret-please-change-in-production');
+
+if (!sessionSecret) {
   throw new Error('SESSION_SECRET environment variable is not set. Cannot start the application.');
 }
 
 export const sessionOptions: SessionOptions = {
-  password: process.env.SESSION_SECRET,
+  password: sessionSecret,
   cookieName: 'door-view-creator-session',
   cookieOptions: {
     secure: process.env.NODE_ENV === 'production',

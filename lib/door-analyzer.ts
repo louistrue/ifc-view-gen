@@ -375,56 +375,142 @@ function isElectricalDeviceType(typeName: string): boolean {
     )
 }
 
-/**
- * Calculate the normal vector of an element based on mesh rotation (preferred) or bounding box
- * The element face normal is along the SMALLEST horizontal dimension (thickness)
- * This is the direction we want to look FROM to see the element front
- */
-function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
-    // Prioritize world-space bounding box from Fragments getBoxes() API
-    // This is the most reliable source since it's already in world space
+const elementNormalCache = new WeakMap<ElementInfo, THREE.Vector3>()
+
+function getBoundingBoxNormalGuess(element: ElementInfo): THREE.Vector3 | null {
     if (element.boundingBox) {
         const size = element.boundingBox.getSize(new THREE.Vector3())
+        return size.x < size.z
+            ? new THREE.Vector3(1, 0, 0)
+            : new THREE.Vector3(0, 0, 1)
+    }
 
-        // Thickness is the smallest horizontal dimension (X or Z)
-        // Y is height (vertical), so we compare X and Z
-        if (size.x < size.z) {
-            return new THREE.Vector3(1, 0, 0)
-        } else {
-            return new THREE.Vector3(0, 0, 1)
+    if (element.mesh?.geometry) {
+        if (!element.mesh.geometry.boundingBox) element.mesh.geometry.computeBoundingBox()
+        if (element.mesh.geometry.boundingBox) {
+            const size = element.mesh.geometry.boundingBox.getSize(new THREE.Vector3())
+            return size.x < size.z
+                ? new THREE.Vector3(1, 0, 0)
+                : new THREE.Vector3(0, 0, 1)
         }
     }
 
-    // Fallback: Try to use mesh geometry if bounding box not available
-    if (element.mesh) {
-        const mesh = element.mesh
+    return null
+}
+
+function estimateNormalFromMeshes(meshes: THREE.Mesh[], fallbackGuess: THREE.Vector3 | null): THREE.Vector3 | null {
+    let xx = 0
+    let xz = 0
+    let zz = 0
+
+    const p1 = new THREE.Vector3()
+    const p2 = new THREE.Vector3()
+    const p3 = new THREE.Vector3()
+    const edge1 = new THREE.Vector3()
+    const edge2 = new THREE.Vector3()
+    const faceNormal = new THREE.Vector3()
+    const horizontal = new THREE.Vector2()
+
+    const accumulateTriangle = (a: number, b: number, c: number, positions: THREE.BufferAttribute, worldMatrix: THREE.Matrix4) => {
+        p1.set(positions.getX(a), positions.getY(a), positions.getZ(a)).applyMatrix4(worldMatrix)
+        p2.set(positions.getX(b), positions.getY(b), positions.getZ(b)).applyMatrix4(worldMatrix)
+        p3.set(positions.getX(c), positions.getY(c), positions.getZ(c)).applyMatrix4(worldMatrix)
+
+        edge1.subVectors(p2, p1)
+        edge2.subVectors(p3, p1)
+        faceNormal.crossVectors(edge1, edge2)
+
+        const doubledArea = faceNormal.length()
+        if (doubledArea < 1e-8) return
+
+        faceNormal.divideScalar(doubledArea)
+        horizontal.set(faceNormal.x, faceNormal.z)
+        const horizontalLength = horizontal.length()
+        if (horizontalLength < 1e-4) return
+
+        horizontal.divideScalar(horizontalLength)
+        const weight = doubledArea * (1 - Math.abs(faceNormal.y))
+        xx += weight * horizontal.x * horizontal.x
+        xz += weight * horizontal.x * horizontal.y
+        zz += weight * horizontal.y * horizontal.y
+    }
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.attributes?.position
+        if (!positions || positions.count < 3) continue
+
         mesh.updateMatrixWorld(true)
+        const worldMatrix = mesh.matrixWorld
+        const indices = geometry.index
 
-        if (mesh.geometry) {
-            if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
-            const geom = mesh.geometry
-            if (geom.boundingBox) {
-                const localSize = geom.boundingBox.getSize(new THREE.Vector3())
-
-                // Determine Local Normal Axis
-                // Assume Y is Up (Height). 
-                // Thickness is min(X, Z).
-                let localNormal = new THREE.Vector3(0, 0, 1) // Default Z
-                if (localSize.x < localSize.z) {
-                    localNormal.set(1, 0, 0)
-                }
-
-                // Transform Local Normal to World Normal using Mesh Rotation
-                const rotationMatrix = new THREE.Matrix4().extractRotation(mesh.matrixWorld)
-                const worldNormal = localNormal.applyMatrix4(rotationMatrix).normalize()
-
-                return worldNormal
+        if (indices) {
+            for (let i = 0; i < indices.count; i += 3) {
+                accumulateTriangle(indices.getX(i), indices.getX(i + 1), indices.getX(i + 2), positions, worldMatrix)
+            }
+        } else {
+            for (let i = 0; i < positions.count; i += 3) {
+                accumulateTriangle(i, i + 1, i + 2, positions, worldMatrix)
             }
         }
     }
 
-    // Default fallback
-    return new THREE.Vector3(0, 0, 1)
+    const trace = xx + zz
+    if (trace < 1e-8) return null
+
+    const det = xx * zz - xz * xz
+    const disc = Math.sqrt(Math.max((trace * trace) / 4 - det, 0))
+    const lambda = trace / 2 + disc
+
+    let axisX = 1
+    let axisZ = 0
+    if (Math.abs(xz) > 1e-8 || Math.abs(lambda - zz) > 1e-8) {
+        axisX = lambda - zz
+        axisZ = xz
+    } else if (zz > xx) {
+        axisX = 0
+        axisZ = 1
+    }
+
+    const axis = new THREE.Vector3(axisX, 0, axisZ).normalize()
+    if (!Number.isFinite(axis.x) || !Number.isFinite(axis.z) || axis.lengthSq() < 0.5) {
+        return null
+    }
+
+    if (fallbackGuess && axis.dot(fallbackGuess) < 0) {
+        axis.negate()
+    }
+
+    return axis
+}
+
+/**
+ * Calculate the normal vector of an element from its actual mesh geometry.
+ * The element face normal is along the SMALLEST horizontal dimension (thickness)
+ * This is the direction we want to look FROM to see the element front
+ */
+function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
+    const cached = elementNormalCache.get(element)
+    if (cached) {
+        return cached.clone()
+    }
+
+    const fallbackGuess = getBoundingBoxNormalGuess(element)
+    const meshes = element.meshes && element.meshes.length > 0
+        ? element.meshes
+        : element.mesh
+            ? [element.mesh]
+            : []
+
+    const geometryNormal = estimateNormalFromMeshes(meshes, fallbackGuess)
+    if (geometryNormal) {
+        elementNormalCache.set(element, geometryNormal.clone())
+        return geometryNormal
+    }
+
+    const fallback = fallbackGuess ?? new THREE.Vector3(0, 0, 1)
+    elementNormalCache.set(element, fallback.clone())
+    return fallback
 }
 
 /**

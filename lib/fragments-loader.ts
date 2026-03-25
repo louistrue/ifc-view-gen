@@ -10,8 +10,9 @@ import { extractDoorTypes } from './ifc-loader';
 
 // IndexedDB configuration for fragment binary caching
 const DB_NAME = 'Fragments_Binary_Cache';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'fragmentBinaries';
+const CACHE_FORMAT_VERSION = 'fragments-v2';
 
 // Mapping from IFC class names to web-ifc type codes
 const IFC_TYPE_CODE_MAP: Record<string, number> = {
@@ -135,7 +136,7 @@ async function generateFileId(file: File): Promise<string> {
   const hashBuffer = await crypto.subtle.digest('SHA-256', buffer.slice(0, 100000));
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  return `${file.name}_${file.size}_${hashHex.substring(0, 16)}`;
+  return `${CACHE_FORMAT_VERSION}_${file.name}_${file.size}_${hashHex.substring(0, 16)}`;
 }
 
 /**
@@ -511,12 +512,16 @@ export async function loadIFCModelWithFragments(
   const manager = await getFragmentsManager();
   const modelId = `model_${Date.now()}`;
 
+  console.time('[Fragments] manager.load');
   const fragmentsModel = await manager.load(fragmentBytes, { modelId });
+  console.timeEnd('[Fragments] manager.load');
 
   onProgress?.({ percent: 80, stage: 'Optimizing rendering...' });
 
   // Update the manager to prepare for rendering
+  console.time('[Fragments] manager.update');
   await manager.update(true);
+  console.timeEnd('[Fragments] manager.update');
 
   onProgress?.({ percent: 85, stage: 'Extracting metadata...' });
 
