@@ -39,6 +39,9 @@ export default function DoorPanel({
   onComplete,
   onShowSingleDoorReady,
 }: DoorPanelProps) {
+  const DEFAULT_WALL_COLOR = '#5B7DB1'
+  const LEGACY_WALL_COLORS = new Set(['#888888', '#555555'])
+
   // Filter state
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedStoreys, setSelectedStoreys] = useState<Set<string>>(new Set())
@@ -83,7 +86,7 @@ export default function DoorPanel({
     height: 1000,
     margin: 0.5,
     doorColor: '#333333',
-    wallColor: '#888888',
+    wallColor: '#5B7DB1',
     deviceColor: '#CC0000',
     lineWidth: 1.5,
     lineColor: '#000000',
@@ -93,6 +96,15 @@ export default function DoorPanel({
     fontSize: 14,
     fontFamily: 'Arial',
   })
+
+  useEffect(() => {
+    setOptions((current) => {
+      if (!current.wallColor || LEGACY_WALL_COLORS.has(current.wallColor)) {
+        return { ...current, wallColor: DEFAULT_WALL_COLOR }
+      }
+      return current
+    })
+  }, [])
 
   // Build additive facet counts: each facet is constrained by the other active facet(s).
   const availableStoreys = useMemo(() => {
@@ -391,6 +403,20 @@ export default function DoorPanel({
         } else {
           svg = await renderDoorElevationSVG(context, view === 'back', options)
         }
+
+        console.info('[door-preview-debug]', {
+          source: 'DoorPanel',
+          doorId: context.doorId,
+          view,
+          wallColor: options.wallColor,
+          doorColor: options.doorColor,
+          hostWallId: context.hostWall?.expressID ?? null,
+          wallBoundingBox: Boolean(context.hostWall?.boundingBox),
+          detailedWallMeshes: context.detailedGeometry?.wallMeshes.length ?? 0,
+          svgIncludesWallColor: Boolean(options.wallColor && svg.includes(options.wallColor)),
+          svgWallFillCount: options.wallColor ? (svg.match(new RegExp(options.wallColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
+        })
+
         setModalImage({ svg, doorId: context.doorId, view })
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to render SVG')
@@ -963,7 +989,7 @@ export default function DoorPanel({
             </div>
             <div className="option-row">
               <label>Wall</label>
-              <input type="color" value={options.wallColor || '#888888'} onChange={(e) => setOptions({ ...options, wallColor: e.target.value })} />
+              <input type="color" value={options.wallColor || '#5B7DB1'} onChange={(e) => setOptions({ ...options, wallColor: e.target.value })} />
             </div>
             <div className="option-row">
               <label>Device</label>

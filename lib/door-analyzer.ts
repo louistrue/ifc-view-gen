@@ -3,11 +3,25 @@ import type { ElementInfo, LoadedIFCModel } from './ifc-types'
 import * as WebIFC from 'web-ifc'
 import type { DoorCsetStandardCHData } from './ifc-loader'
 
+export interface DoorViewFrame {
+    origin: THREE.Vector3
+    widthAxis: THREE.Vector3
+    depthAxis: THREE.Vector3
+    upAxis: THREE.Vector3
+    semanticFacing: THREE.Vector3
+    width: number
+    height: number
+    thickness: number
+}
+
 export interface DoorContext {
     door: ElementInfo
     wall: ElementInfo | null
     hostWall: ElementInfo | null
     nearbyDevices: ElementInfo[]
+    geometricNormal: THREE.Vector3
+    semanticFacing: THREE.Vector3
+    viewFrame: DoorViewFrame
     normal: THREE.Vector3
     center: THREE.Vector3
     doorId: string
@@ -375,56 +389,254 @@ function isElectricalDeviceType(typeName: string): boolean {
     )
 }
 
-/**
- * Calculate the normal vector of an element based on mesh rotation (preferred) or bounding box
- * The element face normal is along the SMALLEST horizontal dimension (thickness)
- * This is the direction we want to look FROM to see the element front
- */
-function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
-    // Prioritize world-space bounding box from Fragments getBoxes() API
-    // This is the most reliable source since it's already in world space
+const elementNormalCache = new WeakMap<ElementInfo, THREE.Vector3>()
+
+function getBoundingBoxNormalGuess(element: ElementInfo): THREE.Vector3 | null {
     if (element.boundingBox) {
         const size = element.boundingBox.getSize(new THREE.Vector3())
+        return size.x < size.z
+            ? new THREE.Vector3(1, 0, 0)
+            : new THREE.Vector3(0, 0, 1)
+    }
 
-        // Thickness is the smallest horizontal dimension (X or Z)
-        // Y is height (vertical), so we compare X and Z
-        if (size.x < size.z) {
-            return new THREE.Vector3(1, 0, 0)
-        } else {
-            return new THREE.Vector3(0, 0, 1)
+    if (element.mesh?.geometry) {
+        if (!element.mesh.geometry.boundingBox) element.mesh.geometry.computeBoundingBox()
+        if (element.mesh.geometry.boundingBox) {
+            const size = element.mesh.geometry.boundingBox.getSize(new THREE.Vector3())
+            return size.x < size.z
+                ? new THREE.Vector3(1, 0, 0)
+                : new THREE.Vector3(0, 0, 1)
         }
     }
 
-    // Fallback: Try to use mesh geometry if bounding box not available
-    if (element.mesh) {
-        const mesh = element.mesh
+    return null
+}
+
+function estimateNormalFromMeshes(meshes: THREE.Mesh[], fallbackGuess: THREE.Vector3 | null): THREE.Vector3 | null {
+    let xx = 0
+    let xz = 0
+    let zz = 0
+
+    const p1 = new THREE.Vector3()
+    const p2 = new THREE.Vector3()
+    const p3 = new THREE.Vector3()
+    const edge1 = new THREE.Vector3()
+    const edge2 = new THREE.Vector3()
+    const faceNormal = new THREE.Vector3()
+    const horizontal = new THREE.Vector2()
+
+    const accumulateTriangle = (
+        a: number,
+        b: number,
+        c: number,
+        positions: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
+        worldMatrix: THREE.Matrix4
+    ) => {
+        p1.set(positions.getX(a), positions.getY(a), positions.getZ(a)).applyMatrix4(worldMatrix)
+        p2.set(positions.getX(b), positions.getY(b), positions.getZ(b)).applyMatrix4(worldMatrix)
+        p3.set(positions.getX(c), positions.getY(c), positions.getZ(c)).applyMatrix4(worldMatrix)
+
+        edge1.subVectors(p2, p1)
+        edge2.subVectors(p3, p1)
+        faceNormal.crossVectors(edge1, edge2)
+
+        const doubledArea = faceNormal.length()
+        if (doubledArea < 1e-8) return
+
+        faceNormal.divideScalar(doubledArea)
+        horizontal.set(faceNormal.x, faceNormal.z)
+        const horizontalLength = horizontal.length()
+        if (horizontalLength < 1e-4) return
+
+        horizontal.divideScalar(horizontalLength)
+        const weight = doubledArea * (1 - Math.abs(faceNormal.y))
+        xx += weight * horizontal.x * horizontal.x
+        xz += weight * horizontal.x * horizontal.y
+        zz += weight * horizontal.y * horizontal.y
+    }
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.attributes?.position
+        if (!positions || positions.count < 3) continue
+
         mesh.updateMatrixWorld(true)
+        const worldMatrix = mesh.matrixWorld
+        const indices = geometry.index
 
-        if (mesh.geometry) {
-            if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
-            const geom = mesh.geometry
-            if (geom.boundingBox) {
-                const localSize = geom.boundingBox.getSize(new THREE.Vector3())
-
-                // Determine Local Normal Axis
-                // Assume Y is Up (Height). 
-                // Thickness is min(X, Z).
-                let localNormal = new THREE.Vector3(0, 0, 1) // Default Z
-                if (localSize.x < localSize.z) {
-                    localNormal.set(1, 0, 0)
-                }
-
-                // Transform Local Normal to World Normal using Mesh Rotation
-                const rotationMatrix = new THREE.Matrix4().extractRotation(mesh.matrixWorld)
-                const worldNormal = localNormal.applyMatrix4(rotationMatrix).normalize()
-
-                return worldNormal
+        if (indices) {
+            for (let i = 0; i < indices.count; i += 3) {
+                accumulateTriangle(indices.getX(i), indices.getX(i + 1), indices.getX(i + 2), positions, worldMatrix)
+            }
+        } else {
+            for (let i = 0; i < positions.count; i += 3) {
+                accumulateTriangle(i, i + 1, i + 2, positions, worldMatrix)
             }
         }
     }
 
-    // Default fallback
-    return new THREE.Vector3(0, 0, 1)
+    const trace = xx + zz
+    if (trace < 1e-8) return null
+
+    const det = xx * zz - xz * xz
+    const disc = Math.sqrt(Math.max((trace * trace) / 4 - det, 0))
+    const lambda = trace / 2 + disc
+
+    let axisX = 1
+    let axisZ = 0
+    if (Math.abs(xz) > 1e-8 || Math.abs(lambda - zz) > 1e-8) {
+        axisX = lambda - zz
+        axisZ = xz
+    } else if (zz > xx) {
+        axisX = 0
+        axisZ = 1
+    }
+
+    const axis = new THREE.Vector3(axisX, 0, axisZ).normalize()
+    if (!Number.isFinite(axis.x) || !Number.isFinite(axis.z) || axis.lengthSq() < 0.5) {
+        return null
+    }
+
+    if (fallbackGuess && axis.dot(fallbackGuess) < 0) {
+        axis.negate()
+    }
+
+    return axis
+}
+
+/**
+ * Calculate the horizontal normal vector of an element from mesh geometry when possible.
+ * The element face normal is along the SMALLEST horizontal dimension (thickness)
+ */
+function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
+    const cached = elementNormalCache.get(element)
+    if (cached) {
+        return cached.clone()
+    }
+
+    const fallbackGuess = getBoundingBoxNormalGuess(element)
+    const meshes = element.meshes && element.meshes.length > 0
+        ? element.meshes
+        : element.mesh
+            ? [element.mesh]
+            : []
+
+    const geometryNormal = estimateNormalFromMeshes(meshes, fallbackGuess)
+    if (geometryNormal) {
+        elementNormalCache.set(element, geometryNormal.clone())
+        return geometryNormal
+    }
+
+    const fallback = fallbackGuess ?? new THREE.Vector3(0, 0, 1)
+    elementNormalCache.set(element, fallback.clone())
+    return fallback
+}
+
+function getBoxCorners(box: THREE.Box3): THREE.Vector3[] {
+    return [
+        new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ]
+}
+
+function measureMeshesInFrame(
+    meshes: THREE.Mesh[],
+    widthAxis: THREE.Vector3,
+    depthAxis: THREE.Vector3,
+    upAxis: THREE.Vector3
+): { origin: THREE.Vector3; width: number; thickness: number; height: number } | null {
+    let minWidth = Infinity
+    let maxWidth = -Infinity
+    let minDepth = Infinity
+    let maxDepth = -Infinity
+    let minHeight = Infinity
+    let maxHeight = -Infinity
+    const worldCorner = new THREE.Vector3()
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        if (!geometry) continue
+
+        if (!geometry.boundingBox) geometry.computeBoundingBox()
+        if (!geometry.boundingBox) continue
+
+        mesh.updateMatrixWorld(true)
+        const corners = getBoxCorners(geometry.boundingBox)
+        for (const corner of corners) {
+            worldCorner.copy(corner).applyMatrix4(mesh.matrixWorld)
+            const widthProjection = worldCorner.dot(widthAxis)
+            const depthProjection = worldCorner.dot(depthAxis)
+            const heightProjection = worldCorner.dot(upAxis)
+
+            minWidth = Math.min(minWidth, widthProjection)
+            maxWidth = Math.max(maxWidth, widthProjection)
+            minDepth = Math.min(minDepth, depthProjection)
+            maxDepth = Math.max(maxDepth, depthProjection)
+            minHeight = Math.min(minHeight, heightProjection)
+            maxHeight = Math.max(maxHeight, heightProjection)
+        }
+    }
+
+    if (minWidth === Infinity) {
+        return null
+    }
+
+    const widthCenter = (minWidth + maxWidth) / 2
+    const depthCenter = (minDepth + maxDepth) / 2
+    const heightCenter = (minHeight + maxHeight) / 2
+
+    const origin = widthAxis.clone().multiplyScalar(widthCenter)
+        .add(depthAxis.clone().multiplyScalar(depthCenter))
+        .add(upAxis.clone().multiplyScalar(heightCenter))
+
+    return {
+        origin,
+        width: maxWidth - minWidth,
+        thickness: maxDepth - minDepth,
+        height: maxHeight - minHeight,
+    }
+}
+
+function buildDoorViewFrame(door: ElementInfo, semanticFacing: THREE.Vector3): DoorViewFrame {
+    const upAxis = new THREE.Vector3(0, 1, 0)
+    const depthAxis = semanticFacing.clone().setY(0).normalize()
+    const widthAxis = new THREE.Vector3().crossVectors(upAxis, depthAxis).normalize()
+    const measured = measureMeshesInFrame(collectMeshesFromElement(door), widthAxis, depthAxis, upAxis)
+
+    if (measured) {
+        return {
+            origin: measured.origin,
+            widthAxis,
+            depthAxis,
+            upAxis,
+            semanticFacing: depthAxis.clone(),
+            width: measured.width,
+            height: measured.height,
+            thickness: measured.thickness,
+        }
+    }
+
+    const boundingBox = door.boundingBox ?? new THREE.Box3().setFromObject(door.mesh)
+    const size = boundingBox.getSize(new THREE.Vector3())
+    const origin = boundingBox.getCenter(new THREE.Vector3())
+    const isDepthAlongX = Math.abs(depthAxis.x) >= Math.abs(depthAxis.z)
+
+    return {
+        origin,
+        widthAxis,
+        depthAxis,
+        upAxis,
+        semanticFacing: depthAxis.clone(),
+        width: isDepthAlongX ? size.z : size.x,
+        height: size.y,
+        thickness: isDepthAlongX ? size.x : size.z,
+    }
 }
 
 /**
@@ -772,37 +984,30 @@ export async function analyzeDoors(
             continue
         }
 
-        // Default normal from door
-        let normal = calculateElementNormal(door)
+        // Keep geometric wall-plane alignment separate from semantic export facing.
+        const doorNormal = calculateElementNormal(door)
+        let geometricNormal = doorNormal.clone()
         const hostWall = findHostWall(door, walls, 0.3)
 
-        // IMPROVEMENT: Use Host Wall normal if available and aligned
-        // This ensures the camera aligns with the WALL plane, which is the reference for devices.
         if (hostWall) {
             const wallNormal = calculateElementNormal(hostWall)
-            // Check if wall normal is roughly parallel to door normal (dot > 0.8)
-            // If they are parallel (same direction OR opposite), we might want to align to wall.
-            // But strict parallel check: abs(dot) > 0.8
-            if (Math.abs(normal.dot(wallNormal)) > 0.8) {
-                // Use Wall Normal, but ensure it points in same general direction as Door Normal
-                if (normal.dot(wallNormal) < 0) {
-                    normal = wallNormal.negate()
+            if (Math.abs(doorNormal.dot(wallNormal)) > 0.8) {
+                if (doorNormal.dot(wallNormal) < 0) {
+                    geometricNormal = wallNormal.negate()
                 } else {
-                    normal = wallNormal
+                    geometricNormal = wallNormal
                 }
             }
         }
 
-        // Find devices using the (potentially updated) normal
-        const nearbyDevices = findNearbyDevices(door, devices, normal, 1.0)
+        const semanticFacing = doorNormal.clone()
+        const nearbyDevices = findNearbyDevices(door, devices, geometricNormal, 1.0)
 
         const center = door.boundingBox
             ? door.boundingBox.getCenter(new THREE.Vector3())
             : new THREE.Vector3(0, 0, 0)
+        const viewFrame = buildDoorViewFrame(door, semanticFacing)
 
-        // const normal = calculateDoorNormal(door) // Moved up
-
-        // Use GlobalId for doorId if available, otherwise fallback to ExpressID (no prefix)
         const doorId = door.globalId || String(door.expressID)
 
         // Get opening direction and type name
@@ -822,7 +1027,10 @@ export async function analyzeDoors(
             wall: null, // Legacy field
             hostWall,
             nearbyDevices,
-            normal,
+            geometricNormal,
+            semanticFacing,
+            viewFrame,
+            normal: semanticFacing.clone(),
             center,
             doorId,
             openingDirection,
@@ -840,29 +1048,47 @@ export async function analyzeDoors(
  * Prefers detailed geometry from web-ifc if available, falls back to Fragments geometry
  */
 export function getContextMeshes(context: DoorContext): THREE.Mesh[] {
+    return getDoorMeshes(context, { includeNearbyDevices: true, includeHostWall: false })
+}
+
+export function getDoorMeshes(
+    context: DoorContext,
+    options: { includeNearbyDevices?: boolean; includeHostWall?: boolean } = {}
+): THREE.Mesh[] {
+    const { includeNearbyDevices = false, includeHostWall = false } = options
+
     // Use detailed geometry if available (from web-ifc, high quality)
     if (context.detailedGeometry) {
-        const { doorMeshes, wallMeshes, deviceMeshes } = context.detailedGeometry
-        const totalVerts = [...doorMeshes, ...deviceMeshes].reduce(
-            (sum, m) => sum + (m.geometry?.attributes?.position?.count || 0), 0
-        )
-
-        // Return door meshes + device meshes (not wall - too large for SVG)
-        return [...doorMeshes, ...deviceMeshes]
+        const meshes = [...context.detailedGeometry.doorMeshes]
+        if (includeHostWall) {
+            meshes.push(...context.detailedGeometry.wallMeshes)
+        }
+        if (includeNearbyDevices) {
+            meshes.push(...context.detailedGeometry.deviceMeshes)
+        }
+        return meshes
     }
 
-    // Fallback to Fragments geometry (simplified)
     const meshes: THREE.Mesh[] = []
-    const doorMeshes = collectMeshesFromElement(context.door)
+    meshes.push(...collectMeshesFromElement(context.door))
 
-    meshes.push(...doorMeshes)
+    if (includeHostWall && context.hostWall) {
+        meshes.push(...collectMeshesFromElement(context.hostWall))
+    }
 
-    for (const device of context.nearbyDevices) {
-        const deviceMeshes = collectMeshesFromElement(device)
-        meshes.push(...deviceMeshes)
+    if (includeNearbyDevices) {
+        for (const device of context.nearbyDevices) {
+            meshes.push(...collectMeshesFromElement(device))
+        }
     }
 
     return meshes
+}
+
+export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
+    return getDoorMeshes(context, { includeHostWall: true }).filter(
+        (mesh) => mesh.userData.expressID === context.hostWall?.expressID
+    )
 }
 
 /**

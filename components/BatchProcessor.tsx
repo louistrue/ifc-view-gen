@@ -37,6 +37,9 @@ interface AirtableAuthStatus {
 }
 
 export default function BatchProcessor({ doorContexts, onComplete, modelSource }: BatchProcessorProps) {
+  const DEFAULT_WALL_COLOR = '#5B7DB1'
+  const LEGACY_WALL_COLORS = new Set(['#888888', '#555555'])
+
   const [isProcessing, setIsProcessing] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [progress, setProgress] = useState(0)
@@ -53,7 +56,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     height: 1000,
     margin: 0.5,
     doorColor: '#333333',
-    wallColor: '#888888',
+    wallColor: '#5B7DB1',
     deviceColor: '#CC0000',
     lineWidth: 1.5,
     lineColor: '#000000',
@@ -63,6 +66,15 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     fontSize: 14,
     fontFamily: 'Arial',
   })
+
+  useEffect(() => {
+    setOptions((current) => {
+      if (!current.wallColor || LEGACY_WALL_COLORS.has(current.wallColor)) {
+        return { ...current, wallColor: DEFAULT_WALL_COLOR }
+      }
+      return current
+    })
+  }, [])
 
   // Determine which doors to process based on mode
   const doorsToProcess = useMemo(() => {
@@ -327,6 +339,20 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         } else {
           svg = await renderDoorElevationSVG(context, view === 'back', options)
         }
+
+        console.info('[door-preview-debug]', {
+          source: 'BatchProcessor',
+          doorId: context.doorId,
+          view,
+          wallColor: options.wallColor,
+          doorColor: options.doorColor,
+          hostWallId: context.hostWall?.expressID ?? null,
+          wallBoundingBox: Boolean(context.hostWall?.boundingBox),
+          detailedWallMeshes: context.detailedGeometry?.wallMeshes.length ?? 0,
+          svgIncludesWallColor: Boolean(options.wallColor && svg.includes(options.wallColor)),
+          svgWallFillCount: options.wallColor ? (svg.match(new RegExp(options.wallColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
+        })
+
         setModalImage({ svg, doorId: context.doorId, view })
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to render SVG')
@@ -456,7 +482,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             <label>Wall Color</label>
             <input
               type="color"
-              value={options.wallColor || '#555555'}
+              value={options.wallColor || '#5B7DB1'}
               onChange={(e) => setOptions({ ...options, wallColor: e.target.value })}
             />
           </div>
