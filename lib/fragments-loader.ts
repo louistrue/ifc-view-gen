@@ -380,6 +380,12 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
             }
 
             const primaryMesh = meshes[0];
+            const placementYAxis = transforms && transforms.length > 0
+              ? new THREE.Vector3().setFromMatrixColumn(transforms[0], 1).setY(0)
+              : null;
+            const normalizedPlacementYAxis = placementYAxis && placementYAxis.lengthSq() > 1e-8
+              ? placementYAxis.normalize()
+              : undefined;
 
             // Use world-space bounding box from Fragments API (proper way!)
             // This box is already correctly positioned and transformed in world space
@@ -395,6 +401,7 @@ async function extractMetadata(fragmentsModel: FragmentsModel, filterCategories:
               meshes: meshes.length > 0 ? meshes : undefined,
               boundingBox,
               globalId,
+              placementYAxis: normalizedPlacementYAxis?.clone(),
             };
 
             // Store elementInfo in mesh userData for later lookup

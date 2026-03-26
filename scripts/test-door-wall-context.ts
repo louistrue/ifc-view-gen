@@ -57,12 +57,14 @@ async function buildContext(options?: {
     wallThickness?: number
     rotationY?: number
     openingDirection?: string
+    placementYAxis?: THREE.Vector3
 }): Promise<DoorContext> {
     const {
         includeWall = true,
         wallThickness = 0.24,
         rotationY = 0,
         openingDirection = 'SINGLE_SWING_LEFT',
+        placementYAxis,
     } = options ?? {}
 
     const doorCenter = new THREE.Vector3(0, 1.05, 0)
@@ -79,6 +81,9 @@ async function buildContext(options?: {
     const deviceMesh = createBoxMesh(3, 0.12, 0.12, 0.08, deviceCenter)
 
     const door = makeElement(1, 'IFCDOOR', doorMesh)
+    if (placementYAxis) {
+        door.placementYAxis = placementYAxis.clone().setY(0).normalize()
+    }
     const elements: ElementInfo[] = [door]
     let hostWall: ElementInfo | null = null
 
@@ -283,6 +288,30 @@ function getLongestDashedGuide(svg: string): { x1: number; y1: number; x2: numbe
     return bestLine
 }
 
+function getLargestWallRectY(svg: string, fill: string): number | null {
+    const rectTags = svg.match(/<rect\b[^>]*>/g) || []
+    let bestArea = -Infinity
+    let bestY: number | null = null
+
+    for (const rectTag of rectTags) {
+        const rectFill = rectTag.match(/\bfill="([^"]+)"/)?.[1]
+        if (rectFill !== fill) continue
+
+        const width = Number.parseFloat(rectTag.match(/\bwidth="([^"]+)"/)?.[1] || 'NaN')
+        const height = Number.parseFloat(rectTag.match(/\bheight="([^"]+)"/)?.[1] || 'NaN')
+        const y = Number.parseFloat(rectTag.match(/\by="([^"]+)"/)?.[1] || 'NaN')
+        const area = width * height
+
+        if (!Number.isFinite(area) || !Number.isFinite(y)) continue
+        if (area > bestArea) {
+            bestArea = area
+            bestY = y
+        }
+    }
+
+    return bestY
+}
+
 async function main() {
     const options: SVGRenderOptions = {
         width: 1000,
@@ -337,21 +366,93 @@ async function main() {
     const widthAlignment = Math.abs(rotatedContext.viewFrame.widthAxis.clone().normalize().dot(expectedWidthAxis))
     assert.ok(widthAlignment > 0.95, `Rotated width axis should remain orthogonal to facing, got ${rotatedContext.viewFrame.widthAxis.toArray().join(', ')}`)
 
-    const leftPlan = (await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_LEFT' }), options)).plan
-    const rightPlan = (await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_RIGHT' }), options)).plan
-    const leftGuide = getLongestDashedGuide(leftPlan)
+    // ── Plan view layout checks ───────────────────────────────────────────────
+    // Default synthetic test setup opens downward. If the IFC ObjectPlacement local +Y
+    // axis is reversed, the plan arc should flip upward and the wall bands should move
+    // to the bottom with the door slice.
+
+    const leftSwingCtx  = await buildContext({ includeWall: true,  openingDirection: 'SINGLE_SWING_LEFT'  })
+    const rightSwingCtx = await buildContext({ includeWall: true,  openingDirection: 'SINGLE_SWING_RIGHT' })
+    const bothSwingCtx  = await buildContext({ includeWall: true,  openingDirection: 'DOUBLE_SWING'       })
+    const slidingCtx    = await buildContext({ includeWall: true,  openingDirection: 'SLIDING_TO_LEFT'    })
+    const rot45Ctx      = await buildContext({ includeWall: true,  openingDirection: 'SINGLE_SWING_LEFT', rotationY: Math.PI / 4 })
+    const upwardArcCtx  = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_LEFT',
+        placementYAxis: new THREE.Vector3(0, 0, -1),
+    })
+
+    const leftPlanViews  = await renderDoorViews(leftSwingCtx,  options)
+    const rightPlanViews = await renderDoorViews(rightSwingCtx, options)
+    const bothPlanViews  = await renderDoorViews(bothSwingCtx,  options)
+    const slidingViews   = await renderDoorViews(slidingCtx,    options)
+    const rot45Views     = await renderDoorViews(rot45Ctx,      options)
+    const upwardArcViews = await renderDoorViews(upwardArcCtx,  options)
+
+    const leftPlan   = leftPlanViews.plan
+    const rightPlan  = rightPlanViews.plan
+    const bothPlan   = bothPlanViews.plan
+    const slidingPlan = slidingViews.plan
+    const rot45Plan  = rot45Views.plan
+    const upwardArcPlan = upwardArcViews.plan
+
+    const leftGuide  = getLongestDashedGuide(leftPlan)
     const rightGuide = getLongestDashedGuide(rightPlan)
+    const rotatedGuide = getLongestDashedGuide(rot45Plan)
+    const upwardGuide = getLongestDashedGuide(upwardArcPlan)
     const planBounds = getRenderedContentBounds(leftPlan)
 
-    assert.ok(leftGuide, 'Left swing plan should include a dashed open-position guide')
+    assert.ok(leftGuide,  'Left swing plan should include a dashed open-position guide')
     assert.ok(rightGuide, 'Right swing plan should include a dashed open-position guide')
+    assert.equal(rotatedGuide, null, 'Rotated plan should not render a symbolic swing guide')
+    assert.ok(upwardGuide, 'IFC-reversed placement should still include a dashed open-position guide')
     assert.ok(planBounds, 'Plan view should contain rendered geometry')
     assert.ok(planBounds.maxX - planBounds.minX > 250, 'Plan view geometry should occupy a substantial width')
     assert.ok(planBounds.maxY - planBounds.minY > 250, 'Plan view geometry should occupy a substantial height')
-    assert.ok(leftGuide.x1 < options.width! / 2, 'Left swing guide should originate from the left hinge side')
+
+    // Hinge origin side
+    assert.ok(leftGuide.x1  < options.width! / 2, 'Left swing guide should originate from the left hinge side')
     assert.ok(rightGuide.x1 > options.width! / 2, 'Right swing guide should originate from the right hinge side')
-    assert.ok(leftGuide.y2 < leftGuide.y1, 'Left swing guide should open upward in the plan frame')
-    assert.ok(rightGuide.y2 < rightGuide.y1, 'Right swing guide should open upward in the plan frame')
+
+    // Default synthetic setup opens downward: y2 > y1.
+    assert.ok(leftGuide.y2  > leftGuide.y1,  'Left swing arc should open downward (into room)')
+    assert.ok(rightGuide.y2 > rightGuide.y1, 'Right swing arc should open downward (into room)')
+    assert.ok(upwardGuide.y2 < upwardGuide.y1, 'IFC-reversed placement should flip the plan arc upward')
+
+    // Wall bands exist for all plan views
+    for (const [label, planSvg] of [
+        ['left-swing plan', leftPlan],
+        ['right-swing plan', rightPlan],
+        ['double-swing plan', bothPlan],
+        ['sliding plan', slidingPlan],
+        ['rotated-45 plan', rot45Plan],
+        ['upward-arc plan', upwardArcPlan],
+    ] as [string, string][]) {
+        assertCoordinatesWithinBounds(planSvg, options.width!, options.height!)
+        assert.ok(
+            planSvg.includes(`fill="${options.wallColor!}"`),
+            `${label}: wall bands should be present`
+        )
+    }
+
+    // Door cross-section should sit near the TOP of the content (wall-band level)
+    // Wall bands are positioned at offsetY, which equals the door-back-face projected Y.
+    // The first wall-band rect's y attribute should be close to the margin (≤ 200px).
+    const wallBandY = getLargestWallRectY(leftPlan, options.wallColor!)
+    if (wallBandY !== null) {
+        assert.ok(wallBandY <= 200, `Wall bands should be near the top of the canvas (got y=${wallBandY})`)
+    }
+
+    const upwardWallBandY = getLargestWallRectY(upwardArcPlan, options.wallColor!)
+    if (upwardWallBandY !== null) {
+        assert.ok(upwardWallBandY >= 500, `Upward arc wall bands should move near the bottom of the canvas (got y=${upwardWallBandY})`)
+    }
+
+    // The old plan tests (legacy)
+    const leftGuide2  = getLongestDashedGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_LEFT'  }), options)).plan)
+    const rightGuide2 = getLongestDashedGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_RIGHT' }), options)).plan)
+    assert.ok(leftGuide2,  'No-wall left swing plan should include a dashed guide')
+    assert.ok(rightGuide2, 'No-wall right swing plan should include a dashed guide')
 
     const thickWallContext = await buildContext({ includeWall: true, wallThickness: 0.6 })
     const thickWallViews = await renderDoorViews(thickWallContext, options)
@@ -369,6 +470,13 @@ async function main() {
         for (const [view, svg] of Object.entries(withoutWallViews)) {
             writeFileSync(`${dir}/without-wall-${view}.svg`, svg)
         }
+        // Plan-specific fixtures
+        writeFileSync(`${dir}/plan-left-swing.svg`,   leftPlan)
+        writeFileSync(`${dir}/plan-right-swing.svg`,  rightPlan)
+        writeFileSync(`${dir}/plan-double-swing.svg`, bothPlan)
+        writeFileSync(`${dir}/plan-sliding.svg`,      slidingPlan)
+        writeFileSync(`${dir}/plan-rotated-45.svg`,   rot45Plan)
+        writeFileSync(`${dir}/plan-upward-arc.svg`,   upwardArcPlan)
     })
 
     console.log('Door wall context regression test passed')

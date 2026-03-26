@@ -49,7 +49,10 @@ async function initializeIFCAPI(): Promise<IfcAPI> {
             // IMPORTANT: SetWasmPath expects a directory path where the wasm file is located
             // The second parameter (true) indicates this is an absolute path
             // This prevents the library from adding the origin URL again
-            ifcAPIInstance.SetWasmPath('/wasm/web-ifc/', true)
+            const wasmPath = typeof window === 'undefined'
+                ? `${process.cwd()}/public/wasm/web-ifc/`
+                : '/wasm/web-ifc/'
+            ifcAPIInstance.SetWasmPath(wasmPath, true)
 
             await ifcAPIInstance.Init()
             ifcAPI = ifcAPIInstance
@@ -550,6 +553,7 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
     const group = new THREE.Group()
     const elements: ElementInfo[] = []
     const expressIDToMeshes = new Map<number, THREE.Mesh[]>()
+    const expressIDToPlacementYAxis = new Map<number, THREE.Vector3>()
     const meshToExpressID = new Map<THREE.Mesh, number>()
 
     // Stream all meshes from the model
@@ -600,6 +604,10 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
             // Apply transformation matrix
             const transformation = new THREE.Matrix4()
             transformation.fromArray(placedGeometry.flatTransformation)
+            const placementYAxis = new THREE.Vector3().setFromMatrixColumn(transformation, 1).setY(0)
+            if (placementYAxis.lengthSq() > 1e-8 && !expressIDToPlacementYAxis.has(expressID)) {
+                expressIDToPlacementYAxis.set(expressID, placementYAxis.normalize())
+            }
             bufferGeometry.applyMatrix4(transformation)
 
             // Create material
@@ -774,6 +782,7 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 boundingBox: (!bboxInitialized || !bbox || bbox.isEmpty()) ? undefined : bbox,
                 globalId,
                 name: elementName,
+                placementYAxis: expressIDToPlacementYAxis.get(expressID)?.clone(),
             }
 
             elements.push(elementInfo)
@@ -814,6 +823,7 @@ export async function loadIFCModelWithMetadata(file: File): Promise<LoadedIFCMod
                 mesh: meshes[0],
                 meshes: meshes,
                 globalId,
+                placementYAxis: expressIDToPlacementYAxis.get(expressID)?.clone(),
             }
             elements.push(elementInfo)
 

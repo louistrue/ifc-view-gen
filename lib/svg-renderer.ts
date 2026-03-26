@@ -822,7 +822,6 @@ function generateSVGString(
         backgroundColor,
         wallColor,
         fontSize,
-        fontFamily,
         showLegend,
         showLabels,
         wallRevealSide,
@@ -842,8 +841,8 @@ function generateSVGString(
 
     const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
 
-    // Reserve space for Vorderansicht label in plan views (arrow + text = ~60px)
-    const vorderansichtReserve = (activeViewType === 'Plan') ? 100 : 0
+    // No Vorderansicht annotation rendered, so no extra space needed
+    const vorderansichtReserve = 0
 
     const viewHeight = height - titleBlockHeight - vorderansichtReserve
 
@@ -934,11 +933,21 @@ function generateSVGString(
             if (offsetY - topY > 0.5)
                 wallBandsSvg += `  <rect x="${leftX.toFixed(2)}" y="${topY.toFixed(2)}" width="${(rightXEnd - leftX).toFixed(2)}" height="${(offsetY - topY).toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
         } else {
-            // Plan view: wall continues to the left and right of the door opening
+            // Plan view: wall stubs only at the door/wall slice level.
+            // The door slice follows the IFC swing side: top of content when the arc opens downward,
+            // bottom when the IFC placement indicates the opposite swing direction.
+            const wallThicknessPx = activeContext?.viewFrame
+                ? Math.max(activeContext.viewFrame.thickness * scale, 12)
+                : Math.max(scaledHeight * 0.08, 12)
+            const planBandH = Math.min(wallThicknessPx * (1 + wallRevealSide), scaledHeight)
+            // Door cross-section Y: bottom of content when arc flips (arc goes up, door at bottom).
+            const planBandY = activePlanArcFlip
+                ? offsetY + scaledHeight - planBandH
+                : offsetY
             if (offsetX - leftX > 0.5)
-                wallBandsSvg += `  <rect x="${leftX.toFixed(2)}" y="${offsetY.toFixed(2)}" width="${(offsetX - leftX).toFixed(2)}" height="${scaledHeight.toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
+                wallBandsSvg += `  <rect x="${leftX.toFixed(2)}" y="${planBandY.toFixed(2)}" width="${(offsetX - leftX).toFixed(2)}" height="${planBandH.toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
             if (rightXEnd - rightXStart > 0.5)
-                wallBandsSvg += `  <rect x="${rightXStart.toFixed(2)}" y="${offsetY.toFixed(2)}" width="${(rightXEnd - rightXStart).toFixed(2)}" height="${scaledHeight.toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
+                wallBandsSvg += `  <rect x="${rightXStart.toFixed(2)}" y="${planBandY.toFixed(2)}" width="${(rightXEnd - rightXStart).toFixed(2)}" height="${planBandH.toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
         }
     }
 
@@ -978,24 +987,7 @@ ${wallBandsSvg}  <g id="fills">
 
     svg += `  </g>`
 
-    // Render "Vorderansicht" arrow for Plan view
-    if (activeViewType === 'Plan') {
-        // Place arrow relative to the content bounding box (scaledHeight + offsetY)
-        // Add sufficient padding below the content to avoid overlap with door geometry
-        const arrowY = offsetY + scaledHeight + 40 // Increased from 10px to 40px for better spacing
-        const midX = width / 2
-
-        svg += `
-    <g id="plan-annotation">
-        <defs>
-            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="#000000" />
-            </marker>
-        </defs>
-        <line x1="${midX}" y1="${arrowY + 25}" x2="${midX}" y2="${arrowY}" stroke="#000000" stroke-width="2" marker-end="url(#arrowhead)"/>
-        <text x="${midX}" y="${arrowY + 40}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000" text-anchor="middle">Vorderansicht</text>
-    </g>`
-    }
+    // "Vorderansicht" arrow intentionally omitted – not needed on generated pictures
 
     // Render Title Block
     if (titleBlockHeight > 0) {
@@ -1010,15 +1002,10 @@ ${wallBandsSvg}  <g id="fills">
 // Temporary globals to pass context to generateSVGString without changing signature entirely 
 // (Refactoring to pass context to generateSVGString would be cleaner but requires changing all calls)
 // Alternatively, we can pass it via options but that's hacky.
-// Actually, let's update generateSVGString signature. I'll need to update call sites.
-// Wait, I can't easily change call sites if they are inside this file without multiple chunks.
-// I will change the signature of generateSVGString in this chunk and update the calls in the OTHER chunks or same chunk if possible.
-// Wait, `generateSVGString` is called in `renderDoorElevationSVG` and `renderDoorPlanSVG`.
-// I will update them all.
-
 // Helper to keep context available
 let activeContext: DoorContext | null = null
 let activeViewType: string = ''
+let activePlanArcFlip = false
 
 /**
  * Render Title Block content
@@ -1448,6 +1435,29 @@ function parseOperationType(operationType: string | null): SwingArcParams {
     return { type: 'none' }
 }
 
+function shouldFlipPlanArc(context: DoorContext, frame: DoorViewFrame): boolean {
+    const placementYAxis = context.door.placementYAxis?.clone().setY(0)
+    if (!placementYAxis || placementYAxis.lengthSq() < 1e-8) {
+        return false
+    }
+
+    placementYAxis.normalize()
+    return placementYAxis.dot(frame.semanticFacing) < 0
+}
+
+function shouldRenderPlanSwing(frame: DoorViewFrame): boolean {
+    const axisAligned = (axis: THREE.Vector3): boolean => {
+        const horizontal = axis.clone().setY(0)
+        if (horizontal.lengthSq() < 1e-8) return false
+        horizontal.normalize()
+        return Math.max(Math.abs(horizontal.x), Math.abs(horizontal.z)) >= 0.98
+    }
+
+    // For non-orthogonal/rotated doors, the generic symbolic swing arc is often misleading.
+    // Keep the door slice and wall context, but suppress swing graphics.
+    return axisAligned(frame.widthAxis) && axisAligned(frame.semanticFacing)
+}
+
 /**
  * Generate arc edges for a single door leaf
  */
@@ -1545,7 +1555,8 @@ function calculateSwingArcEdges(
     camera: THREE.OrthographicCamera,
     width: number,
     height: number,
-    cutHeight: number
+    cutHeight: number,
+    flipArc = false
 ): ProjectedEdge[] {
     const params = parseOperationType(context.openingDirection)
 
@@ -1555,7 +1566,11 @@ function calculateSwingArcEdges(
 
     const center = frame.origin.clone()
     const widthAxis = frame.widthAxis.clone()
-    const openAxis = frame.semanticFacing.clone().negate()
+    // Arc direction: when flipArc=false (default) the arc opens toward the semantic-facing
+    // side (downward in SVG, conventional floor-plan).  When flipArc=true the arc opens
+    // in the opposite direction (upward in SVG) – useful for IFC models where the door
+    // normal points toward the room instead of the corridor.
+    const openAxis = flipArc ? frame.semanticFacing.clone().negate() : frame.semanticFacing.clone()
     const allEdges: ProjectedEdge[] = []
 
     if (params.hingeSide === 'both') {
@@ -1682,13 +1697,97 @@ function renderSwingArcSVGForBoundingBox(
 }
 
 /**
+ * Build four projected edges that form the door cross-section rectangle in plan view.
+ * This ensures the door body is always visible even when web-ifc mesh edges are
+ * degenerate or missing at the cut height.
+ */
+function buildDoorCrossSectionEdges(
+    frame: DoorViewFrame,
+    camera: THREE.OrthographicCamera,
+    frustumWidth: number,
+    frustumHeight: number,
+    cutHeight: number,
+    opts: Required<SVGRenderOptions>
+): ProjectedEdge[] {
+    const hw = frame.width / 2
+    const ht = frame.thickness / 2
+    const w = frame.widthAxis
+    const f = frame.semanticFacing
+
+    const corners = [
+        frame.origin.clone().sub(w.clone().multiplyScalar(hw)).sub(f.clone().multiplyScalar(ht)),
+        frame.origin.clone().add(w.clone().multiplyScalar(hw)).sub(f.clone().multiplyScalar(ht)),
+        frame.origin.clone().add(w.clone().multiplyScalar(hw)).add(f.clone().multiplyScalar(ht)),
+        frame.origin.clone().sub(w.clone().multiplyScalar(hw)).add(f.clone().multiplyScalar(ht)),
+    ].map(p => { p.y = cutHeight; return p })
+
+    const edges: ProjectedEdge[] = []
+    for (let i = 0; i < 4; i++) {
+        const a = projectPoint(corners[i], camera, frustumWidth, frustumHeight)
+        const b = projectPoint(corners[(i + 1) % 4], camera, frustumWidth, frustumHeight)
+        edges.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, color: opts.doorColor, depth: 0, layer: 0 })
+    }
+    return edges
+}
+
+function buildDoorCrossSectionFallbackGeometry(
+    frame: DoorViewFrame,
+    camera: THREE.OrthographicCamera,
+    frustumWidth: number,
+    frustumHeight: number,
+    cutHeight: number,
+    opts: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const hw = frame.width / 2
+    const ht = frame.thickness / 2
+    const w = frame.widthAxis
+    const f = frame.semanticFacing
+    const corners = [
+        frame.origin.clone().sub(w.clone().multiplyScalar(hw)).sub(f.clone().multiplyScalar(ht)),
+        frame.origin.clone().add(w.clone().multiplyScalar(hw)).sub(f.clone().multiplyScalar(ht)),
+        frame.origin.clone().add(w.clone().multiplyScalar(hw)).add(f.clone().multiplyScalar(ht)),
+        frame.origin.clone().sub(w.clone().multiplyScalar(hw)).add(f.clone().multiplyScalar(ht)),
+    ].map(p => { p.y = cutHeight; return p })
+
+    const projected = corners.map((point) => projectPoint(point, camera, frustumWidth, frustumHeight))
+    const depth = projected.reduce((sum, point) => sum + point.z, 0) / projected.length
+
+    const edges: ProjectedEdge[] = []
+    const polygons: ProjectedPolygon[] = [{
+        points: projected.map((point) => ({ x: point.x, y: point.y })),
+        color: opts.doorColor,
+        depth,
+        layer: 0,
+    }]
+
+    // Add a simple inset panel outline so the fallback reads more like a door than a plain slab.
+    const insetW = Math.max(frame.width * 0.12, 0.03)
+    const insetT = Math.max(frame.thickness * 0.22, 0.01)
+    if (frame.width > insetW * 2 && frame.thickness > insetT * 2) {
+        const innerCorners = [
+            frame.origin.clone().sub(w.clone().multiplyScalar(hw - insetW)).sub(f.clone().multiplyScalar(ht - insetT)),
+            frame.origin.clone().add(w.clone().multiplyScalar(hw - insetW)).sub(f.clone().multiplyScalar(ht - insetT)),
+            frame.origin.clone().add(w.clone().multiplyScalar(hw - insetW)).add(f.clone().multiplyScalar(ht - insetT)),
+            frame.origin.clone().sub(w.clone().multiplyScalar(hw - insetW)).add(f.clone().multiplyScalar(ht - insetT)),
+        ].map(p => { p.y = cutHeight; return p })
+
+        for (let i = 0; i < 4; i++) {
+            const a = projectPoint(innerCorners[i], camera, frustumWidth, frustumHeight)
+            const b = projectPoint(innerCorners[(i + 1) % 4], camera, frustumWidth, frustumHeight)
+            edges.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, color: opts.lineColor, depth, layer: 0 })
+        }
+    }
+
+    return { edges, polygons }
+}
+
+/**
  * Render plan SVG from detailed mesh geometry
  */
 function renderPlanFromMeshes(
     context: DoorContext,
     opts: Required<SVGRenderOptions>
 ): string {
-    const fitMeshes = getDoorMeshes(context)
     const renderMeshes = getDoorMeshes(context, { includeNearbyDevices: true })
     if (renderMeshes.length === 0) {
         throw new Error('No meshes available for rendering')
@@ -1712,13 +1811,57 @@ function renderPlanFromMeshes(
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
 
-    const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, frustumWidth, frustumHeight, true, 0)
-    const fitGeometry = collectProjectedGeometry(fitMeshes, context, opts, camera, frustumWidth, frustumHeight, true, 0)
+    const showPlanSwing = shouldRenderPlanSwing(frame)
+    const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
+    activePlanArcFlip = flipArc
 
-    if (context.openingDirection) {
-        const arcEdges = calculateSwingArcEdges(context, frame, camera, frustumWidth, frustumHeight, cutHeight)
+    const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, frustumWidth, frustumHeight, true, 0)
+
+    // Synthetic door cross-section rectangle – always added so the door is visible
+    // even when the web-ifc mesh produces degenerate edges at cut height.
+    const syntheticEdges = buildDoorCrossSectionEdges(frame, camera, frustumWidth, frustumHeight, cutHeight, opts)
+    renderGeometry.edges.push(...syntheticEdges)
+
+    const hasDetailedDoorFill = renderGeometry.polygons.some((polygon) => polygon.color === opts.doorColor)
+    if (!hasDetailedDoorFill) {
+        const fallbackGeometry = buildDoorCrossSectionFallbackGeometry(frame, camera, frustumWidth, frustumHeight, cutHeight, opts)
+        renderGeometry.polygons.push(...fallbackGeometry.polygons)
+        renderGeometry.edges.push(...fallbackGeometry.edges)
+    }
+
+    if (showPlanSwing && context.openingDirection) {
+        const arcEdges = calculateSwingArcEdges(context, frame, camera, frustumWidth, frustumHeight, cutHeight, flipArc)
         renderGeometry.edges.push(...arcEdges)
-        fitGeometry.edges.push(...arcEdges)
+    }
+
+    // Compute fitGeometry analytically from frame data.
+    // Using projected mesh geometry for fitBounds is unreliable: web-ifc meshes viewed from above
+    // often produce degenerate edges, and arc edges may be at different positions than the door mesh.
+    // Instead, project the semantic corners of the door + arc envelope directly.
+    const arcParams = context.openingDirection ? parseOperationType(context.openingDirection) : null
+    const hasSwingArc = showPlanSwing && arcParams?.type === 'swing' && !!arcParams.hingeSide
+    const halfW = frame.width / 2
+    // openAxisFit must match the arc direction so the fit bounds contain both the door and the arc.
+    const openAxisFit = flipArc ? frame.semanticFacing.clone().negate() : frame.semanticFacing.clone()
+    const arcReach = hasSwingArc ? frame.width : frame.thickness / 2
+
+    const fitPoint = (p: THREE.Vector3): ProjectedEdge => {
+        const proj = projectPoint(p, camera, frustumWidth, frustumHeight)
+        return { x1: proj.x, y1: proj.y, x2: proj.x, y2: proj.y, color: 'none', depth: 0, layer: 0 }
+    }
+
+    const fitGeometry = {
+        edges: [
+            // Door outline corners (back and front)
+            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
+            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
+            // Arc envelope corners (full reach in openAxisFit direction)
+            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
+        ],
+        polygons: [] as ProjectedPolygon[],
     }
 
     activeContext = context

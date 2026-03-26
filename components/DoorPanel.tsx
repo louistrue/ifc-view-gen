@@ -414,8 +414,11 @@ export default function DoorPanel({
           doorColor: options.doorColor,
           hostWallId: context.hostWall?.expressID ?? null,
           wallBoundingBox: Boolean(context.hostWall?.boundingBox),
+          detailedDoorMeshes: context.detailedGeometry?.doorMeshes.length ?? 0,
           detailedWallMeshes: context.detailedGeometry?.wallMeshes.length ?? 0,
           svgIncludesWallColor: Boolean(options.wallColor && svg.includes(options.wallColor)),
+          svgIncludesDoorColor: Boolean(options.doorColor && svg.includes(options.doorColor)),
+          svgDoorFillCount: options.doorColor ? (svg.match(new RegExp(options.doorColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
           svgWallFillCount: options.wallColor ? (svg.match(new RegExp(options.wallColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
         })
 

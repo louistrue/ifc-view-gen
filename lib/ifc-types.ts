@@ -19,6 +19,7 @@ export interface ElementInfo {
     meshes?: THREE.Mesh[] // All meshes for this element
     boundingBox?: THREE.Box3
     globalId?: string // IFC GlobalId (GUID) of the element
+    placementYAxis?: THREE.Vector3 // IfcDoor/ObjectPlacement local +Y axis in world space
 }
 
 export interface LoadedIFCModel {

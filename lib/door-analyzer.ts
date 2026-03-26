@@ -603,11 +603,15 @@ function measureMeshesInFrame(
     }
 }
 
-function buildDoorViewFrame(door: ElementInfo, semanticFacing: THREE.Vector3): DoorViewFrame {
+function buildViewFrameFromGeometry(
+    meshes: THREE.Mesh[],
+    fallbackBox: THREE.Box3 | null,
+    semanticFacing: THREE.Vector3
+): DoorViewFrame {
     const upAxis = new THREE.Vector3(0, 1, 0)
     const depthAxis = semanticFacing.clone().setY(0).normalize()
     const widthAxis = new THREE.Vector3().crossVectors(upAxis, depthAxis).normalize()
-    const measured = measureMeshesInFrame(collectMeshesFromElement(door), widthAxis, depthAxis, upAxis)
+    const measured = measureMeshesInFrame(meshes, widthAxis, depthAxis, upAxis)
 
     if (measured) {
         return {
@@ -622,7 +626,7 @@ function buildDoorViewFrame(door: ElementInfo, semanticFacing: THREE.Vector3): D
         }
     }
 
-    const boundingBox = door.boundingBox ?? new THREE.Box3().setFromObject(door.mesh)
+    const boundingBox = fallbackBox ?? new THREE.Box3()
     const size = boundingBox.getSize(new THREE.Vector3())
     const origin = boundingBox.getCenter(new THREE.Vector3())
     const isDepthAlongX = Math.abs(depthAxis.x) >= Math.abs(depthAxis.z)
@@ -637,6 +641,11 @@ function buildDoorViewFrame(door: ElementInfo, semanticFacing: THREE.Vector3): D
         height: size.y,
         thickness: isDepthAlongX ? size.x : size.z,
     }
+}
+
+function buildDoorViewFrame(door: ElementInfo, semanticFacing: THREE.Vector3): DoorViewFrame {
+    const fallbackBox = door.boundingBox ?? new THREE.Box3().setFromObject(door.mesh)
+    return buildViewFrameFromGeometry(collectMeshesFromElement(door), fallbackBox, semanticFacing)
 }
 
 /**
@@ -1194,6 +1203,12 @@ export async function loadDetailedGeometry(
             doorMeshes,
             wallMeshes,
             deviceMeshes,
+        }
+
+        if (doorMeshes.length > 0) {
+            const fallbackBox = context.door.boundingBox ?? new THREE.Box3().setFromObject(context.door.mesh)
+            context.viewFrame = buildViewFrameFromGeometry(doorMeshes, fallbackBox, context.semanticFacing)
+            context.center = context.viewFrame.origin.clone()
         }
     }
 
