@@ -39,9 +39,6 @@ export default function DoorPanel({
   onComplete,
   onShowSingleDoorReady,
 }: DoorPanelProps) {
-  const DEFAULT_WALL_COLOR = '#5B7DB1'
-  const LEGACY_WALL_COLORS = new Set(['#888888', '#555555'])
-
   // Filter state
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedStoreys, setSelectedStoreys] = useState<Set<string>>(new Set())
@@ -98,15 +95,6 @@ export default function DoorPanel({
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
   })
-
-  useEffect(() => {
-    setOptions((current) => {
-      if (!current.wallColor || LEGACY_WALL_COLORS.has(current.wallColor)) {
-        return { ...current, wallColor: DEFAULT_WALL_COLOR }
-      }
-      return current
-    })
-  }, [])
 
   // Build additive facet counts: each facet is constrained by the other active facet(s).
   const availableStoreys = useMemo(() => {

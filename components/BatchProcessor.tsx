@@ -37,9 +37,6 @@ interface AirtableAuthStatus {
 }
 
 export default function BatchProcessor({ doorContexts, onComplete, modelSource }: BatchProcessorProps) {
-  const DEFAULT_WALL_COLOR = '#5B7DB1'
-  const LEGACY_WALL_COLORS = new Set(['#888888', '#555555'])
-
   const [isProcessing, setIsProcessing] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [progress, setProgress] = useState(0)
@@ -68,15 +65,6 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
   })
-
-  useEffect(() => {
-    setOptions((current) => {
-      if (!current.wallColor || LEGACY_WALL_COLORS.has(current.wallColor)) {
-        return { ...current, wallColor: DEFAULT_WALL_COLOR }
-      }
-      return current
-    })
-  }, [])
 
   // Determine which doors to process based on mode
   const doorsToProcess = useMemo(() => {
