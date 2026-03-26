@@ -330,21 +330,23 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           svg = await renderDoorElevationSVG(context, view === 'back', options)
         }
 
-        console.info('[door-preview-debug]', {
-          source: 'BatchProcessor',
-          doorId: context.doorId,
-          view,
-          wallColor: options.wallColor,
-          doorColor: options.doorColor,
-          hostWallId: context.hostWall?.expressID ?? null,
-          wallBoundingBox: Boolean(context.hostWall?.boundingBox),
-          detailedDoorMeshes: context.detailedGeometry?.doorMeshes.length ?? 0,
-          detailedWallMeshes: context.detailedGeometry?.wallMeshes.length ?? 0,
-          svgIncludesWallColor: Boolean(options.wallColor && svg.includes(options.wallColor)),
-          svgIncludesDoorColor: Boolean(options.doorColor && svg.includes(options.doorColor)),
-          svgDoorFillCount: options.doorColor ? (svg.match(new RegExp(options.doorColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
-          svgWallFillCount: options.wallColor ? (svg.match(new RegExp(options.wallColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
-        })
+        if (process.env.NODE_ENV === 'development') {
+          console.info('[door-preview-debug]', {
+            source: 'BatchProcessor',
+            doorId: context.doorId,
+            view,
+            wallColor: options.wallColor,
+            doorColor: options.doorColor,
+            hostWallId: context.hostWall?.expressID ?? null,
+            wallBoundingBox: Boolean(context.hostWall?.boundingBox),
+            detailedDoorMeshes: context.detailedGeometry?.doorMeshes.length ?? 0,
+            detailedWallMeshes: context.detailedGeometry?.wallMeshes.length ?? 0,
+            svgIncludesWallColor: Boolean(options.wallColor && svg.includes(options.wallColor)),
+            svgIncludesDoorColor: Boolean(options.doorColor && svg.includes(options.doorColor)),
+            svgDoorFillCount: options.doorColor ? (svg.match(new RegExp(options.doorColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
+            svgWallFillCount: options.wallColor ? (svg.match(new RegExp(options.wallColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
+          })
+        }
 
         setModalImage({ svg, doorId: context.doorId, view })
       } catch (err) {

@@ -532,19 +532,6 @@ function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
     return fallback
 }
 
-function getBoxCorners(box: THREE.Box3): THREE.Vector3[] {
-    return [
-        new THREE.Vector3(box.min.x, box.min.y, box.min.z),
-        new THREE.Vector3(box.min.x, box.min.y, box.max.z),
-        new THREE.Vector3(box.min.x, box.max.y, box.min.z),
-        new THREE.Vector3(box.min.x, box.max.y, box.max.z),
-        new THREE.Vector3(box.max.x, box.min.y, box.min.z),
-        new THREE.Vector3(box.max.x, box.min.y, box.max.z),
-        new THREE.Vector3(box.max.x, box.max.y, box.min.z),
-        new THREE.Vector3(box.max.x, box.max.y, box.max.z),
-    ]
-}
-
 function measureMeshesInFrame(
     meshes: THREE.Mesh[],
     widthAxis: THREE.Vector3,
@@ -557,22 +544,27 @@ function measureMeshesInFrame(
     let maxDepth = -Infinity
     let minHeight = Infinity
     let maxHeight = -Infinity
-    const worldCorner = new THREE.Vector3()
+    const worldPoint = new THREE.Vector3()
 
     for (const mesh of meshes) {
         const geometry = mesh.geometry as THREE.BufferGeometry | undefined
         if (!geometry) continue
-
-        if (!geometry.boundingBox) geometry.computeBoundingBox()
-        if (!geometry.boundingBox) continue
+        const positions = geometry.getAttribute('position')
+        if (!positions || positions.count === 0) continue
 
         mesh.updateMatrixWorld(true)
-        const corners = getBoxCorners(geometry.boundingBox)
-        for (const corner of corners) {
-            worldCorner.copy(corner).applyMatrix4(mesh.matrixWorld)
-            const widthProjection = worldCorner.dot(widthAxis)
-            const depthProjection = worldCorner.dot(depthAxis)
-            const heightProjection = worldCorner.dot(upAxis)
+        const index = geometry.getIndex()
+        const projectVertex = (vertexIndex: number) => {
+            worldPoint
+                .set(
+                    positions.getX(vertexIndex),
+                    positions.getY(vertexIndex),
+                    positions.getZ(vertexIndex)
+                )
+                .applyMatrix4(mesh.matrixWorld)
+            const widthProjection = worldPoint.dot(widthAxis)
+            const depthProjection = worldPoint.dot(depthAxis)
+            const heightProjection = worldPoint.dot(upAxis)
 
             minWidth = Math.min(minWidth, widthProjection)
             maxWidth = Math.max(maxWidth, widthProjection)
@@ -580,6 +572,17 @@ function measureMeshesInFrame(
             maxDepth = Math.max(maxDepth, depthProjection)
             minHeight = Math.min(minHeight, heightProjection)
             maxHeight = Math.max(maxHeight, heightProjection)
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i < index.count; i++) {
+                projectVertex(index.getX(i))
+            }
+            continue
+        }
+
+        for (let i = 0; i < positions.count; i++) {
+            projectVertex(i)
         }
     }
 
@@ -1039,7 +1042,7 @@ export async function analyzeDoors(
             geometricNormal,
             semanticFacing,
             viewFrame,
-            normal: semanticFacing.clone(),
+            normal: geometricNormal.clone(),
             center,
             doorId,
             openingDirection,

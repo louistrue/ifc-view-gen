@@ -461,23 +461,22 @@ async function main() {
     }
 
     // Write fixtures for visual inspection
-    import('node:fs').then(({ writeFileSync, mkdirSync }) => {
-        const dir = 'test-output/door-wall-context'
-        mkdirSync(dir, { recursive: true })
-        for (const [view, svg] of Object.entries(withWallViews)) {
-            writeFileSync(`${dir}/with-wall-${view}.svg`, svg)
-        }
-        for (const [view, svg] of Object.entries(withoutWallViews)) {
-            writeFileSync(`${dir}/without-wall-${view}.svg`, svg)
-        }
-        // Plan-specific fixtures
-        writeFileSync(`${dir}/plan-left-swing.svg`,   leftPlan)
-        writeFileSync(`${dir}/plan-right-swing.svg`,  rightPlan)
-        writeFileSync(`${dir}/plan-double-swing.svg`, bothPlan)
-        writeFileSync(`${dir}/plan-sliding.svg`,      slidingPlan)
-        writeFileSync(`${dir}/plan-rotated-45.svg`,   rot45Plan)
-        writeFileSync(`${dir}/plan-upward-arc.svg`,   upwardArcPlan)
-    })
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    const dir = 'test-output/door-wall-context'
+    mkdirSync(dir, { recursive: true })
+    for (const [view, svg] of Object.entries(withWallViews)) {
+        writeFileSync(`${dir}/with-wall-${view}.svg`, svg)
+    }
+    for (const [view, svg] of Object.entries(withoutWallViews)) {
+        writeFileSync(`${dir}/without-wall-${view}.svg`, svg)
+    }
+    // Plan-specific fixtures
+    writeFileSync(`${dir}/plan-left-swing.svg`, leftPlan)
+    writeFileSync(`${dir}/plan-right-swing.svg`, rightPlan)
+    writeFileSync(`${dir}/plan-double-swing.svg`, bothPlan)
+    writeFileSync(`${dir}/plan-sliding.svg`, slidingPlan)
+    writeFileSync(`${dir}/plan-rotated-45.svg`, rot45Plan)
+    writeFileSync(`${dir}/plan-upward-arc.svg`, upwardArcPlan)
 
     console.log('Door wall context regression test passed')
 }

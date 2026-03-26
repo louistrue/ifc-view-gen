@@ -804,6 +804,116 @@ function clipPolygonToBounds(points: { x: number; y: number }[], bounds: Project
     return clipped
 }
 
+interface RenderMeta {
+    context: DoorContext | null
+    viewType: string
+    planArcFlip: boolean
+}
+
+interface WallRevealRect {
+    x: number
+    y: number
+    width: number
+    height: number
+}
+
+function getRevealBandSize(totalSize: number, revealRatio: number, minSize: number): number {
+    const clampedReveal = THREE.MathUtils.clamp(revealRatio, 0, 0.5)
+    const rawSize = totalSize * clampedReveal
+    if (rawSize <= 0) {
+        return 0
+    }
+    return Math.max(rawSize, minSize)
+}
+
+function getWallRevealRects(params: {
+    bounds: { minX: number; maxX: number; minY: number; maxY: number }
+    offsetX: number
+    offsetY: number
+    scaledWidth: number
+    scaledHeight: number
+    wallRevealSide: number
+    wallRevealTop: number
+    viewType: string
+    wallThicknessPx?: number
+    planArcFlip?: boolean
+}): WallRevealRect[] {
+    const {
+        bounds,
+        offsetX,
+        offsetY,
+        scaledWidth,
+        scaledHeight,
+        wallRevealSide,
+        wallRevealTop,
+        viewType,
+        wallThicknessPx,
+        planArcFlip = false,
+    } = params
+
+    const bandW = getRevealBandSize(scaledWidth, wallRevealSide, 10)
+    const bandH = getRevealBandSize(scaledHeight, wallRevealTop, 8)
+    const leftX = Math.max(bounds.minX, offsetX - bandW)
+    const rightXStart = offsetX + scaledWidth
+    const rightXEnd = Math.min(bounds.maxX, rightXStart + bandW)
+    const topY = Math.max(bounds.minY, offsetY - bandH)
+    const bottomY = Math.min(bounds.maxY, offsetY + scaledHeight)
+    const rects: WallRevealRect[] = []
+
+    if (viewType !== 'Plan') {
+        if (offsetX - leftX > 0.5) {
+            rects.push({ x: leftX, y: topY, width: offsetX - leftX, height: bottomY - topY })
+        }
+        if (rightXEnd - rightXStart > 0.5) {
+            rects.push({ x: rightXStart, y: topY, width: rightXEnd - rightXStart, height: bottomY - topY })
+        }
+        if (bandH > 0 && offsetY - topY > 0.5) {
+            rects.push({ x: leftX, y: topY, width: rightXEnd - leftX, height: offsetY - topY })
+        }
+        return rects
+    }
+
+    if (bandW <= 0) {
+        return rects
+    }
+
+    const wallThickness = wallThicknessPx ?? Math.max(scaledHeight * 0.08, 12)
+    const planBandH = Math.min(
+        wallThickness * (1 + THREE.MathUtils.clamp(wallRevealSide, 0, 0.5)),
+        scaledHeight
+    )
+    const planBandY = planArcFlip
+        ? offsetY + scaledHeight - planBandH
+        : offsetY
+
+    if (offsetX - leftX > 0.5) {
+        rects.push({ x: leftX, y: planBandY, width: offsetX - leftX, height: planBandH })
+    }
+    if (rightXEnd - rightXStart > 0.5) {
+        rects.push({ x: rightXStart, y: planBandY, width: rightXEnd - rightXStart, height: planBandH })
+    }
+
+    return rects
+}
+
+function renderWallRevealSvg(
+    rects: WallRevealRect[],
+    wallColor: string,
+    lineColor: string,
+    lineWidth: number
+): string {
+    if (rects.length === 0) {
+        return ''
+    }
+
+    const opacity = 0.65
+    const strokeWidth = (lineWidth * 0.75).toFixed(2)
+
+    return rects.map((rect) =>
+        `  <rect x="${rect.x.toFixed(2)}" y="${rect.y.toFixed(2)}" width="${rect.width.toFixed(2)}" height="${rect.height.toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${lineColor}" stroke-width="${strokeWidth}"/>`
+    ).join('\n') + '\n'
+}
+
 /**
  * Generate SVG string from edges and polygons
  * Normalizes coordinates to fit within the viewport
@@ -812,7 +922,8 @@ function generateSVGString(
     edges: ProjectedEdge[],
     polygons: ProjectedPolygon[],
     options: Required<SVGRenderOptions>,
-    fitGeometry?: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
+    fitGeometry?: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
+    renderMeta: RenderMeta = { context: null, viewType: '', planArcFlip: false }
 ): string {
     const {
         width,
@@ -828,8 +939,8 @@ function generateSVGString(
         wallRevealTop,
     } = options
 
-    const hasDevices = activeContext ? activeContext.nearbyDevices.length > 0 : false
-    const hasWall = activeContext ? Boolean(activeContext.hostWall || activeContext.wall) : false
+    const hasDevices = renderMeta.context ? renderMeta.context.nearbyDevices.length > 0 : false
+    const hasWall = renderMeta.context ? Boolean(renderMeta.context.hostWall || renderMeta.context.wall) : false
     const showLegendActual = showLegend && (hasDevices || hasWall)
 
     // Calculate Title Block area
@@ -908,48 +1019,27 @@ function generateSVGString(
     // These are placed relative to offsetX/offsetY/scaledWidth/scaledHeight which come from
     // the ACTUAL projected door bounds (fitBounds), so they are guaranteed to sit just outside
     // the door geometry and can never be covered by door fills.
-    let wallBandsSvg = ''
-    if (showFills && hasWall) {
-        const bandW = Math.max(scaledWidth * wallRevealSide, 10)
-        const bandH = Math.max(scaledHeight * wallRevealTop, 8)
-        const opacity = 0.65
-        const stroke = options.lineColor
-        const sw = (lineWidth * 0.75).toFixed(2)
-
-        const leftX  = Math.max(0, offsetX - bandW)
-        const rightXStart = offsetX + scaledWidth
-        const rightXEnd   = Math.min(width, rightXStart + bandW)
-        const topY        = Math.max(0, offsetY - bandH)
-        const bottomY     = Math.min(viewHeight, offsetY + scaledHeight)
-
-        if (activeViewType !== 'Plan') {
-            // Left jamb
-            if (offsetX - leftX > 0.5)
-                wallBandsSvg += `  <rect x="${leftX.toFixed(2)}" y="${topY.toFixed(2)}" width="${(offsetX - leftX).toFixed(2)}" height="${(bottomY - topY).toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
-            // Right jamb
-            if (rightXEnd - rightXStart > 0.5)
-                wallBandsSvg += `  <rect x="${rightXStart.toFixed(2)}" y="${topY.toFixed(2)}" width="${(rightXEnd - rightXStart).toFixed(2)}" height="${(bottomY - topY).toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
-            // Head (full width across both jambs)
-            if (offsetY - topY > 0.5)
-                wallBandsSvg += `  <rect x="${leftX.toFixed(2)}" y="${topY.toFixed(2)}" width="${(rightXEnd - leftX).toFixed(2)}" height="${(offsetY - topY).toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
-        } else {
-            // Plan view: wall stubs only at the door/wall slice level.
-            // The door slice follows the IFC swing side: top of content when the arc opens downward,
-            // bottom when the IFC placement indicates the opposite swing direction.
-            const wallThicknessPx = activeContext?.viewFrame
-                ? Math.max(activeContext.viewFrame.thickness * scale, 12)
-                : Math.max(scaledHeight * 0.08, 12)
-            const planBandH = Math.min(wallThicknessPx * (1 + wallRevealSide), scaledHeight)
-            // Door cross-section Y: bottom of content when arc flips (arc goes up, door at bottom).
-            const planBandY = activePlanArcFlip
-                ? offsetY + scaledHeight - planBandH
-                : offsetY
-            if (offsetX - leftX > 0.5)
-                wallBandsSvg += `  <rect x="${leftX.toFixed(2)}" y="${planBandY.toFixed(2)}" width="${(offsetX - leftX).toFixed(2)}" height="${planBandH.toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
-            if (rightXEnd - rightXStart > 0.5)
-                wallBandsSvg += `  <rect x="${rightXStart.toFixed(2)}" y="${planBandY.toFixed(2)}" width="${(rightXEnd - rightXStart).toFixed(2)}" height="${planBandH.toFixed(2)}" fill="${wallColor}" fill-opacity="${opacity}" stroke="${stroke}" stroke-width="${sw}"/>\n`
-        }
-    }
+    const wallBandsSvg = showFills && hasWall
+        ? renderWallRevealSvg(
+            getWallRevealRects({
+                bounds: { minX: 0, maxX: width, minY: 0, maxY: viewHeight },
+                offsetX,
+                offsetY,
+                scaledWidth,
+                scaledHeight,
+                wallRevealSide,
+                wallRevealTop,
+                viewType: renderMeta.viewType,
+                wallThicknessPx: renderMeta.context?.viewFrame
+                    ? Math.max(renderMeta.context.viewFrame.thickness * scale, 12)
+                    : undefined,
+                planArcFlip: renderMeta.planArcFlip,
+            }),
+            wallColor,
+            options.lineColor,
+            lineWidth
+        )
+        : ''
 
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
@@ -991,21 +1081,13 @@ ${wallBandsSvg}  <g id="fills">
 
     // Render Title Block
     if (titleBlockHeight > 0) {
-        svg += renderTitleBlock(width, height, titleBlockHeight, options, activeContext, activeViewType)
+        svg += renderTitleBlock(width, height, titleBlockHeight, options, renderMeta.context, renderMeta.viewType)
     }
 
     svg += `\n</svg>`
 
     return svg
 }
-
-// Temporary globals to pass context to generateSVGString without changing signature entirely 
-// (Refactoring to pass context to generateSVGString would be cleaner but requires changing all calls)
-// Alternatively, we can pass it via options but that's hacky.
-// Helper to keep context available
-let activeContext: DoorContext | null = null
-let activeViewType: string = ''
-let activePlanArcFlip = false
 
 /**
  * Render Title Block content
@@ -1270,14 +1352,16 @@ function renderElevationFromMeshes(
     const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, width, height, false, 0)
     const fitGeometry = collectProjectedGeometry(fitMeshes, context, opts, camera, width, height, false, 0)
 
-    activeContext = context
-    activeViewType = isBackView ? 'Back' : 'Front'
-
     return generateSVGString(
         renderGeometry.edges,
         renderGeometry.polygons,
         opts,
-        fitGeometry
+        fitGeometry,
+        {
+            context,
+            viewType: isBackView ? 'Back' : 'Front',
+            planArcFlip: false,
+        }
     )
 }
 
@@ -1309,20 +1393,33 @@ function renderElevationFromBoundingBox(
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledHeight) / 2
     const hasWall = Boolean(context.hostWall?.boundingBox)
-
-    activeContext = context
-    activeViewType = isBackView ? 'Back' : 'Front'
+    const wallRevealSvg = hasWall
+        ? renderWallRevealSvg(
+            getWallRevealRects({
+                bounds: {
+                    minX: padding,
+                    maxX: svgWidth - padding,
+                    minY: padding,
+                    maxY: padding + availableHeight,
+                },
+                offsetX,
+                offsetY,
+                scaledWidth,
+                scaledHeight,
+                wallRevealSide: opts.wallRevealSide,
+                wallRevealTop: opts.wallRevealTop,
+                viewType: isBackView ? 'Back' : 'Front',
+            }),
+            wallColor,
+            lineColor,
+            lineWidth
+        )
+        : ''
 
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
   <rect width="100%" height="100%" fill="${backgroundColor}"/>
-`
-
-    if (hasWall) {
-        svg += `  <rect x="${padding}" y="${padding}" width="${svgWidth - padding * 2}" height="${availableHeight}" fill="${wallColor}" fill-opacity="0.12" stroke="${lineColor}" stroke-width="${lineWidth * 0.5}"/>\n`
-    }
-
-    svg += `  
+${wallRevealSvg}  
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledHeight}" 
         fill="${doorColor}" fill-opacity="0.2" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
@@ -1813,7 +1910,6 @@ function renderPlanFromMeshes(
 
     const showPlanSwing = shouldRenderPlanSwing(frame)
     const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
-    activePlanArcFlip = flipArc
 
     const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, frustumWidth, frustumHeight, true, 0)
 
@@ -1864,14 +1960,16 @@ function renderPlanFromMeshes(
         polygons: [] as ProjectedPolygon[],
     }
 
-    activeContext = context
-    activeViewType = 'Plan'
-
     return generateSVGString(
         renderGeometry.edges,
         renderGeometry.polygons,
         opts,
-        fitGeometry
+        fitGeometry,
+        {
+            context,
+            viewType: 'Plan',
+            planArcFlip: flipArc,
+        }
     )
 }
 
@@ -1903,9 +2001,30 @@ function renderPlanFromBoundingBox(
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledThickness) / 2
     const hasWall = Boolean(context.hostWall?.boundingBox)
-
-    activeContext = context
-    activeViewType = 'Plan'
+    const wallRevealSvg = hasWall
+        ? renderWallRevealSvg(
+            getWallRevealRects({
+                bounds: {
+                    minX: padding,
+                    maxX: svgWidth - padding,
+                    minY: padding,
+                    maxY: padding + availableHeight,
+                },
+                offsetX,
+                offsetY,
+                scaledWidth,
+                scaledHeight: scaledThickness,
+                wallRevealSide: opts.wallRevealSide,
+                wallRevealTop: opts.wallRevealTop,
+                viewType: 'Plan',
+                wallThicknessPx: Math.max(scaledThickness, 12),
+                planArcFlip: false,
+            }),
+            wallColor,
+            lineColor,
+            lineWidth
+        )
+        : ''
 
     const arrowY = offsetY + scaledThickness + 30
     const arrowEndY = arrowY + 25
@@ -1913,7 +2032,7 @@ function renderPlanFromBoundingBox(
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
   <rect width="100%" height="100%" fill="${backgroundColor}"/>
-  ${hasWall ? `<rect x="${padding}" y="${padding}" width="${svgWidth - padding * 2}" height="${availableHeight}" fill="${wallColor}" fill-opacity="0.12" stroke="${lineColor}" stroke-width="${lineWidth * 0.5}"/>` : ''}
+${wallRevealSvg}
 
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 
