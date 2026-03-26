@@ -625,3 +625,42 @@ export function findSpatialNode(root: SpatialNode, id: number): SpatialNode | nu
     return null
 }
 
+/**
+ * Get all element IDs from storeys matching the given names
+ * Used for 3D model filtering when DoorListDock filters by Geschoss
+ * "—" (DoorListDock placeholder for null storey) matches "Unassigned" nodes
+ */
+export function getStoreyElementIdsByNames(root: SpatialNode | null, storeyNames: Set<string>): number[] {
+    if (!root || storeyNames.size === 0) return []
+
+    const ids: number[] = []
+    const seen = new Set<number>()
+
+    const collect = (node: SpatialNode) => {
+        const isStorey = node.type === 'IfcBuildingStorey'
+        const isUnassigned = node.type === 'Category' && (node.id === -99999 || node.name === '—' || (node.name != null && node.name.startsWith('Unassigned')))
+
+        if (isStorey || isUnassigned) {
+            const nameMatches = storeyNames.has(node.name)
+            const unassignedMatches = storeyNames.has('—') && isUnassigned
+
+            if (nameMatches || unassignedMatches) {
+                const elementIds = getAllModelElementIds(node)
+                for (const id of elementIds) {
+                    if (!seen.has(id)) {
+                        seen.add(id)
+                        ids.push(id)
+                    }
+                }
+            }
+        }
+
+        for (const child of node.children) {
+            collect(child)
+        }
+    }
+
+    collect(root)
+    return ids
+}
+

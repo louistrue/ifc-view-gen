@@ -51,15 +51,18 @@ export class NavigationManager {
     this.controls = new CameraControls(this.camera, this.renderer.domElement)
 
     // Configure orbit controls for BIM navigation
-    this.controls.dollySpeed = 0.5
+    this.controls.dollySpeed = 1.25
     this.controls.truckSpeed = 1.0
+    this.controls.minDistance = Number.EPSILON
+    this.controls.dollyToCursor = true
     this.controls.mouseButtons.wheel = CameraControls.ACTION.DOLLY
     this.controls.mouseButtons.left = CameraControls.ACTION.ROTATE
     this.controls.mouseButtons.right = CameraControls.ACTION.TRUCK
     this.controls.mouseButtons.middle = CameraControls.ACTION.TRUCK
 
-    // Smooth transitions
-    this.controls.smoothTime = 0.25
+    // Smooth transitions – higher value = gentler deceleration at end of zoom
+    this.controls.smoothTime = 0.45
+    this.controls.restThreshold = 0.005
 
     // Set up update callback
     this.controls.addEventListener('control', () => {
@@ -184,7 +187,14 @@ export class NavigationManager {
     // Calculate distance to fit the object in view (with small margin)
     const fitHeightDistance = fitSize / (2 * Math.tan(fov / 2))
     const fitWidthDistance = fitSize / (2 * Math.tan(fov / 2) * aspect)
-    const distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.1 // 10% margin
+    let distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.1 // 10% margin
+
+    // For iso: center 1/3 from top, more zoom in
+    const target = new THREE.Vector3(center.x, center.y, center.z)
+    if (preset === 'iso') {
+      distance *= 0.5 //  more zoom in
+      target.y += size.y / 6 // 1/3 from top (center.y + size.y/6 = point 1/3 down from top)
+    }
 
     let position: THREE.Vector3
 
@@ -214,9 +224,9 @@ export class NavigationManager {
         // Position camera at 45 degrees from all axes
         const isoDistance = distance / Math.sqrt(3) * 1.5 // Adjust for isometric
         position = new THREE.Vector3(
-          center.x + isoDistance,
-          center.y + isoDistance,
-          center.z + isoDistance
+          target.x + isoDistance,
+          target.y + isoDistance,
+          target.z + isoDistance
         )
     }
 
@@ -224,9 +234,9 @@ export class NavigationManager {
       position.x,
       position.y,
       position.z,
-      center.x,
-      center.y,
-      center.z,
+      target.x,
+      target.y,
+      target.z,
       true // smooth transition
     )
   }
@@ -358,13 +368,21 @@ export class NavigationManager {
     const fov = this.camera.fov * (Math.PI / 180)
     const distance = (maxDim * padding) / (2 * Math.tan(fov / 2))
 
-    // Position camera along the normal direction
-    const cameraPos = center.clone().add(normal.clone().multiplyScalar(distance))
+    // make sure normal is horizontal
+    const n = normal.clone()
+    n.y = 0
 
-    // Ensure camera is not below ground
-    if (cameraPos.y < 0.5) {
-      cameraPos.y = 0.5
+    if (n.lengthSq() < 1e-10) {
+      n.set(0, 0, 1) // fallback direction
     }
+
+    n.normalize()
+
+    // position camera along horizontal normal
+    const cameraPos = center.clone().addScaledVector(n, distance)
+
+    // ensure horizontal viewing direction
+    cameraPos.y = center.y
 
     this.controls.setLookAt(
       cameraPos.x,

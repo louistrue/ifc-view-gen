@@ -208,7 +208,7 @@ export async function extractDoorOperationTypes(file: File): Promise<Map<number,
 
 export interface DoorCsetStandardCHData {
     alTuernummer: string | null
-    informationType: string | null
+    geometryType: string | null
     massDurchgangsbreite: number | null
     massDurchgangshoehe: number | null
     massRohbreite: number | null
@@ -224,7 +224,7 @@ export interface DoorCsetStandardCHData {
 function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
     return {
         alTuernummer: null,
-        informationType: null,
+        geometryType: null,
         massDurchgangsbreite: null,
         massDurchgangshoehe: null,
         massRohbreite: null,
@@ -263,19 +263,30 @@ function parseIfcNumber(raw: any): number | null {
     return null
 }
 
+const CSET_PROP_ALIASES: Record<string, string> = {
+    al00tuernummer: 'tuernummereindeutig',
+    tuernummer: 'tuernummereindeutig',
+    massdurchgangshoehe: 'lh',
+    massrohbreite: 'rb',
+    massrohebreite: 'rb',
+    massrohhoehe: 'rh',
+    massrohehoehe: 'rh',
+}
+
 function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nominalValue: any): void {
-    const normalized = normalizeIfcName(propName)
-    if (normalized === 'al00tuernummer' || normalized === 'tuernummer') {
+    let normalized = normalizeIfcName(propName)
+    normalized = CSET_PROP_ALIASES[normalized] ?? normalized
+    if (normalized === 'tuernummereindeutig') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) {
             target.alTuernummer = value.trim()
         }
         return
     }
-    if (normalized === 'informationtype') {
+    if (normalized === 'geometrytype') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) {
-            target.informationType = value.trim()
+            target.geometryType = value.trim()
         }
         return
     }
@@ -283,15 +294,15 @@ function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nom
         target.massDurchgangsbreite = parseIfcNumber(nominalValue)
         return
     }
-    if (normalized === 'massdurchgangshoehe') {
+    if (normalized === 'lh') {
         target.massDurchgangshoehe = parseIfcNumber(nominalValue)
         return
     }
-    if (normalized === 'massrohbreite' || normalized === 'massrohebreite') {
+    if (normalized === 'rb') {
         target.massRohbreite = parseIfcNumber(nominalValue)
         return
     }
-    if (normalized === 'massrohhoehe' || normalized === 'massrohehoehe') {
+    if (normalized === 'rh') {
         target.massRohhoehe = parseIfcNumber(nominalValue)
         return
     }

@@ -24,6 +24,7 @@ export default function TypeFilterPanel({
   const visibleTypes = activeFilters
   const setVisibleTypes = onFiltersChange
   const isApplying = useRef(false) // Prevent double-calls
+  const pendingFiltersRef = useRef<Set<string> | null | undefined>(undefined) // undefined = none pending
 
   // Get unique product types from elements with counts
   // Only shows productTypeName from IfcRelDefinesByType - NOT IFC classes
@@ -66,22 +67,43 @@ export default function TypeFilterPanel({
     )
   }, [typeCategories, searchQuery])
 
-  // Apply filter directly (not via useEffect)
+  // Apply filter directly (not via useEffect). Uses shared queue so IFCClassFilterPanel etc. don't race.
   const applyFilter = async (types: Set<string> | null) => {
-    if (!visibilityManager || isApplying.current) return
+    if (!visibilityManager) return
+    if (isApplying.current) {
+      pendingFiltersRef.current = types
+      return
+    }
 
     isApplying.current = true
+    let pending: Set<string> | null | undefined
+    let succeeded = false
     try {
-      if (types === null) {
-        console.log('ClassFilter: Resetting to show all')
-        await visibilityManager.resetAllVisibility()
-      } else {
-        const typesToShow = Array.from(types)
-        console.log('ClassFilter: Filtering to:', typesToShow)
-        await visibilityManager.filterByType(typesToShow)
-      }
+      await visibilityManager.enqueueFilterUpdate(async () => {
+        if (types === null) {
+          console.log('ClassFilter: Resetting to show all')
+          await visibilityManager!.clearTypeFilters()
+        } else {
+          const typesToShow = Array.from(types)
+          console.log('ClassFilter: Filtering to:', typesToShow)
+          await visibilityManager!.filterByType(typesToShow)
+        }
+      })
+      succeeded = true
     } finally {
       isApplying.current = false
+      if (succeeded) {
+        pending = pendingFiltersRef.current
+        pendingFiltersRef.current = undefined
+      }
+    }
+    if (pending !== undefined) {
+      try {
+        await applyFilter(pending)
+      } catch (err) {
+        console.error('TypeFilter: Error applying pending filter:', err)
+        throw err
+      }
     }
   }
 

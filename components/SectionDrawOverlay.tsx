@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
-import { SectionPlane } from '@/lib/section-plane'
+import { SectionPlaneManager } from '@/lib/section-plane'
 
 type SectionMode = 'line'
 
@@ -11,11 +11,12 @@ interface SectionDrawOverlayProps {
     mode: SectionMode
     onComplete: () => void
     onSectionEnabled: () => void  // Called when a section is successfully created
-    sectionPlane: SectionPlane | null
+    sectionPlaneManager: SectionPlaneManager | null
     camera: THREE.PerspectiveCamera | null
     scene: THREE.Scene | null
     containerRef: React.RefObject<HTMLDivElement>  // Canvas container for dimension matching
     triggerRender?: () => void  // Callback to trigger scene render
+    rightPaletteOffsetPx?: number  // Right palette width when visible (for centering hint)
 }
 
 export default function SectionDrawOverlay({
@@ -23,11 +24,12 @@ export default function SectionDrawOverlay({
     mode,
     onComplete,
     onSectionEnabled,
-    sectionPlane,
+    sectionPlaneManager,
     camera,
     scene,
     containerRef,
     triggerRender,
+    rightPaletteOffsetPx = 0,
 }: SectionDrawOverlayProps) {
     const [isDrawing, setIsDrawing] = useState(false)
     const [startPoint, setStartPoint] = useState({ x: 0, y: 0 })
@@ -45,22 +47,91 @@ export default function SectionDrawOverlay({
         }
     }, [containerRef])
 
-    // Constrain point to horizontal or vertical when Shift is held
-    const getConstrainedPoint = useCallback((start: { x: number; y: number }, current: { x: number; y: number }, shift: boolean) => {
-        if (!shift) return current
-        
+    // Snap to 0°, 90°, 180°, 270° in world XZ plane when Shift is held (independent of camera rotation)
+    const SNAP_ANGLES = [0, Math.PI / 2, Math.PI, -Math.PI / 2] as const
+
+    const getConstrainedResult = useCallback((
+        start: { x: number; y: number },
+        current: { x: number; y: number },
+        shift: boolean,
+        width: number,
+        height: number
+    ): {
+        screenCoords: { x: number; y: number }
+        startNDC?: { x: number; y: number }
+        endNDC?: { x: number; y: number }
+        startWorld?: THREE.Vector3
+        endWorld?: THREE.Vector3
+    } => {
+        if (!shift || !camera || !sectionPlaneManager) {
+            return { screenCoords: current }
+        }
+
         const dx = current.x - start.x
         const dy = current.y - start.y
-        
-        // Snap to nearest horizontal or vertical
-        if (Math.abs(dx) > Math.abs(dy)) {
-            // Horizontal constraint
-            return { x: current.x, y: start.y }
-        } else {
-            // Vertical constraint
-            return { x: start.x, y: current.y }
+        const length = Math.sqrt(dx * dx + dy * dy)
+        if (length < 0.001) return { screenCoords: current }
+
+        // Convert screen points to world points on the view plane through model center
+        const bounds = sectionPlaneManager.getBounds()
+        const boundsCenter = bounds.getCenter(new THREE.Vector3())
+        const viewDir = new THREE.Vector3()
+        camera.getWorldDirection(viewDir)
+        const viewPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(viewDir, boundsCenter)
+
+        const toWorld = (px: number, py: number) => {
+            const ndcX = (px / width) * 2 - 1
+            const ndcY = -((py / height) * 2 - 1)
+            const near = new THREE.Vector3(ndcX, ndcY, 0).unproject(camera)
+            const far = new THREE.Vector3(ndcX, ndcY, 1).unproject(camera)
+            const dir = new THREE.Vector3().subVectors(far, near).normalize()
+            const ray = new THREE.Ray(near, dir)
+            const point = new THREE.Vector3()
+            ray.intersectPlane(viewPlane, point)
+            return point
         }
-    }, [])
+
+        const startWorld = toWorld(start.x, start.y)
+        const currentWorld = toWorld(current.x, current.y)
+        // World horizontal plane is XZ (Y-up). Section plane is vertical, so constrain in XZ.
+        const dirXZ = new THREE.Vector2(
+            currentWorld.x - startWorld.x,
+            currentWorld.z - startWorld.z
+        )
+        const lenXZ = dirXZ.length()
+        if (lenXZ < 0.001) return { screenCoords: current }
+
+        const angle = Math.atan2(dirXZ.y, dirXZ.x)
+        const snapAngle = SNAP_ANGLES.reduce((best, a) => {
+            let diffBest = Math.abs(angle - best)
+            if (diffBest > Math.PI) diffBest = 2 * Math.PI - diffBest
+            let diffA = Math.abs(angle - a)
+            if (diffA > Math.PI) diffA = 2 * Math.PI - diffA
+            return diffA < diffBest ? a : best
+        })
+
+        const endWorld = startWorld.clone().add(new THREE.Vector3(
+            Math.cos(snapAngle) * lenXZ,
+            0,
+            Math.sin(snapAngle) * lenXZ
+        ))
+
+        // Use NDC directly from world positions to avoid conversion errors (section must align with line)
+        const startNDC = startWorld.clone().project(camera)
+        const endNDC = endWorld.clone().project(camera)
+
+        const screenCoords = {
+            x: ((endNDC.x + 1) / 2) * width,
+            y: (1 - endNDC.y) / 2 * height,
+        }
+        return {
+            screenCoords,
+            startNDC: { x: startNDC.x, y: startNDC.y },
+            endNDC: { x: endNDC.x, y: endNDC.y },
+            startWorld: startWorld.clone(),
+            endWorld: endWorld.clone(),
+        }
+    }, [camera, sectionPlaneManager])
 
     const handleMouseDown = (e: React.MouseEvent) => {
         e.preventDefault()
@@ -80,9 +151,10 @@ export default function SectionDrawOverlay({
         if (isDrawing) {
             e.preventDefault()
             e.stopPropagation()
-            // Apply constraint if Shift is held
-            const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld)
-            setCurrentPoint(constrainedCoords)
+            const width = containerRef.current?.clientWidth || overlayRef.current?.clientWidth || 1
+            const height = containerRef.current?.clientHeight || overlayRef.current?.clientHeight || 1
+            const result = getConstrainedResult(startPoint, coords, shiftHeld, width, height)
+            setCurrentPoint(result.screenCoords)
         }
     }
 
@@ -92,33 +164,34 @@ export default function SectionDrawOverlay({
         e.stopPropagation()
 
         const coords = getRelativeCoords(e)
-        // Apply constraint if Shift is held
-        const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld)
-        setCurrentPoint(constrainedCoords)
+        const width = containerRef.current?.clientWidth || overlayRef.current?.clientWidth || 1
+        const height = containerRef.current?.clientHeight || overlayRef.current?.clientHeight || 1
+        const result = getConstrainedResult(startPoint, coords, shiftHeld, width, height)
+        setCurrentPoint(result.screenCoords)
         setIsDrawing(false)
 
         // Calculate line length using constrained coordinates
-        const dx = constrainedCoords.x - startPoint.x
-        const dy = constrainedCoords.y - startPoint.y
+        const dx = result.screenCoords.x - startPoint.x
+        const dy = result.screenCoords.y - startPoint.y
         const length = Math.sqrt(dx * dx + dy * dy)
 
         // Only create section if line is long enough
-        if (length > 30 && sectionPlane && camera && overlayRef.current) {
-            // Use canvas container dimensions to match camera projection exactly
-            const width = containerRef.current?.clientWidth || overlayRef.current.clientWidth
-            const height = containerRef.current?.clientHeight || overlayRef.current.clientHeight
-
-            const startNDC = {
-                x: (startPoint.x / width) * 2 - 1,
-                y: -((startPoint.y / height) * 2 - 1)
+        if (length > 30 && sectionPlaneManager && camera && overlayRef.current) {
+            if (result.startWorld && result.endWorld) {
+                sectionPlaneManager.addFromWorldLine(result.startWorld, result.endWorld)
+            } else {
+                const w = containerRef.current?.clientWidth || overlayRef.current.clientWidth
+                const h = containerRef.current?.clientHeight || overlayRef.current.clientHeight
+                const startNDC = result.startNDC ?? {
+                    x: (startPoint.x / w) * 2 - 1,
+                    y: -((startPoint.y / h) * 2 - 1)
+                }
+                const endNDC = result.endNDC ?? {
+                    x: (result.screenCoords.x / w) * 2 - 1,
+                    y: -((result.screenCoords.y / h) * 2 - 1)
+                }
+                sectionPlaneManager.addFromScreenLine(startNDC, endNDC, camera)
             }
-            const endNDC = {
-                x: (constrainedCoords.x / width) * 2 - 1,
-                y: -((constrainedCoords.y / height) * 2 - 1)
-            }
-
-            sectionPlane.setFromScreenLine(startNDC, endNDC, camera)
-            sectionPlane.enable()
             onSectionEnabled()
         }
 
@@ -142,8 +215,8 @@ export default function SectionDrawOverlay({
                 setShiftHeld(true)
             }
             // F to flip section
-            if ((e.key === 'f' || e.key === 'F') && sectionPlane?.isEnabled()) {
-                sectionPlane.flip()
+            if ((e.key === 'f' || e.key === 'F') && sectionPlaneManager?.hasAnyEnabled()) {
+                sectionPlaneManager.getActivePlane()?.flip()
             }
         }
 
@@ -159,7 +232,7 @@ export default function SectionDrawOverlay({
             document.removeEventListener('keydown', handleKeyDown)
             document.removeEventListener('keyup', handleKeyUp)
         }
-    }, [active, onComplete, sectionPlane, triggerRender])
+    }, [active, onComplete, sectionPlaneManager, triggerRender])
 
     // Reset shift state when overlay becomes inactive
     useEffect(() => {
@@ -200,37 +273,23 @@ export default function SectionDrawOverlay({
                 backgroundColor: 'rgba(0, 0, 0, 0.05)',
             }}
         >
-            {/* Instructions */}
+            {/* Help text top center - between left edge and right palette */}
             <div
                 style={{
                     position: 'absolute',
-                    top: '50%',
-                    left: '50%',
-                    transform: 'translate(-50%, -50%)',
-                    padding: '16px 24px',
-                    backgroundColor: 'rgba(32, 32, 32, 0.95)',
-                    borderRadius: '8px',
+                    top: '12px',
+                    left: `calc((100% - ${rightPaletteOffsetPx}px) / 2)`,
+                    transform: 'translateX(-50%)',
+                    padding: '6px 14px',
+                    backgroundColor: 'rgba(32, 32, 32, 0.9)',
+                    borderRadius: '6px',
                     color: '#e0e0e0',
-                    fontSize: '13px',
+                    fontSize: '12px',
                     fontFamily: 'system-ui, -apple-system, sans-serif',
-                    textAlign: 'center',
                     pointerEvents: 'none',
-                    opacity: isDrawing ? 0 : 1,
-                    transition: 'opacity 0.2s',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
                 }}
             >
-                <div style={{ fontWeight: 600, marginBottom: '8px', fontSize: '14px' }}>
-                    Draw Section Line
-                </div>
-                <div style={{ color: '#888', fontSize: '12px', lineHeight: 1.5 }}>
-                    Draw a line to create a section plane<br />
-                    The model will be cut perpendicular to your line
-                </div>
-                <div style={{ marginTop: '12px', color: '#666', fontSize: '11px' }}>
-                    Shift — Hold for horizontal/vertical constraint<br />
-                    ESC to cancel • F to flip section
-                </div>
+                F — Flip  |  Shift — Schieben
             </div>
 
             {/* Section line being drawn */}

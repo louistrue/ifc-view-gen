@@ -1,22 +1,24 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
 import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
-import { extractSpatialStructure, type SpatialNode } from '@/lib/spatial-structure'
+import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
-import { SectionPlane } from '@/lib/section-plane'
-import ViewerToolbar, { type SectionMode } from './ViewerToolbar'
+import { SectionPlaneManager } from '@/lib/section-plane'
+import ViewerToolbar, { type SectionMode, type ColorMode } from './ViewerToolbar'
 import ZoomWindowOverlay from './ZoomWindowOverlay'
 import SectionDrawOverlay from './SectionDrawOverlay'
-import ViewPresets from './ViewPresets'
+import SectionDragOverlay from './SectionDragOverlay'
+import SectionAdjustOverlay from './SectionAdjustOverlay'
 import SpatialHierarchyPanel from './SpatialHierarchyPanel'
 import TypeFilterPanel from './TypeFilterPanel'
 import IFCClassFilterPanel from './IFCClassFilterPanel'
+import DoorListDock from './DoorListDock'
 
 export default function IFCViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -31,6 +33,7 @@ export default function IFCViewer() {
   const electricalModelRef = useRef<any>(null)
   const archFileRef = useRef<File | null>(null) // Store arch file for detailed geometry extraction
   const modelCenterOffsetRef = useRef<THREE.Vector3>(new THREE.Vector3()) // Store centering offset
+  const dockShowSingleDoorRef = useRef<((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null>(null)
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingProgress, setLoadingProgress] = useState(0)
@@ -38,6 +41,241 @@ export default function IFCViewer() {
   const [error, setError] = useState<string | null>(null)
   const [doorContexts, setDoorContexts] = useState<DoorContext[]>([])
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
+
+  // DoorListDock
+  const [dockSelectedDoorIds, setDockSelectedDoorIds] = useState<Set<string>>(new Set()) // Store selected door IDs for DoorListDock
+  const [scrollToDoorId, setScrollToDoorId] = useState<string | null>(null) // Scroll list to this door when selected from model
+  const [dockHoveredDoorId, setDockHoveredDoorId] = useState<string | null>(null) // Hover (Highlight in 3D)
+  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
+  const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
+  const DOCK_RIGHT_OFFSET_PX = 400
+  const [dockHeightPx, setDockHeightPx] = useState(260)
+  const [colorMode, setColorMode] = useState<ColorMode>('off')
+  const [doorFilterActive, setDoorFilterActive] = useState(false)
+  const [dockStoreyFilterActive, setDockStoreyFilterActive] = useState(false)
+  const [dockResetKey, setDockResetKey] = useState(0)
+  const dockListContainerRef = useRef<HTMLDivElement | null>(null)
+  const storeyOpIdRef = useRef(0)
+
+  const getDockDoorLabel = useCallback((door: DoorContext) => {
+    return (
+      door.csetStandardCH?.alTuernummer ||
+      door.door.name ||
+      door.doorTypeName ||
+      door.doorId
+    )
+  }, [])
+
+  const toggleDockDoorSelection = useCallback((doorId: string) => {
+    setDockSelectedDoorIds(prev => {
+      const next = new Set(prev)
+      if (next.has(doorId)) next.delete(doorId)
+      else next.add(doorId)
+      return next
+    })
+  }, [])
+
+  const setDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid', direction: 'asc' | 'desc') => {
+    setDockSortField(field)
+    setDockSortDirection(direction)
+  }, [])
+
+  const dockSortIndicator = useCallback(
+    (field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
+      if (dockSortField !== field) return '↕'
+      return dockSortDirection === 'asc' ? '↑' : '↓'
+    },
+    [dockSortDirection, dockSortField]
+  )
+
+  const getSortValue = useCallback((door: import('@/lib/door-analyzer').DoorContext, field: typeof dockSortField) => {
+    switch (field) {
+      case 'door': return getDockDoorLabel(door)
+      case 'type': return door.doorTypeName || door.csetStandardCH?.geometryType || ''
+      case 'storey': return door.storeyName || ''
+      case 'brandschutz': return door.csetStandardCH?.feuerwiderstand || ''
+      case 'schallschutz': return door.csetStandardCH?.bauschalldaemmmass || ''
+      case 'lb': return door.csetStandardCH?.massDurchgangsbreite ?? -Infinity
+      case 'lh': return door.csetStandardCH?.massDurchgangshoehe ?? -Infinity
+      case 'rb': return door.csetStandardCH?.massRohbreite ?? -Infinity
+      case 'rh': return door.csetStandardCH?.massRohhoehe ?? -Infinity
+      case 'bram': return door.csetStandardCH?.massAussenrahmenBreite ?? -Infinity
+      case 'hram': return door.csetStandardCH?.massAussenrahmenHoehe ?? -Infinity
+      case 'guid': return door.door.globalId ?? door.doorId ?? ''
+      default: return ''
+    }
+  }, [getDockDoorLabel])
+
+  const sortedDockDoors = useMemo(() => {
+    const doors = [...doorContexts]
+    const isNumeric = ['lb', 'lh', 'rb', 'rh', 'bram', 'hram'].includes(dockSortField)
+    doors.sort((a, b) => {
+      const aVal = getSortValue(a, dockSortField)
+      const bVal = getSortValue(b, dockSortField)
+      let compared: number
+      if (isNumeric && typeof aVal === 'number' && typeof bVal === 'number') {
+        compared = aVal - bVal
+      } else {
+        compared = String(aVal).localeCompare(String(bVal), undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        })
+      }
+      return dockSortDirection === 'asc' ? compared : -compared
+    })
+    return doors
+  }, [doorContexts, dockSortDirection, dockSortField, getSortValue])
+
+  const handleDockDoorHover = useCallback(
+    (doorId: string | null) => {
+      setDockHoveredDoorId(doorId)
+
+      const vm = visibilityManagerRef.current
+      if (!vm) return
+
+      if (doorId === null) {
+        vm.setHoveredElement(null)
+        return
+      }
+
+      const door = doorContexts.find(d => d.doorId === doorId)
+      if (!door) return
+
+      vm.setHoveredElement(door.door.expressID)
+    },
+    [doorContexts]
+  )
+
+  const handleDockDoorClick = useCallback((door: DoorContext) => {
+    const nav = navigationManagerRef.current
+    if (!nav || !door.door.boundingBox) return
+
+    // Only zoom – do NOT change selection/colors (checkbox controls selection)
+    nav.zoomToElementFromNormal(door.door.boundingBox, door.normal, 2.5)
+  }, [])
+
+  const handleDockShowSingleDoorReady = useCallback((fn: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => {
+    dockShowSingleDoorRef.current = fn
+  }, [])
+
+  const handleDockShowSingleDoor = useCallback((door: DoorContext, view: 'front' | 'back' | 'plan') => {
+    dockShowSingleDoorRef.current?.(door, view)
+  }, [])
+
+  const handleStoreyFilterChange = useCallback(async (storeyNames: Set<string>) => {
+    const vm = visibilityManagerRef.current
+    const spatial = spatialStructureRef.current
+    if (!vm) return
+
+    storeyOpIdRef.current += 1
+    const opId = storeyOpIdRef.current
+
+    if (storeyNames.size === 0) {
+      if (storeyOpIdRef.current !== opId) return
+      await vm.clearStoreyFilter()
+      if (storeyOpIdRef.current !== opId) return
+    } else if (spatial) {
+      const ids = getStoreyElementIdsByNames(spatial, storeyNames)
+      if (storeyOpIdRef.current !== opId) return
+      await vm.filterByStorey(ids)
+      if (storeyOpIdRef.current !== opId) return
+    }
+
+    if (storeyOpIdRef.current !== opId) return
+    setDockStoreyFilterActive(storeyNames.size > 0)
+    triggerRenderRef.current?.()
+  }, [])
+
+  const handleClearDockFilters = useCallback(async () => {
+    const vm = visibilityManagerRef.current
+    if (!vm) return
+
+    storeyOpIdRef.current += 1
+    const opId = storeyOpIdRef.current
+
+    await vm.clearStoreyFilter()
+
+    if (opId !== storeyOpIdRef.current) return
+    setDockStoreyFilterActive(false)
+    triggerRenderRef.current?.()
+  }, [])
+
+  // Sync DoorListDock checkbox selection to 3D view
+  // - Selection/hover highlights always apply (on top of geometry coloring)
+  // - Dim/reset only when NOT in color-by-geometry or door filter mode
+  useEffect(() => {
+    const vm = visibilityManagerRef.current
+    if (!vm) return
+    if (doorContexts.length === 0) {
+      vm.clearAllHighlights()
+      return
+    }
+
+    const selectedExpressIds = dockSelectedDoorIds.size > 0
+      ? doorContexts
+          .filter(d => dockSelectedDoorIds.has(d.doorId))
+          .map(d => d.door.expressID)
+      : []
+
+    // Dim/reset only when not in color-by-geometry or door filter mode
+    if (colorMode === 'geometry-type' || doorFilterActive) {
+      vm.clearSelectionAndDimState().then(() => {
+        if (selectedExpressIds.length > 0) {
+          vm.setSelectedElements(selectedExpressIds)
+        } else {
+          vm.setSelectedElements([])
+        }
+        triggerRenderRef.current?.()
+      })
+      return
+    }
+
+    // Always sync selection highlights (visible on top of geometry coloring)
+    if (selectedExpressIds.length > 0) {
+      vm.setSelectedElements(selectedExpressIds)
+    } else {
+      vm.setSelectedElements([])
+    }
+
+    visibilitySyncRunIdRef.current += 1
+    const runId = visibilitySyncRunIdRef.current
+
+    const run = async () => {
+      try {
+        if (dockSelectedDoorIds.size > 0) {
+          const selectedExpressIds = doorContexts
+            .filter(d => dockSelectedDoorIds.has(d.doorId))
+            .map(d => d.door.expressID)
+          if (selectedExpressIds.length > 0) {
+            if (runId !== visibilitySyncRunIdRef.current) return
+            vm.setSelectedElements(selectedExpressIds)
+            if (runId !== visibilitySyncRunIdRef.current) return
+            await vm.dimNonSelectedElements(selectedExpressIds, 0.3, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
+          } else {
+            if (runId !== visibilitySyncRunIdRef.current) return
+            vm.setSelectedElements([])
+            if (runId !== visibilitySyncRunIdRef.current) return
+            await vm.clearSelectionAndDimState()
+          }
+        } else {
+          if (runId !== visibilitySyncRunIdRef.current) return
+          vm.setSelectedElements([])
+          if (runId !== visibilitySyncRunIdRef.current) return
+          triggerRenderRef.current?.()
+          if (runId !== visibilitySyncRunIdRef.current) return
+          await vm.clearSelectionAndDimState()
+        }
+        if (runId !== visibilitySyncRunIdRef.current) return
+        triggerRenderRef.current?.()
+      } catch (err) {
+        console.error('[IFCViewer] Visibility sync error:', err)
+      }
+    }
+    run()
+    return () => {
+      visibilitySyncRunIdRef.current += 1
+    }
+  }, [dockSelectedDoorIds, doorContexts, colorMode, doorFilterActive])
 
   // File names for display
   const [archFileName, setArchFileName] = useState<string>('')
@@ -47,10 +285,11 @@ export default function IFCViewer() {
   // Navigation and performance systems
   const navigationManagerRef = useRef<NavigationManager | null>(null)
   const visibilityManagerRef = useRef<ElementVisibilityManager | null>(null)
-  const sectionPlaneRef = useRef<SectionPlane | null>(null)
+  const sectionPlaneManagerRef = useRef<SectionPlaneManager | null>(null)
   const batchProcessorVisibleRef = useRef(false)
   const fragmentsManagerRef = useRef<any>(null) // Fragments manager for update() in render loop
   const triggerRenderRef = useRef<() => void>(() => { }) // Function to trigger a render
+  const visibilitySyncRunIdRef = useRef(0)
   const isLoadingRef = useRef(false) // Prevent double-loading from React StrictMode
 
   // Spatial structure
@@ -70,6 +309,96 @@ export default function IFCViewer() {
   // Persist active IFC class filters across panel open/close
   const [activeIFCClassFilters, setActiveIFCClassFilters] = useState<Set<string> | null>(null)
 
+  // Click on 3D model to toggle door selection (syncs to DoorListDock)
+  // Selection only on pointerup when movement was small (real click, not rotate)
+  useEffect(() => {
+    const canvas = rendererRef.current?.domElement
+    const camera = cameraRef.current
+    if (!canvas || !camera || !containerRef.current) return
+
+    const DRAG_THRESHOLD_PX = 5
+    const pointerDownRef = { x: 0, y: 0, active: false }
+
+    const handlePointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      if (!showBatchProcessor || doorContexts.length === 0) return
+      if (zoomWindowActive || sectionMode !== 'off') return
+
+      pointerDownRef.x = e.clientX
+      pointerDownRef.y = e.clientY
+      pointerDownRef.active = true
+    }
+
+    const handlePointerUp = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      if (!showBatchProcessor || doorContexts.length === 0) return
+      if (zoomWindowActive || sectionMode !== 'off') return
+      if (!pointerDownRef.active) return
+
+      const dx = e.clientX - pointerDownRef.x
+      const dy = e.clientY - pointerDownRef.y
+      if (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
+        pointerDownRef.active = false
+        return
+      }
+
+      const rect = containerRef.current!.getBoundingClientRect()
+      if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+        pointerDownRef.active = false
+        return
+      }
+
+      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+
+      const raycaster = new THREE.Raycaster()
+      raycaster.setFromCamera(new THREE.Vector2(x, y), camera)
+
+      const ray = raycaster.ray
+      const intersection = new THREE.Vector3()
+      let closestDoor: DoorContext | null = null
+      let closestDist = Infinity
+
+      for (const context of doorContexts) {
+        const box = context.door.boundingBox
+        if (!box) continue
+        const hit = ray.intersectBox(box, intersection)
+        if (hit) {
+          const dist = ray.origin.distanceTo(intersection)
+          if (dist < closestDist) {
+            closestDist = dist
+            closestDoor = context
+          }
+        }
+      }
+
+      if (closestDoor) {
+        toggleDockDoorSelection(closestDoor.doorId)
+        setScrollToDoorId(closestDoor.doorId)
+      }
+      pointerDownRef.active = false
+    }
+
+    const handlePointerCancel = () => {
+      pointerDownRef.active = false
+    }
+
+    const handleBlur = () => {
+      pointerDownRef.active = false
+    }
+
+    canvas.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('pointerup', handlePointerUp)
+    document.addEventListener('pointercancel', handlePointerCancel)
+    window.addEventListener('blur', handleBlur)
+    return () => {
+      canvas.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('pointerup', handlePointerUp)
+      document.removeEventListener('pointercancel', handlePointerCancel)
+      window.removeEventListener('blur', handleBlur)
+    }
+  }, [showBatchProcessor, doorContexts, zoomWindowActive, sectionMode, toggleDockDoorSelection])
+
   useEffect(() => {
     if (!containerRef.current) return
 
@@ -82,15 +411,18 @@ export default function IFCViewer() {
     const camera = new THREE.PerspectiveCamera(
       75,
       containerRef.current.clientWidth / containerRef.current.clientHeight,
-      0.1,
-      1000
+      0.01,
+      10000
     )
     camera.position.set(10, 10, 10)
     camera.lookAt(0, 0, 0)
     cameraRef.current = camera
 
     // Renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      logarithmicDepthBuffer: true,
+    })
 
     // Canvas fills full container - sidebars are overlays
     const containerWidth = containerRef.current.clientWidth
@@ -125,6 +457,15 @@ export default function IFCViewer() {
     // Expose trigger function for external components
     triggerRenderRef.current = () => {
       needsRender = true
+      // useCamera + update: Fragments need camera sync for highlight/LOD to apply (Colorize rebuild)
+      const model = loadedModelRef.current
+      if (model?.fragmentsModel && cameraRef.current) {
+        model.fragmentsModel.useCamera(cameraRef.current)
+      }
+      if (fragmentsManagerRef.current) {
+        fragmentsManagerRef.current.update(true)
+      }
+      renderer.render(scene, camera)
     }
 
     const animate = () => {
@@ -222,9 +563,9 @@ export default function IFCViewer() {
         setZoomWindowActive(false)
       }
 
-      // F key to flip section direction
-      if ((e.key === 'f' || e.key === 'F') && sectionPlaneRef.current) {
-        sectionPlaneRef.current.flip()
+      // F key to flip section direction (only when a section exists)
+      if ((e.key === 'f' || e.key === 'F') && sectionPlaneManagerRef.current?.hasAnyEnabled()) {
+        sectionPlaneManagerRef.current.getActivePlane()?.flip()
       }
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -250,13 +591,18 @@ export default function IFCViewer() {
   // Reset view - clears all sections and shows full model
   const handleResetView = () => {
     // Clear section plane
-    if (sectionPlaneRef.current) {
-      sectionPlaneRef.current.disable()
+    if (sectionPlaneManagerRef.current) {
+      sectionPlaneManagerRef.current.clearAll()
     }
     // Reset visibility manager
     if (visibilityManagerRef.current) {
       visibilityManagerRef.current.resetAllVisibility()
     }
+    setColorMode('off')
+    setDoorFilterActive(false)
+    setDockStoreyFilterActive(false)
+    setDockSelectedDoorIds(new Set())
+    setDockResetKey(k => k + 1)
     // Reset class filters
     setActiveClassFilters(null)
     setActiveIFCClassFilters(null)
@@ -288,7 +634,15 @@ export default function IFCViewer() {
 
     if (type === 'arch') {
       setDoorContexts([])
+      setDockSelectedDoorIds(new Set())
       setArchFileName(file.name)
+      setColorMode('off')
+      setDoorFilterActive(false)
+      setDockStoreyFilterActive(false)
+      setActiveClassFilters(null)
+      setActiveIFCClassFilters(null)
+      setSectionMode('off')
+      setIsSectionActive(false)
     } else {
       setElecFileName(file.name)
     }
@@ -396,19 +750,22 @@ export default function IFCViewer() {
         setSpatialStructure(spatialRoot)
         spatialStructureRef.current = spatialRoot // Store in ref for immediate access
 
-        // Initialize section plane (for line drawing)
+        // Initialize section plane manager (supports multiple sections)
+        // Bounds = gesamte Geometrie (Arch-Modell; Electrical wird bei Bedarf ergänzt)
         const modelBounds = new THREE.Box3().setFromObject(group)
+        if (electricalModelGroupRef.current) {
+          modelBounds.union(new THREE.Box3().setFromObject(electricalModelGroupRef.current))
+        }
         if (sceneRef.current && rendererRef.current) {
-          const sectionPlane = new SectionPlane(
+          sectionPlaneManagerRef.current?.dispose()
+          const manager = new SectionPlaneManager(
             sceneRef.current,
             modelBounds,
             rendererRef.current
           )
-          // Set callback to trigger render when section changes (e.g., flip)
-          sectionPlane.setOnChangeCallback(() => {
-            triggerRenderRef.current()
-          })
-          sectionPlaneRef.current = sectionPlane
+          manager.setOnChangeCallback(() => triggerRenderRef.current())
+          manager.clearAll()
+          sectionPlaneManagerRef.current = manager
         }
 
         // Focus camera on the model geometry (accounting for visible canvas area)
@@ -490,6 +847,12 @@ export default function IFCViewer() {
           sceneRef.current.add(group)
           electricalModelGroupRef.current = group
         }
+        // Section-Bounds aktualisieren: gesamte Geometrie (Arch + Electrical)
+        if (sectionPlaneManagerRef.current && modelGroupRef.current) {
+          const combinedBounds = new THREE.Box3().setFromObject(modelGroupRef.current)
+          combinedBounds.union(new THREE.Box3().setFromObject(group))
+          sectionPlaneManagerRef.current.setBounds(combinedBounds)
+        }
       }
 
       // Re-analyze doors if Arch model is loaded
@@ -500,7 +863,7 @@ export default function IFCViewer() {
         let operationTypeMap: Map<number, string> | undefined
         let csetStandardCHMap: Map<number, {
           alTuernummer: string | null
-          informationType: string | null
+          geometryType: string | null
           massDurchgangsbreite: number | null
           massDurchgangshoehe: number | null
           massRohbreite: number | null
@@ -599,68 +962,83 @@ export default function IFCViewer() {
       {/* Top menu - only show when model is loaded */}
       {modelLoaded && (
         <div className="controls">
-          {/* Subtle logo with door opening animation */}
-          <div
-            className="logo-container"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              marginRight: '16px',
-              cursor: 'default',
+          <div className="controls-left">
+            {/* Subtle logo with door opening animation */}
+            <div
+              className="logo-container"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginRight: '16px',
+                cursor: 'default',
+              }}
+            >
+              <svg
+                width="28"
+                height="28"
+                viewBox="0 0 100 100"
+                style={{ display: 'block' }}
+              >
+                {/* Door frame */}
+                <rect x="20" y="10" width="60" height="80" fill="none" stroke="#4a5568" strokeWidth="2.5" strokeLinecap="round" />
+
+                {/* Door panel - will rotate on hover (hinge at left edge x=25) */}
+                <g className="door-panel">
+                  <rect x="25" y="15" width="50" height="70" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" strokeWidth="2" />
+                  <circle cx="70" cy="50" r="3" fill="#3b82f6" opacity="0.4" />
+                </g>
+              </svg>
+            </div>
+            <div className="file-inputs">
+              <div className="input-group">
+                <label htmlFor="ifc-file-input" className="file-input-label">
+                  {isLoading ? 'Loading...' : (archFileName || '1. Select Architectural IFC')}
+                </label>
+                <input
+                  id="ifc-file-input"
+                  type="file"
+                  accept=".ifc"
+                  onChange={(e) => handleFileChange(e, 'arch')}
+                  disabled={isLoading}
+                  className="file-input"
+                />
+              </div>
+
+              <div className="input-group">
+                <label htmlFor="elec-file-input" className="file-input-label secondary">
+                  {isLoading ? 'Loading...' : (elecFileName || '2. Select Electrical IFC (Optional)')}
+                </label>
+                <input
+                  id="elec-file-input"
+                  type="file"
+                  accept=".ifc"
+                  onChange={(e) => handleFileChange(e, 'elec')}
+                  disabled={isLoading}
+                  className="file-input"
+                />
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="header-shortcuts-btn"
+            title="Keyboard shortcuts"
+            onClick={() => {
+              alert(`Keyboard Shortcuts:
+
+Views:
+  1-7 — View presets (Top, Bottom, Front, Back, Left, Right, Iso)
+  Z — Zoom window
+
+Section:
+  R — Reset / Show full model
+  Shift — Constraint when drawing; Shift+Drag to move section after
+  F — Flip section direction
+  ESC — Cancel section drawing`)
             }}
           >
-            <svg
-              width="28"
-              height="28"
-              viewBox="0 0 100 100"
-              style={{ display: 'block' }}
-            >
-              {/* Door frame */}
-              <rect x="20" y="10" width="60" height="80" fill="none" stroke="#4a5568" strokeWidth="2.5" strokeLinecap="round" />
-
-              {/* Door panel - will rotate on hover (hinge at left edge x=25) */}
-              <g className="door-panel">
-                <rect x="25" y="15" width="50" height="70" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" strokeWidth="2" />
-                <circle cx="70" cy="50" r="3" fill="#3b82f6" opacity="0.4" />
-              </g>
-            </svg>
-          </div>
-          <div className="file-inputs">
-            <div className="input-group">
-              <label htmlFor="ifc-file-input" className="file-input-label">
-                {isLoading ? 'Loading...' : (archFileName || '1. Select Architectural IFC')}
-              </label>
-              <input
-                id="ifc-file-input"
-                type="file"
-                accept=".ifc"
-                onChange={(e) => handleFileChange(e, 'arch')}
-                disabled={isLoading}
-                className="file-input"
-              />
-            </div>
-
-            <div className="input-group">
-              <label htmlFor="elec-file-input" className="file-input-label secondary">
-                {isLoading ? 'Loading...' : (elecFileName || '2. Select Electrical IFC (Optional)')}
-              </label>
-              <input
-                id="elec-file-input"
-                type="file"
-                accept=".ifc"
-                onChange={(e) => handleFileChange(e, 'elec')}
-                disabled={isLoading}
-                className="file-input"
-              />
-            </div>
-          </div>
-
-          {error && <div className="error-message">{error}</div>}
-          {doorContexts.length > 0 && (
-            <div className="door-count">
-              Found {doorContexts.length} door{doorContexts.length !== 1 ? 's' : ''}
-            </div>
-          )}
+            ?
+          </button>
         </div>
       )}
       <div className="viewer-layout" style={{ position: 'relative' }}>
@@ -692,11 +1070,37 @@ export default function IFCViewer() {
             setIsSectionActive(true)
             triggerRenderRef.current() // Force render to show section
           }}
-          sectionPlane={sectionPlaneRef.current}
+          sectionPlaneManager={sectionPlaneManagerRef.current}
           camera={cameraRef.current}
           scene={sceneRef.current}
           containerRef={containerRef}
           triggerRender={triggerRenderRef.current}
+          rightPaletteOffsetPx={showBatchProcessor && doorContexts.length > 0 ? DOCK_RIGHT_OFFSET_PX : 0}
+        />
+
+        {/* Section Drag Overlay - for drag from top/bottom */}
+        <SectionDragOverlay
+          active={sectionMode === 'drag-top' || sectionMode === 'drag-bottom'}
+          direction={sectionMode === 'drag-top' ? 'top' : 'bottom'}
+          onComplete={() => setSectionMode('off')}
+          onSectionEnabled={() => {
+            setIsSectionActive(true)
+            triggerRenderRef.current()
+          }}
+          sectionPlaneManager={sectionPlaneManagerRef.current}
+          camera={cameraRef.current}
+          containerRef={containerRef}
+          triggerRender={triggerRenderRef.current}
+          rightPaletteOffsetPx={showBatchProcessor && doorContexts.length > 0 ? DOCK_RIGHT_OFFSET_PX : 0}
+        />
+
+        {/* Section Adjust Overlay - Shift+drag to move section when active */}
+        <SectionAdjustOverlay
+          active={isSectionActive && sectionMode === 'off'}
+          sectionPlaneManager={sectionPlaneManagerRef.current}
+          containerRef={containerRef}
+          triggerRender={triggerRenderRef.current}
+          rightPaletteOffsetPx={showBatchProcessor && doorContexts.length > 0 ? DOCK_RIGHT_OFFSET_PX : 0}
         />
 
         {/* Landing UI overlay when no model loaded */}
@@ -914,8 +1318,39 @@ export default function IFCViewer() {
               onComplete={() => {
                 // Optional callback when export completes
               }}
+              onShowSingleDoorReady={handleDockShowSingleDoorReady}
             />
           </div>
+        )}
+
+        {showBatchProcessor && doorContexts.length > 0 && (
+          <DoorListDock
+            key={dockResetKey}
+            doors={sortedDockDoors}
+            selectedDoorIds={dockSelectedDoorIds}
+            hoveredDoorId={dockHoveredDoorId}
+            getDoorLabel={getDockDoorLabel}
+            onToggleSelect={toggleDockDoorSelection}
+            onDoorClick={handleDockDoorClick}
+            onHoverDoorId={handleDockDoorHover}
+            onShowSingleDoor={handleDockShowSingleDoor}
+            sortIndicator={dockSortIndicator}
+            onSetSort={setDockSort}
+            hasActiveFilters={dockStoreyFilterActive}
+            onClearFilters={handleClearDockFilters}
+            scrollToDoorId={scrollToDoorId}
+            onScrollToDoorHandled={() => setScrollToDoorId(null)}
+            onStoreyFilterChange={handleStoreyFilterChange}
+            showColorColumn={colorMode === 'geometry-type'}
+            doorsForColorMap={doorContexts}
+            listContainerRef={dockListContainerRef}
+            dock
+            dockHeightPx={dockHeightPx}
+            onDockHeightChange={setDockHeightPx}
+            minDockHeightPx={120}
+            maxDockHeightPx={600}
+            dockRightOffsetPx={DOCK_RIGHT_OFFSET_PX}
+          />
         )}
       </div>
 
@@ -923,8 +1358,8 @@ export default function IFCViewer() {
         .file-inputs {
             display: flex;
             gap: 1rem;
-            margin-bottom: 0.5rem;
-            align-items: flex-start;
+            
+            align-items: center;
         }
         .input-group {
             display: flex;
@@ -1046,34 +1481,45 @@ export default function IFCViewer() {
           <ViewerToolbar
             navigationManager={navigationManagerRef.current}
             onSectionModeChange={(mode) => {
-              // Clear previous section when changing modes
-              if (sectionPlaneRef.current) {
-                sectionPlaneRef.current.disable()
-              }
-              // If turning off, clear section active state
-              if (mode === 'off') {
+              if (mode === 'off' && sectionPlaneManagerRef.current) {
+                sectionPlaneManagerRef.current.clearAll()
                 setIsSectionActive(false)
               }
               setSectionMode(mode)
-              triggerRenderRef.current() // Force render to show changes
+              triggerRenderRef.current()
             }}
             sectionMode={sectionMode}
             isSectionActive={isSectionActive}
-            onSpatialPanelToggle={() => setShowSpatialPanel(!showSpatialPanel)}
-            onTypeFilterToggle={() => setShowTypeFilter(!showTypeFilter)}
-            onIFCClassFilterToggle={() => setShowIFCClassFilter(!showIFCClassFilter)}
-            onZoomWindowToggle={() => setZoomWindowActive(!zoomWindowActive)}
             onResetView={handleResetView}
-            showSpatialPanel={showSpatialPanel}
-            showTypeFilter={showTypeFilter}
-            showIFCClassFilter={showIFCClassFilter}
-            zoomWindowActive={zoomWindowActive}
+            visibilityManager={visibilityManagerRef.current}
+            doorContexts={doorContexts}
+            colorMode={colorMode}
+            onColorModeChange={async (mode) => {
+              setColorMode(mode)
+              if (mode === 'off' && visibilityManagerRef.current) {
+                await visibilityManagerRef.current.clearGeometryColoring()
+                triggerRenderRef.current?.()
+                requestAnimationFrame(() => {
+                  requestAnimationFrame(() => triggerRenderRef.current?.())
+                })
+              } else {
+                triggerRenderRef.current?.()
+              }
+            }}
+            doorFilterActive={doorFilterActive}
+            onDoorFilterChange={(active) => {
+              setDoorFilterActive(active)
+              triggerRenderRef.current?.()
+            }}
+            onSyncIFCClassFilters={(ifcClasses) => {
+              setActiveIFCClassFilters(ifcClasses)
+              if (ifcClasses !== null) {
+                setActiveClassFilters(null)
+              }
+              triggerRenderRef.current?.()
+            }}
+            onTriggerRender={() => triggerRenderRef.current?.()}
           />
-
-          {/* View Presets */}
-          {navigationManagerRef.current && (
-            <ViewPresets navigationManager={navigationManagerRef.current} />
-          )}
 
           {/* Spatial Hierarchy Panel */}
           {showSpatialPanel && spatialStructure && (
@@ -1096,6 +1542,7 @@ export default function IFCViewer() {
                 if (filters !== null) {
                   setActiveIFCClassFilters(null)
                 }
+                triggerRenderRef.current?.()
               }}
               onClose={() => setShowTypeFilter(false)}
             />
@@ -1113,6 +1560,7 @@ export default function IFCViewer() {
                 if (filters !== null) {
                   setActiveClassFilters(null)
                 }
+                triggerRenderRef.current?.()
               }}
               onClose={() => setShowIFCClassFilter(false)}
             />

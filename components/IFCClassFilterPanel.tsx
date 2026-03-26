@@ -24,6 +24,7 @@ export default function IFCClassFilterPanel({
   const visibleClasses = activeFilters
   const setVisibleClasses = onFiltersChange
   const isApplying = useRef(false) // Prevent double-calls
+  const pendingFiltersRef = useRef<Set<string> | null | undefined>(undefined) // undefined = none pending
 
   // Get unique IFC class names from elements with counts
   // Only shows typeName (IFC class like IFCDOOR, IFCWALL, etc.)
@@ -58,22 +59,40 @@ export default function IFCClassFilterPanel({
     )
   }, [classCategories, searchQuery])
 
-  // Apply filter directly (not via useEffect)
+  // Apply filter directly (not via useEffect). Uses shared queue so TypeFilterPanel etc. don't race.
   const applyFilter = async (classes: Set<string> | null) => {
-    if (!visibilityManager || isApplying.current) return
+    if (!visibilityManager) return
+    if (isApplying.current) {
+      pendingFiltersRef.current = classes
+      return
+    }
 
     isApplying.current = true
+    let pending: Set<string> | null | undefined
+    let capturedError: unknown
     try {
-      if (classes === null) {
-        console.log('IFCClassFilter: Resetting to show all')
-        await visibilityManager.resetAllVisibility()
-      } else {
-        const classesToShow = Array.from(classes)
-        console.log('IFCClassFilter: Filtering to:', classesToShow)
-        await visibilityManager.filterByIFCClass(classesToShow)
-      }
+      await visibilityManager.enqueueFilterUpdate(async () => {
+        if (classes === null) {
+          console.log('IFCClassFilter: Resetting to show all')
+          await visibilityManager!.clearIFCClassFilters()
+        } else {
+          const classesToShow = Array.from(classes)
+          console.log('IFCClassFilter: Filtering to:', classesToShow)
+          await visibilityManager!.filterByIFCClass(classesToShow)
+        }
+      })
+    } catch (err) {
+      capturedError = err
     } finally {
       isApplying.current = false
+      pending = pendingFiltersRef.current
+      pendingFiltersRef.current = undefined
+    }
+    if (pending !== undefined) {
+      await applyFilter(pending)
+    }
+    if (capturedError !== undefined) {
+      throw capturedError
     }
   }
 
