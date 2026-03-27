@@ -40,9 +40,9 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
     margin: 0.5,
-    doorColor: '#333333',
-    wallColor: '#5B7DB1',
-    deviceColor: '#CC0000',
+    doorColor: '#dedede',
+    wallColor: '#e3e3e3',
+    deviceColor: '#fcc647',
     backgroundColor: '#f5f5f5', // Light gray background
     lineWidth: 1.5,
     lineColor: '#000000',
