@@ -1319,6 +1319,7 @@ Section:
             hoveredDoorId={dockHoveredDoorId}
             getDoorLabel={getDockDoorLabel}
             onToggleSelect={toggleDockDoorSelection}
+            onClearSelection={() => setDockSelectedDoorIds(new Set())}
             onDoorClick={handleDockDoorClick}
             onHoverDoorId={handleDockDoorHover}
             onShowSingleDoor={handleDockShowSingleDoor}

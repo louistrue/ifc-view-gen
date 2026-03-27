@@ -144,6 +144,7 @@ export type DoorListDockProps = {
   // behaviors
   getDoorLabel: (door: DoorContext) => string
   onToggleSelect: (doorId: string) => void
+  onClearSelection?: () => void
   onDoorClick: (door: DoorContext) => void
   onHoverDoorId: (doorId: string | null) => void
   onShowSingleDoor: (door: DoorContext, view: ViewKind) => void
@@ -184,6 +185,7 @@ export default function DoorListDock({
   hoveredDoorId,
   getDoorLabel,
   onToggleSelect,
+  onClearSelection,
   onDoorClick,
   onHoverDoorId,
   onShowSingleDoor,
@@ -1072,7 +1074,20 @@ export default function DoorListDock({
       {doors.length > 0 && (
         <div className="list-footer">
           {`${visibleDoors.length} von ${filteredDoors.length} Türen angezeigt (Anzeigelimit ${maxItems} Türen)`}
-          {selectedDoorIds.size > 0 && ` | ${selectedDoorIds.size} selektiert`}
+          {selectedDoorIds.size > 0 && (
+            <>
+              {' | '}
+              {selectedDoorIds.size} selektiert
+              {onClearSelection && (
+                <>
+                  {' '}
+                  <button type="button" className="text-button" onClick={onClearSelection}>
+                    Selektion zurücksetzen
+                  </button>
+                </>
+              )}
+            </>
+          )}
           {hasLocalFilters && (
             <>
               {' | '}
