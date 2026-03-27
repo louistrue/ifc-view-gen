@@ -20,6 +20,8 @@ interface AirtableAuthStatus {
 
 interface DoorPanelProps {
   doorContexts: DoorContext[]
+  /** Checkbox selection in the bottom DoorListDock — drives ZIP / Airtable export. */
+  dockSelectedDoorIds: Set<string>
   visibilityManager: ElementVisibilityManager | null
   navigationManager: NavigationManager | null
   modelSource?: string
@@ -33,6 +35,7 @@ interface AirtableStatus {
 
 export default function DoorPanel({
   doorContexts,
+  dockSelectedDoorIds,
   visibilityManager,
   navigationManager,
   modelSource,
@@ -50,8 +53,6 @@ export default function DoorPanel({
   const [storeyExpanded, setStoreyExpanded] = useState(false)
   const [typeExpanded, setTypeExpanded] = useState(true)
 
-  // Selection state
-  const [selectedDoorIds, setSelectedDoorIds] = useState<Set<string>>(new Set())
   const [hoveredDoorId, setHoveredDoorId] = useState<string | null>(null)
 
   // UI state
@@ -156,13 +157,13 @@ export default function DoorPanel({
     return result
   }, [doorContexts, selectedTypes, selectedStoreys, searchQuery])
 
-  // Doors to process (selected or filtered)
+  // Doors to process: dock checkboxes when any; else all doors matching this panel’s filters
   const doorsToProcess = useMemo(() => {
-    if (selectedDoorIds.size > 0) {
-      return filteredDoors.filter(d => selectedDoorIds.has(d.doorId))
+    if (dockSelectedDoorIds.size > 0) {
+      return doorContexts.filter(d => dockSelectedDoorIds.has(d.doorId))
     }
     return filteredDoors
-  }, [filteredDoors, selectedDoorIds])
+  }, [filteredDoors, doorContexts, dockSelectedDoorIds])
 
   const getDoorLabel = useCallback((door: DoorContext) => {
     return door.csetStandardCH?.alTuernummer
@@ -326,29 +327,6 @@ export default function DoorPanel({
       2.5
     )
   }, [navigationManager, visibilityManager])
-
-  // Toggle door selection
-  const toggleDoorSelection = useCallback((doorId: string) => {
-    setSelectedDoorIds(prev => {
-      const next = new Set(prev)
-      if (next.has(doorId)) {
-        next.delete(doorId)
-      } else {
-        next.add(doorId)
-      }
-      return next
-    })
-  }, [])
-
-  // Select all filtered doors
-  const selectAllFiltered = useCallback(() => {
-    setSelectedDoorIds(new Set(filteredDoors.map(d => d.doorId)))
-  }, [filteredDoors])
-
-  // Clear selection
-  const clearSelection = useCallback(() => {
-    setSelectedDoorIds(new Set())
-  }, [])
 
   // Clear all filters
   const clearFilters = useCallback(() => {
@@ -835,24 +813,17 @@ export default function DoorPanel({
         </div>
       )}
 
-      {/* Selection Controls */}
+      {/* Export selection is driven by checkboxes in the bottom dock */}
       <div className="selection-controls">
         <div className="selection-info">
-          {selectedDoorIds.size > 0 ? (
-            <span>{selectedDoorIds.size} selected</span>
+          {dockSelectedDoorIds.size > 0 ? (
+            <span>{dockSelectedDoorIds.size} selected for export</span>
           ) : (
-            <span>{filteredDoors.length} doors</span>
+            <span>{filteredDoors.length} doors (all matching filters)</span>
           )}
         </div>
-        <div className="selection-actions">
-          <button className="text-button" onClick={selectAllFiltered}>
-            Select all
-          </button>
-          {selectedDoorIds.size > 0 && (
-            <button className="text-button" onClick={clearSelection}>
-              Clear
-            </button>
-          )}
+        <div className="selection-hint">
+          Use checkboxes in the bottom table to choose specific doors for ZIP / Airtable.
         </div>
       </div>
 
@@ -870,7 +841,6 @@ export default function DoorPanel({
         ) : (
           <>
             <div className="door-list-header">
-              <span />
               <button className="list-header-button" onClick={() => toggleSort('door')}>
                 <span className="label-text">Door</span>
                 <span className="sort-indicator">{sortIndicator('door')}</span>
@@ -889,19 +859,10 @@ export default function DoorPanel({
             {sortedDoors.slice(0, 100).map((door) => (
               <div
                 key={door.doorId}
-                className={`door-row ${selectedDoorIds.has(door.doorId) ? 'selected' : ''} ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
+                className={`door-row ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
                 onMouseEnter={() => handleDoorHover(door.doorId)}
                 onMouseLeave={() => handleDoorHover(null)}
               >
-                <label className="door-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={selectedDoorIds.has(door.doorId)}
-                    onChange={() => toggleDoorSelection(door.doorId)}
-                  />
-                  <span className="checkmark" />
-                </label>
-
                 <button className="door-name" onClick={() => handleDoorClick(door)} title={getDoorLabel(door)}>
                   {getDoorLabel(door)}
                 </button>
@@ -1307,8 +1268,8 @@ export default function DoorPanel({
 
         .selection-controls {
           display: flex;
-          justify-content: space-between;
-          align-items: center;
+          flex-direction: column;
+          gap: 6px;
           padding: 10px 12px;
           background: #171717;
           border-bottom: 1px solid #2d2d2d;
@@ -1319,9 +1280,10 @@ export default function DoorPanel({
           color: #888;
         }
 
-        .selection-actions {
-          display: flex;
-          gap: 10px;
+        .selection-hint {
+          font-size: 11px;
+          line-height: 1.35;
+          color: #6b7280;
         }
 
         .text-button {
@@ -1357,7 +1319,7 @@ export default function DoorPanel({
 
         .door-list-header {
           display: grid;
-          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
+          grid-template-columns: minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
           gap: 8px;
           padding: 8px 12px;
           background: #1d1d1d;
@@ -1415,7 +1377,7 @@ export default function DoorPanel({
 
         .door-row {
           display: grid;
-          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
+          grid-template-columns: minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
           gap: 8px;
           align-items: center;
           min-height: 36px;
@@ -1426,53 +1388,6 @@ export default function DoorPanel({
 
         .door-row:hover, .door-row.hovered {
           background: #242424;
-        }
-
-        .door-row.selected {
-          background: rgba(37, 99, 235, 0.14);
-        }
-
-        .door-checkbox {
-          position: relative;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .door-checkbox input {
-          width: 16px;
-          height: 16px;
-          opacity: 0;
-          position: absolute;
-          cursor: pointer;
-        }
-
-        .door-checkbox .checkmark {
-          width: 14px;
-          height: 14px;
-          border: 1px solid #606060;
-          border-radius: 4px;
-          background: #1a1a1a;
-          transition: all 0.15s ease;
-          position: relative;
-          display: inline-block;
-        }
-
-        .door-checkbox input:checked + .checkmark {
-          background: #2563eb;
-          border-color: #2563eb;
-        }
-
-        .door-checkbox input:checked + .checkmark::after {
-          content: '';
-          position: absolute;
-          left: 50%;
-          top: 48%;
-          width: 4px;
-          height: 7px;
-          border: solid #fff;
-          border-width: 0 2px 2px 0;
-          transform: translate(-50%, -50%) rotate(45deg);
         }
 
         .door-name {

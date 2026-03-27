@@ -1313,6 +1313,7 @@ Section:
           <div className="batch-panel">
             <DoorPanel
               doorContexts={doorContexts}
+              dockSelectedDoorIds={dockSelectedDoorIds}
               visibilityManager={visibilityManagerRef.current}
               navigationManager={navigationManagerRef.current}
               onComplete={() => {
