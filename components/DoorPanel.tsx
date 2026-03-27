@@ -2,7 +2,6 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
-import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
 import JSZip from 'jszip'
 import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
@@ -20,7 +19,6 @@ interface DoorPanelProps {
   doorContexts: DoorContext[]
   /** Checkbox selection in the bottom DoorListDock — drives ZIP / Airtable export. */
   dockSelectedDoorIds: Set<string>
-  visibilityManager: ElementVisibilityManager | null
   modelSource?: string
   onComplete?: () => void
   onShowSingleDoorReady?: (showSingleDoor: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => void
@@ -33,16 +31,11 @@ interface AirtableStatus {
 export default function DoorPanel({
   doorContexts,
   dockSelectedDoorIds,
-  visibilityManager,
   modelSource,
   onComplete,
   onShowSingleDoorReady,
 }: DoorPanelProps) {
-  const [isolateAllDoors, setIsolateAllDoors] = useState(false)
-  const [dimAllDoors, setDimAllDoors] = useState(false)
-
   // UI state
-  const [showStyleOptions, setShowStyleOptions] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -53,12 +46,6 @@ export default function DoorPanel({
   const [modalImage, setModalImage] = useState<{ svg: string; doorId: string; view: string } | null>(null)
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
-
-  // Refs
-  const isControllingVisibilityRef = useRef(false)
-  const visibilitySyncRunIdRef = useRef(0)
-  const visibilityManagerRef = useRef(visibilityManager)
-  visibilityManagerRef.current = visibilityManager
 
   // SVG render options
   const [options, setOptions] = useState<SVGRenderOptions>({
@@ -137,55 +124,6 @@ export default function DoorPanel({
   }
 
   const isAirtableReady = authStatus?.isAuthenticated === true
-
-  // Isolate / dim all doors in the model (filtering is in the bottom dock)
-  useEffect(() => {
-    if (!visibilityManager) return
-
-    visibilitySyncRunIdRef.current += 1
-    const runId = visibilitySyncRunIdRef.current
-
-    const run = async () => {
-      try {
-        if (isolateAllDoors && doorContexts.length > 0) {
-          const doorExpressIds = doorContexts.map(d => d.door.expressID)
-          if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.isolateElements(doorExpressIds, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
-          if (runId !== visibilitySyncRunIdRef.current) return
-          isControllingVisibilityRef.current = true
-        } else if (dimAllDoors && doorContexts.length > 0) {
-          const doorExpressIds = doorContexts.map(d => d.door.expressID)
-          if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.dimNonSelectedElements(doorExpressIds, 0.3, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
-          if (runId !== visibilitySyncRunIdRef.current) return
-          isControllingVisibilityRef.current = true
-        } else if (isControllingVisibilityRef.current) {
-          if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.clearSelectionAndDimState()
-          if (runId !== visibilitySyncRunIdRef.current) return
-          isControllingVisibilityRef.current = false
-        }
-      } catch (err) {
-        console.error('[DoorPanel] Visibility sync error:', err)
-      }
-    }
-    run()
-
-    return () => {
-      visibilitySyncRunIdRef.current += 1
-    }
-  }, [doorContexts, isolateAllDoors, dimAllDoors, visibilityManager])
-
-  // Unmount-only cleanup: reset visibility state when DoorPanel unmounts
-  useEffect(() => {
-    return () => {
-      const vm = visibilityManagerRef.current
-      if (vm) {
-        vm.clearSelectionAndDimState().catch(() => {})
-      }
-      isControllingVisibilityRef.current = false
-    }
-  }, [])
 
   // Show single door preview
   const showSingleDoor = useCallback(
@@ -431,36 +369,6 @@ export default function DoorPanel({
           <span className="door-count-badge">{doorContexts.length}</span>
         </div>
         <div className="header-actions">
-          <button
-            className={`icon-button ${isolateAllDoors ? 'active' : ''}`}
-            aria-label={isolateAllDoors ? 'Show all elements' : 'Isolate all doors in 3D'}
-            aria-pressed={isolateAllDoors}
-            onClick={() => {
-              setIsolateAllDoors(prev => !prev)
-              if (!isolateAllDoors) setDimAllDoors(false)
-            }}
-            title={isolateAllDoors ? 'Show all elements' : 'Isolate all doors in 3D'}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <circle cx="12" cy="12" r="4" />
-            </svg>
-          </button>
-          <button
-            className={`icon-button ${dimAllDoors ? 'active' : ''}`}
-            aria-label={dimAllDoors ? 'Show all elements' : 'Dim everything except doors'}
-            aria-pressed={dimAllDoors}
-            onClick={() => {
-              setDimAllDoors(prev => !prev)
-              if (!dimAllDoors) setIsolateAllDoors(false)
-            }}
-            title={dimAllDoors ? 'Show all elements' : 'Dim everything except doors'}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="3" width="18" height="18" rx="2" opacity="0.5" />
-              <rect x="7" y="7" width="10" height="10" rx="1" />
-            </svg>
-          </button>
           {/* Settings / Airtable button */}
           <div className="settings-wrapper" ref={settingsRef}>
             <button
@@ -539,65 +447,45 @@ export default function DoorPanel({
 
       {/* Export Section */}
       <div className="export-section">
-        {/* Collapsible Style Options */}
-        <button
-          className="section-toggle"
-          onClick={() => setShowStyleOptions(!showStyleOptions)}
-        >
-          <span>Style Options</span>
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            style={{ transform: showStyleOptions ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}
-          >
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </button>
-
-        {showStyleOptions && (
-          <div className="style-options">
-            <div className="option-row">
-              <label>Door</label>
-              <input type="color" value={options.doorColor || '#333333'} onChange={(e) => setOptions({ ...options, doorColor: e.target.value })} />
-            </div>
-            <div className="option-row">
-              <label>Wall</label>
-              <input type="color" value={options.wallColor || '#5B7DB1'} onChange={(e) => setOptions({ ...options, wallColor: e.target.value })} />
-            </div>
-            <div className="option-row">
-              <label>Device</label>
-              <input type="color" value={options.deviceColor || '#CC0000'} onChange={(e) => setOptions({ ...options, deviceColor: e.target.value })} />
-            </div>
-            <div className="option-row">
-              <label>Line Width</label>
-              <input type="number" min="0.5" max="5" step="0.5" value={options.lineWidth || 1.5} onChange={(e) => setOptions({ ...options, lineWidth: parseFloat(e.target.value) })} />
-            </div>
-            <div className="option-row">
-              <label>Wall Sides %</label>
-              <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealSide ?? 0.12) * 100)} onChange={(e) => setOptions({ ...options, wallRevealSide: parseFloat(e.target.value) / 100 })} />
-            </div>
-            <div className="option-row">
-              <label>Wall Top %</label>
-              <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealTop ?? 0.04) * 100)} onChange={(e) => setOptions({ ...options, wallRevealTop: parseFloat(e.target.value) / 100 })} />
-            </div>
-            <div className="option-row checkbox">
-              <label>
-                <input type="checkbox" checked={options.showLegend} onChange={(e) => setOptions({ ...options, showLegend: e.target.checked })} />
-                Show Legend
-              </label>
-            </div>
-            <div className="option-row checkbox">
-              <label>
-                <input type="checkbox" checked={options.showLabels} onChange={(e) => setOptions({ ...options, showLabels: e.target.checked })} />
-                Show Labels
-              </label>
-            </div>
+        <h3 className="style-options-title">Style Options</h3>
+        <div className="style-options">
+          <div className="option-row">
+            <label>Door</label>
+            <input type="color" value={options.doorColor || '#333333'} onChange={(e) => setOptions({ ...options, doorColor: e.target.value })} />
           </div>
-        )}
+          <div className="option-row">
+            <label>Wall</label>
+            <input type="color" value={options.wallColor || '#5B7DB1'} onChange={(e) => setOptions({ ...options, wallColor: e.target.value })} />
+          </div>
+          <div className="option-row">
+            <label>Device</label>
+            <input type="color" value={options.deviceColor || '#CC0000'} onChange={(e) => setOptions({ ...options, deviceColor: e.target.value })} />
+          </div>
+          <div className="option-row">
+            <label>Line Width</label>
+            <input type="number" min="0.5" max="5" step="0.5" value={options.lineWidth || 1.5} onChange={(e) => setOptions({ ...options, lineWidth: parseFloat(e.target.value) })} />
+          </div>
+          <div className="option-row">
+            <label>Wall Sides %</label>
+            <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealSide ?? 0.12) * 100)} onChange={(e) => setOptions({ ...options, wallRevealSide: parseFloat(e.target.value) / 100 })} />
+          </div>
+          <div className="option-row">
+            <label>Wall Top %</label>
+            <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealTop ?? 0.04) * 100)} onChange={(e) => setOptions({ ...options, wallRevealTop: parseFloat(e.target.value) / 100 })} />
+          </div>
+          <div className="option-row checkbox">
+            <label>
+              <input type="checkbox" checked={options.showLegend} onChange={(e) => setOptions({ ...options, showLegend: e.target.checked })} />
+              Show Legend
+            </label>
+          </div>
+          <div className="option-row checkbox">
+            <label>
+              <input type="checkbox" checked={options.showLabels} onChange={(e) => setOptions({ ...options, showLabels: e.target.checked })} />
+              Show Labels
+            </label>
+          </div>
+        </div>
 
         {/* Progress */}
         {isProcessing && (
@@ -766,20 +654,21 @@ export default function DoorPanel({
           display: flex;
           flex-direction: column;
           gap: 6px;
-          padding: 10px 12px;
-          background: #171717;
-          border-bottom: 1px solid #2d2d2d;
-          font-size: 12px;
+          padding: 12px 16px;
+          background: #333;
+          font-size: 11px;
+          color: #888;
         }
 
         .selection-info {
+          font-size: 11px;
           color: #888;
         }
 
         .selection-hint {
           font-size: 11px;
           line-height: 1.35;
-          color: #6b7280;
+          color: #888;
         }
 
         .export-section {
@@ -788,28 +677,20 @@ export default function DoorPanel({
           background: #333;
         }
 
-        .section-toggle {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          width: 100%;
-          padding: 8px 0;
-          background: none;
-          border: none;
-          color: #aaa;
+        .style-options-title {
+          margin: 0 0 4px;
           font-size: 12px;
-          cursor: pointer;
-        }
-
-        .section-toggle:hover {
-          color: #fff;
+          font-weight: 600;
+          color: #aaa;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
         }
 
         .style-options {
           display: grid;
           grid-template-columns: 1fr 1fr;
           gap: 8px;
-          padding: 12px 0;
+          padding: 8px 0 12px;
         }
 
         .option-row {

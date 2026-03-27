@@ -1314,7 +1314,6 @@ Section:
             <DoorPanel
               doorContexts={doorContexts}
               dockSelectedDoorIds={dockSelectedDoorIds}
-              visibilityManager={visibilityManagerRef.current}
               onComplete={() => {
                 // Optional callback when export completes
               }}
