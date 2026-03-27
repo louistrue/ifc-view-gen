@@ -41,6 +41,7 @@ export interface DoorContext {
         gebaeude: string | null
         feuerwiderstand: string | null
         bauschalldaemmmass: string | null
+        festverglasung: string | null
     }
 
     // Detailed geometry from web-ifc (for high-quality SVG rendering)
@@ -92,6 +93,7 @@ type CsetStandardCH = {
     gebaeude: string | null
     feuerwiderstand: string | null
     bauschalldaemmmass: string | null
+    festverglasung: string | null
 }
 
 function emptyCsetStandardCH(): CsetStandardCH {
@@ -108,6 +110,7 @@ function emptyCsetStandardCH(): CsetStandardCH {
         gebaeude: null,
         feuerwiderstand: null,
         bauschalldaemmmass: null,
+        festverglasung: null,
     }
 }
 
@@ -159,6 +162,11 @@ function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue:
     } else if (normalized === 'bauschalldammmass' || normalized === 'bauschalldaemmmass') {
         const value = unwrapIfcValue(rawValue)
         if (typeof value === 'string' && value.trim()) target.bauschalldaemmmass = value.trim()
+    } else if (normalized === 'festverglasung') {
+        const value = unwrapIfcValue(rawValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.festverglasung = s
     }
 }
 
@@ -175,6 +183,7 @@ function hasCsetValues(data: CsetStandardCH): boolean {
         || data.gebaeude !== null
         || data.feuerwiderstand !== null
         || data.bauschalldaemmmass !== null
+        || data.festverglasung !== null
 }
 
 async function getDoorCsetStandardCH(

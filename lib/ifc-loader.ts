@@ -222,6 +222,7 @@ export interface DoorCsetStandardCHData {
     gebaeude: string | null
     feuerwiderstand: string | null
     bauschalldaemmmass: string | null
+    festverglasung: string | null
 }
 
 function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
@@ -238,6 +239,7 @@ function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
         gebaeude: null,
         feuerwiderstand: null,
         bauschalldaemmmass: null,
+        festverglasung: null,
     }
 }
 
@@ -335,6 +337,13 @@ function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nom
     if (normalized === 'bauschalldammmass' || normalized === 'bauschalldaemmmass') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) target.bauschalldaemmmass = value.trim()
+        return
+    }
+    if (normalized === 'festverglasung') {
+        const value = unwrapIfcValue(nominalValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.festverglasung = s
     }
 }
 
