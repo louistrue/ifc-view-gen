@@ -5,7 +5,10 @@ import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
+import { analyzeWalls, loadWallDetailedGeometry } from '@/lib/wall-analyzer'
+import type { WallContext } from '@/lib/wall-analyzer'
 import DoorPanel from './DoorPanel'
+import WallPanel from './WallPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
@@ -40,6 +43,8 @@ export default function IFCViewer() {
   const [loadingStage, setLoadingStage] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [doorContexts, setDoorContexts] = useState<DoorContext[]>([])
+  const [wallContexts, setWallContexts] = useState<WallContext[]>([])
+  const [viewerMode, setViewerMode] = useState<'doors' | 'walls'>('doors')
   const [showBatchProcessor, setShowBatchProcessor] = useState(false)
 
   // DoorListDock
@@ -634,6 +639,7 @@ export default function IFCViewer() {
 
     if (type === 'arch') {
       setDoorContexts([])
+      setWallContexts([])
       setDockSelectedDoorIds(new Set())
       setArchFileName(file.name)
       setColorMode('off')
@@ -906,6 +912,26 @@ export default function IFCViewer() {
 
         setDoorContexts(contexts)
 
+        // Analyze walls with hosted elements (windows, electrical, doors)
+        setLoadingStage('Analyzing walls...')
+        const wallCtxs = await analyzeWalls(
+          loadedModelRef.current,
+          electricalModelRef.current || undefined,
+          spatialStructureRef.current
+        )
+
+        // Load detailed wall geometry for SVG rendering
+        if (archFileRef.current && wallCtxs.length > 0) {
+          setLoadingStage('Extracting wall geometry...')
+          try {
+            await loadWallDetailedGeometry(wallCtxs, archFileRef.current, modelCenterOffsetRef.current)
+          } catch (err) {
+            console.warn('Failed to load wall detailed geometry:', err)
+          }
+        }
+
+        setWallContexts(wallCtxs)
+
         if (loadedModelRef.current.elements.length > 0) {
           setShowBatchProcessor(true)
           batchProcessorVisibleRef.current = true
@@ -1018,6 +1044,45 @@ export default function IFCViewer() {
                 />
               </div>
             </div>
+            {/* Mode toggle: Doors / Walls */}
+            {showBatchProcessor && (
+              <div style={{ display: 'flex', gap: '2px', backgroundColor: '#333', borderRadius: '6px', padding: '2px', marginLeft: '12px' }}>
+                <button
+                  type="button"
+                  onClick={() => setViewerMode('doors')}
+                  style={{
+                    padding: '4px 12px',
+                    border: 'none',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    backgroundColor: viewerMode === 'doors' ? '#3b82f6' : 'transparent',
+                    color: viewerMode === 'doors' ? '#fff' : '#aaa',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  Doors ({doorContexts.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewerMode('walls')}
+                  style={{
+                    padding: '4px 12px',
+                    border: 'none',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    backgroundColor: viewerMode === 'walls' ? '#3b82f6' : 'transparent',
+                    color: viewerMode === 'walls' ? '#fff' : '#aaa',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  Walls ({wallContexts.length})
+                </button>
+              </div>
+            )}
           </div>
           <button
             type="button"
@@ -1166,7 +1231,7 @@ Section:
                   fontFamily: 'system-ui, -apple-system, sans-serif',
                 }}
               >
-                Door View Generator
+                IFC Element View Generator
               </h2>
               <p
                 style={{
@@ -1178,7 +1243,7 @@ Section:
                   lineHeight: '1.6',
                 }}
               >
-                Generate professional SVG door views from IFC building models.
+                Generate professional SVG views of doors, walls, windows, and electrical components from IFC building models.
                 Upload an architectural IFC file to get started.
               </p>
             </div>
@@ -1259,7 +1324,7 @@ Section:
               <div style={{ width: '40px', height: '1px', backgroundColor: '#333', marginTop: '16px' }} />
               <div style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#666' }}>2</div>
-                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>Find Doors</div>
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>Find Elements</div>
               </div>
               <div style={{ width: '40px', height: '1px', backgroundColor: '#333', marginTop: '16px' }} />
               <div style={{ textAlign: 'center' }}>
@@ -1309,7 +1374,7 @@ Section:
           </div>
         )}
 
-        {showBatchProcessor && doorContexts.length > 0 && (
+        {showBatchProcessor && viewerMode === 'doors' && doorContexts.length > 0 && (
           <div className="batch-panel">
             <DoorPanel
               doorContexts={doorContexts}
@@ -1323,7 +1388,17 @@ Section:
           </div>
         )}
 
-        {showBatchProcessor && doorContexts.length > 0 && (
+        {showBatchProcessor && viewerMode === 'walls' && wallContexts.length > 0 && (
+          <div className="batch-panel">
+            <WallPanel
+              wallContexts={wallContexts}
+              visibilityManager={visibilityManagerRef.current}
+              navigationManager={navigationManagerRef.current}
+            />
+          </div>
+        )}
+
+        {showBatchProcessor && viewerMode === 'doors' && doorContexts.length > 0 && (
           <DoorListDock
             key={dockResetKey}
             doors={sortedDockDoors}
