@@ -5,10 +5,10 @@ import type { CSSProperties, MutableRefObject, RefObject } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
 import { GEOMETRY_TYPE_COLORS_HEX } from '@/lib/element-visibility-manager'
 
-type SortField = 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
+type SortField = 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
 type ViewKind = 'front' | 'back' | 'plan'
 
-type ColKey = 'check' | 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'views' | 'guid'
+type ColKey = 'check' | 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'views' | 'guid'
 type StringSet = Set<string>
 
 function SearchIcon() {
@@ -28,7 +28,7 @@ function FilterIcon() {
   )
 }
 
-type ExcludeDropdownFilter = 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'isExternal'
+type ExcludeDropdownFilter = 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal'
 
 function filterDoorsWithExclude(
   doors: DoorContext[],
@@ -39,6 +39,7 @@ function filterDoorsWithExclude(
     brandschutzFilterSet: Set<string>
     schallschutzFilterSet: Set<string>
     festverglasungFilterSet: Set<string>
+    cfcBkpCccBccFilterSet: Set<string>
     isExternalFilterSet: Set<string>
     lbFilter: string
     lhFilter: string
@@ -86,6 +87,10 @@ function filterDoorsWithExclude(
       const fvVal = door.csetStandardCH?.festverglasung || '—'
       if (!opts.festverglasungFilterSet.has(fvVal)) return false
     }
+    if (opts.exclude !== 'cfcBkpCccBcc' && opts.cfcBkpCccBccFilterSet.size > 0) {
+      const cfcVal = door.csetStandardCH?.cfcBkpCccBcc || '—'
+      if (!opts.cfcBkpCccBccFilterSet.has(cfcVal)) return false
+    }
     if (opts.exclude !== 'isExternal' && opts.isExternalFilterSet.size > 0) {
       const extVal = door.csetStandardCH?.isExternal || '—'
       if (!opts.isExternalFilterSet.has(extVal)) return false
@@ -130,6 +135,7 @@ const COLS: Array<{ key: ColKey; min: number; initial: number }> = [
   { key: 'brandschutz', min: 90, initial: 110 },
   { key: 'schallschutz', min: 90, initial: 110 },
   { key: 'festverglasung', min: 90, initial: 110 },
+  { key: 'cfcBkpCccBcc', min: 100, initial: 140 },
   { key: 'isExternal', min: 72, initial: 100 },
   { key: 'lb', min: 56, initial: 72 },
   { key: 'lh', min: 56, initial: 72 },
@@ -219,6 +225,7 @@ export default function DoorListDock({
    const [brandschutzFilterSet, setBrandschutzFilterSet] = useState<Set<string>>(new Set())
    const [schallschutzFilterSet, setSchallschutzFilterSet] = useState<Set<string>>(new Set())
    const [festverglasungFilterSet, setFestverglasungFilterSet] = useState<Set<string>>(new Set())
+   const [cfcBkpCccBccFilterSet, setCfcBkpCccBccFilterSet] = useState<Set<string>>(new Set())
    const [isExternalFilterSet, setIsExternalFilterSet] = useState<Set<string>>(new Set())
    const [lbFilter, setLbFilter] = useState('')
    const [lhFilter, setLhFilter] = useState('')
@@ -363,6 +370,7 @@ export default function DoorListDock({
        brandschutzFilterSet,
        schallschutzFilterSet,
        festverglasungFilterSet,
+       cfcBkpCccBccFilterSet,
        isExternalFilterSet,
        lbFilter,
        lhFilter,
@@ -374,7 +382,7 @@ export default function DoorListDock({
        getDoorLabel,
        formatNum,
      }),
-     [doorFilter, typeFilterSet, storeyFilter, brandschutzFilterSet, schallschutzFilterSet, festverglasungFilterSet, isExternalFilterSet, lbFilter, lhFilter, rbFilter, rhFilter, bramFilter, hramFilter, guidFilter, getDoorLabel, formatNum]
+     [doorFilter, typeFilterSet, storeyFilter, brandschutzFilterSet, schallschutzFilterSet, festverglasungFilterSet, cfcBkpCccBccFilterSet, isExternalFilterSet, lbFilter, lhFilter, rbFilter, rhFilter, bramFilter, hramFilter, guidFilter, getDoorLabel, formatNum]
    )
 
    const filteredDoors = useMemo(
@@ -402,6 +410,10 @@ export default function DoorListDock({
      () => filterDoorsWithExclude(doors, { ...filterOpts, exclude: 'festverglasung' }),
      [doors, filterOpts]
    )
+   const doorsForCfcBkpCccBccOptions = useMemo(
+     () => filterDoorsWithExclude(doors, { ...filterOpts, exclude: 'cfcBkpCccBcc' }),
+     [doors, filterOpts]
+   )
    const doorsForIsExternalOptions = useMemo(
      () => filterDoorsWithExclude(doors, { ...filterOpts, exclude: 'isExternal' }),
      [doors, filterOpts]
@@ -417,6 +429,7 @@ export default function DoorListDock({
      setBrandschutzFilterSet(new Set())
      setSchallschutzFilterSet(new Set())
      setFestverglasungFilterSet(new Set())
+     setCfcBkpCccBccFilterSet(new Set())
      setIsExternalFilterSet(new Set())
      setLbFilter('')
      setLhFilter('')
@@ -427,7 +440,7 @@ export default function DoorListDock({
      setGuidFilter('')
    }
 
-   const hasLocalFilters = doorFilter || typeFilterSet.size > 0 || (storeyFilter != null && storeyFilter.size > 0) || brandschutzFilterSet.size > 0 || schallschutzFilterSet.size > 0 || festverglasungFilterSet.size > 0 || isExternalFilterSet.size > 0 || lbFilter || lhFilter || rbFilter || rhFilter || bramFilter || hramFilter || guidFilter
+   const hasLocalFilters = doorFilter || typeFilterSet.size > 0 || (storeyFilter != null && storeyFilter.size > 0) || brandschutzFilterSet.size > 0 || schallschutzFilterSet.size > 0 || festverglasungFilterSet.size > 0 || cfcBkpCccBccFilterSet.size > 0 || isExternalFilterSet.size > 0 || lbFilter || lhFilter || rbFilter || rhFilter || bramFilter || hramFilter || guidFilter
 
    const uniqueTypeValues = useMemo(() => {
      const s = new Set<string>()
@@ -473,6 +486,15 @@ export default function DoorListDock({
      festverglasungFilterSet.forEach(v => { s.add(v) })
      return Array.from(s).sort()
    }, [doorsForFestverglasungOptions, festverglasungFilterSet])
+
+   const uniqueCfcBkpCccBccValues = useMemo(() => {
+     const s = new Set<string>()
+     doorsForCfcBkpCccBccOptions.forEach(d => {
+       s.add(d.csetStandardCH?.cfcBkpCccBcc || '—')
+     })
+     cfcBkpCccBccFilterSet.forEach(v => { s.add(v) })
+     return Array.from(s).sort()
+   }, [doorsForCfcBkpCccBccOptions, cfcBkpCccBccFilterSet])
 
    const uniqueIsExternalValues = useMemo(() => {
      const s = new Set<string>()
@@ -545,7 +567,7 @@ export default function DoorListDock({
    }, [dropdownOpenKey])
 
    const toggleDropdownValue = useCallback(
-     (key: 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'isExternal', value: string, setter: (fn: (p: StringSet) => StringSet) => void) => {
+     (key: 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal', value: string, setter: (fn: (p: StringSet) => StringSet) => void) => {
        setter(prev => {
          const next = new Set(prev)
          if (next.has(value)) next.delete(value)
@@ -812,6 +834,37 @@ export default function DoorListDock({
                 </div>
               )}
               <div className="col-resizer" onMouseDown={(e) => onResizeStart('festverglasung', e)} />
+            </div>
+
+            <div className="header-col header-resizable" ref={dropdownOpenKey === 'cfcBkpCccBcc' ? dropdownRef : undefined}>
+              <div className="header-row">
+                <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'cfcBkpCccBcc' ? null : 'cfcBkpCccBcc')}>
+                  <span className="header-label-wrap">
+                    {cfcBkpCccBccFilterSet.size > 0 && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">CFC / BKP / CCC / BCC</span>
+                    {sortIndicator && <span className="header-sort-indicator" aria-hidden="true">{sortIndicator('cfcBkpCccBcc')}</span>}
+                  </span>
+                </button>
+              </div>
+              {dropdownOpenKey === 'cfcBkpCccBcc' && (
+                <div className="header-dropdown">
+                  {uniqueCfcBkpCccBccValues.map(v => (
+                    <label key={v} className="header-dropdown-item">
+                      <input type="checkbox" checked={cfcBkpCccBccFilterSet.has(v)} onChange={() => toggleDropdownValue('cfcBkpCccBcc', v, setCfcBkpCccBccFilterSet)} />
+                      <span>{v}</span>
+                    </label>
+                  ))}
+                  <div className="header-sort-buttons">
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('cfcBkpCccBcc', 'asc')} title="Aufsteigend">↑</button>
+                    <button type="button" className="header-sort-btn" onClick={() => onSetSort('cfcBkpCccBcc', 'desc')} title="Absteigend">↓</button>
+                  </div>
+                </div>
+              )}
+              <div className="col-resizer" onMouseDown={(e) => onResizeStart('cfcBkpCccBcc', e)} />
             </div>
 
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'isExternal' ? dropdownRef : undefined}>
@@ -1081,6 +1134,9 @@ export default function DoorListDock({
               </div>
               <div className="door-cell muted door-cell-text" title={door.csetStandardCH?.festverglasung || ''}>
                 {door.csetStandardCH?.festverglasung || '—'}
+              </div>
+              <div className="door-cell muted door-cell-text" title={door.csetStandardCH?.cfcBkpCccBcc || ''}>
+                {door.csetStandardCH?.cfcBkpCccBcc || '—'}
               </div>
               <div className="door-cell muted door-cell-text" title={door.csetStandardCH?.isExternal || ''}>
                 {door.csetStandardCH?.isExternal || '—'}

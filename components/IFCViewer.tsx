@@ -47,7 +47,7 @@ export default function IFCViewer() {
   const [dockSelectedDoorIds, setDockSelectedDoorIds] = useState<Set<string>>(new Set()) // Store selected door IDs for DoorListDock
   const [scrollToDoorId, setScrollToDoorId] = useState<string | null>(null) // Scroll list to this door when selected from model
   const [dockHoveredDoorId, setDockHoveredDoorId] = useState<string | null>(null) // Hover (Highlight in 3D)
-  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'festverglasung'|'isExternal'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
+  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'festverglasung'|'cfcBkpCccBcc'|'isExternal'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
   const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
   const DOCK_RIGHT_OFFSET_PX = 400
   const [dockHeightPx, setDockHeightPx] = useState(260)
@@ -76,13 +76,13 @@ export default function IFCViewer() {
     })
   }, [])
 
-  const setDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid', direction: 'asc' | 'desc') => {
+  const setDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid', direction: 'asc' | 'desc') => {
     setDockSortField(field)
     setDockSortDirection(direction)
   }, [])
 
   const dockSortIndicator = useCallback(
-    (field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
+    (field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
       if (dockSortField !== field) return '↕'
       return dockSortDirection === 'asc' ? '↑' : '↓'
     },
@@ -97,6 +97,7 @@ export default function IFCViewer() {
       case 'brandschutz': return door.csetStandardCH?.feuerwiderstand || ''
       case 'schallschutz': return door.csetStandardCH?.bauschalldaemmmass || ''
       case 'festverglasung': return door.csetStandardCH?.festverglasung || ''
+      case 'cfcBkpCccBcc': return door.csetStandardCH?.cfcBkpCccBcc || ''
       case 'isExternal': return door.csetStandardCH?.isExternal || ''
       case 'lb': return door.csetStandardCH?.massDurchgangsbreite ?? -Infinity
       case 'lh': return door.csetStandardCH?.massDurchgangshoehe ?? -Infinity

@@ -42,6 +42,8 @@ export interface DoorContext {
         feuerwiderstand: string | null
         bauschalldaemmmass: string | null
         festverglasung: string | null
+        /** Cset_StandardCH: "CFC / BKP / CCC / BCC" (normalized IFC name cfcbkpcccbcc) */
+        cfcBkpCccBcc: string | null
         isExternal: string | null
     }
 
@@ -95,6 +97,7 @@ type CsetStandardCH = {
     feuerwiderstand: string | null
     bauschalldaemmmass: string | null
     festverglasung: string | null
+    cfcBkpCccBcc: string | null
     isExternal: string | null
 }
 
@@ -113,6 +116,7 @@ function emptyCsetStandardCH(): CsetStandardCH {
         feuerwiderstand: null,
         bauschalldaemmmass: null,
         festverglasung: null,
+        cfcBkpCccBcc: null,
         isExternal: null,
     }
 }
@@ -191,6 +195,11 @@ function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue:
         if (value == null || value === '') return
         const s = typeof value === 'string' ? value.trim() : String(value).trim()
         if (s) target.festverglasung = s
+    } else if (normalized === 'cfcbkpcccbcc') {
+        const value = unwrapIfcValue(rawValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.cfcBkpCccBcc = s
     } else if (normalized === 'isexternal') {
         const s = formatIfcBooleanLikeString(rawValue)
         if (s) target.isExternal = s
@@ -211,6 +220,7 @@ function hasCsetValues(data: CsetStandardCH): boolean {
         || data.feuerwiderstand !== null
         || data.bauschalldaemmmass !== null
         || data.festverglasung !== null
+        || data.cfcBkpCccBcc !== null
         || data.isExternal !== null
 }
 
