@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import type { DoorContext } from '@/lib/door-analyzer'
+import { type DoorContext, geschossGeometrietypForAirtable } from '@/lib/door-analyzer'
 import JSZip from 'jszip'
 import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
@@ -137,7 +137,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           alTuernummer: context.csetStandardCH?.alTuernummer ?? undefined,
           openingDirection: context.openingDirection || undefined,
           modelSource: modelSource || undefined,
-          geometryType: context.csetStandardCH?.geometryType ?? undefined,
+          geometryType: geschossGeometrietypForAirtable(context),
+          geometryTypeSync: context.csetStandardCH?.geometryType?.trim() || undefined,
           massDurchgangsbreite: context.csetStandardCH?.massDurchgangsbreite ?? undefined,
           massDurchgangshoehe: context.csetStandardCH?.massDurchgangshoehe ?? undefined,
           massRohbreite: context.csetStandardCH?.massRohbreite ?? undefined,
@@ -202,7 +203,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
-            geometryType: door.csetStandardCH?.geometryType ?? undefined,
+            geometryType: geschossGeometrietypForAirtable(door),
+            geometryTypeSync: door.csetStandardCH?.geometryType?.trim() || undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,

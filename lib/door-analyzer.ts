@@ -55,6 +55,14 @@ export interface DoorContext {
     }
 }
 
+/** `Geschoss_Geometrietyp` für optionale Airtable-Spalten (z. B. „Geometry type“); nur wenn Geschoss und IFC-Geometrietyp gesetzt. */
+export function geschossGeometrietypForAirtable(door: DoorContext): string | undefined {
+    const g = door.csetStandardCH?.geometryType?.trim()
+    const s = door.storeyName?.trim()
+    if (s && g) return `${s}_${g}`
+    return undefined
+}
+
 function unwrapIfcValue(raw: unknown): unknown {
     if (raw && typeof raw === 'object' && 'value' in (raw as Record<string, unknown>)) {
         return (raw as { value?: unknown }).value

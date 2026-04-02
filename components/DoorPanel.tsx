@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import type { DoorContext } from '@/lib/door-analyzer'
+import { type DoorContext, geschossGeometrietypForAirtable } from '@/lib/door-analyzer'
 import JSZip from 'jszip'
 import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
@@ -256,7 +256,8 @@ export default function DoorPanel({
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
-            geometryType: door.csetStandardCH?.geometryType ?? undefined,
+            geometryType: geschossGeometrietypForAirtable(door),
+            geometryTypeSync: door.csetStandardCH?.geometryType?.trim() || undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
