@@ -42,6 +42,7 @@ export interface DoorContext {
         feuerwiderstand: string | null
         bauschalldaemmmass: string | null
         festverglasung: string | null
+        isExternal: string | null
     }
 
     // Detailed geometry from web-ifc (for high-quality SVG rendering)
@@ -94,6 +95,7 @@ type CsetStandardCH = {
     feuerwiderstand: string | null
     bauschalldaemmmass: string | null
     festverglasung: string | null
+    isExternal: string | null
 }
 
 function emptyCsetStandardCH(): CsetStandardCH {
@@ -111,6 +113,7 @@ function emptyCsetStandardCH(): CsetStandardCH {
         feuerwiderstand: null,
         bauschalldaemmmass: null,
         festverglasung: null,
+        isExternal: null,
     }
 }
 
@@ -122,6 +125,27 @@ const CSET_PROP_ALIASES: Record<string, string> = {
     massrohebreite: 'rb',
     massrohhoehe: 'rh',
     massrohehoehe: 'rh',
+    isexterior: 'isexternal',
+}
+
+/** IFC-style boolean display (IsExternal etc.): TRUE / FALSE */
+function formatIfcBooleanLikeString(raw: unknown): string | null {
+    const v = unwrapIfcValue(raw)
+    if (v === true) return 'TRUE'
+    if (v === false) return 'FALSE'
+    if (typeof v === 'number' && Number.isFinite(v)) {
+        if (v === 1) return 'TRUE'
+        if (v === 0) return 'FALSE'
+    }
+    if (typeof v === 'string') {
+        const t = v.trim()
+        if (!t) return null
+        const lower = t.toLowerCase().replace(/\./g, '')
+        if (lower === 'true' || lower === 't' || lower === 'ja' || lower === 'yes' || lower === '1' || lower === 'wahr') return 'TRUE'
+        if (lower === 'false' || lower === 'f' || lower === 'nein' || lower === 'no' || lower === '0' || lower === 'falsch') return 'FALSE'
+        return t
+    }
+    return null
 }
 
 function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue: unknown) {
@@ -167,6 +191,9 @@ function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue:
         if (value == null || value === '') return
         const s = typeof value === 'string' ? value.trim() : String(value).trim()
         if (s) target.festverglasung = s
+    } else if (normalized === 'isexternal') {
+        const s = formatIfcBooleanLikeString(rawValue)
+        if (s) target.isExternal = s
     }
 }
 
@@ -184,6 +211,7 @@ function hasCsetValues(data: CsetStandardCH): boolean {
         || data.feuerwiderstand !== null
         || data.bauschalldaemmmass !== null
         || data.festverglasung !== null
+        || data.isExternal !== null
 }
 
 async function getDoorCsetStandardCH(
@@ -223,6 +251,7 @@ async function getDoorCsetStandardCH(
                     const normalizedPsetName = normalizeIfcPropName(psetName)
                     const isRelevantPset =
                         normalizedPsetName === 'csetstandardch'
+                        || normalizedPsetName === 'psetdoorcommon'
                         || normalizedPsetName.startsWith('al00')
                         || normalizedPsetName.startsWith('in01')
                     if (!isRelevantPset) continue
@@ -261,6 +290,7 @@ async function getDoorCsetStandardCH(
                 const normalizedPsetName = normalizeIfcPropName(psetName)
                 const isRelevantPset =
                     normalizedPsetName === 'csetstandardch'
+                    || normalizedPsetName === 'psetdoorcommon'
                     || normalizedPsetName.startsWith('al00')
                     || normalizedPsetName.startsWith('in01')
                 if (!isRelevantPset) continue
