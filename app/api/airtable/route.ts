@@ -13,6 +13,7 @@ type ResolvedFields = {
   alTuernummer?: string
   geometryType?: string
   geometryTypeSync?: string
+  geschossSync?: string
   massDurchgangsbreite?: string
   massDurchgangshoehe?: string
   massRohbreite?: string
@@ -48,6 +49,7 @@ const FIELD_CANDIDATES = {
   alTuernummer: ['AL00_Türnummer', 'AL00_Tuernummer'],
   geometryType: ['Geometry type', 'Door Type'],
   geometryTypeSync: ['GE01_Geometrietyp_sync'],
+  geschossSync: ['AL00_Geschoss'],
   massDurchgangsbreite: ['GE01_LichteBreiteLB', 'Mass - Durchgangsbreite'],
   massDurchgangshoehe: ['GE01_LichteHöheLH', 'GE01_LichteHoeheLH', 'Mass - Durchgangshöhe'],
   massRohbreite: ['GE01_RoheBreiteRB', 'GE01_RohBreiteRB', 'Mass - Rohbreite'],
@@ -70,6 +72,8 @@ interface DoorData {
   geometryType?: string
   /** IFC Cset_StandardCH GeometryType only (no storey prefix); mapped to GE01_Geometrietyp_sync when present in base */
   geometryTypeSync?: string
+  /** Building storey name (spatial structure); mapped to AL00_Geschoss when present in base */
+  geschossSync?: string
   openingDirection?: string
   modelSource?: string
   massDurchgangsbreite?: number
@@ -372,6 +376,20 @@ async function updateDoorRecord(
     }
   }
 
+  const normalizedGeschossSync = sanitizeChoiceValue(data.geschossSync)
+  if (normalizedGeschossSync && fieldsMap.geschossSync) {
+    const geschossSyncField = tableFieldsByName[fieldsMap.geschossSync]
+    if (geschossSyncField && isLinkFieldType(geschossSyncField.type)) {
+      console.warn(
+        '[Airtable] AL00_Geschoss maps to a link field; skipping plain-text sync (use a text or select field).',
+        { doorId: data.doorId }
+      )
+    } else {
+      const mappedGeschoss = pickAirtableSelectValue(normalizedGeschossSync, geschossSyncField)
+      if (mappedGeschoss) fields[fieldsMap.geschossSync] = mappedGeschoss
+    }
+  }
+
   if (typeof data.massDurchgangsbreite === 'number' && fieldsMap.massDurchgangsbreite) fields[fieldsMap.massDurchgangsbreite] = data.massDurchgangsbreite
   if (typeof data.massDurchgangshoehe === 'number' && fieldsMap.massDurchgangshoehe) fields[fieldsMap.massDurchgangshoehe] = data.massDurchgangshoehe
   if (typeof data.massRohbreite === 'number' && fieldsMap.massRohbreite) fields[fieldsMap.massRohbreite] = data.massRohbreite
@@ -547,6 +565,7 @@ export async function POST(request: NextRequest) {
         alTuernummer: pickField(availableFields, FIELD_CANDIDATES.alTuernummer),
         geometryType: pickField(availableFields, FIELD_CANDIDATES.geometryType),
         geometryTypeSync: pickField(availableFields, FIELD_CANDIDATES.geometryTypeSync),
+        geschossSync: pickField(availableFields, FIELD_CANDIDATES.geschossSync),
         massDurchgangsbreite: pickField(availableFields, FIELD_CANDIDATES.massDurchgangsbreite),
         massDurchgangshoehe: pickField(availableFields, FIELD_CANDIDATES.massDurchgangshoehe),
         massRohbreite: pickField(availableFields, FIELD_CANDIDATES.massRohbreite),
@@ -585,6 +604,7 @@ export async function POST(request: NextRequest) {
       schallschutz: resolvedFields.schallschutzManuell,
       geometryType: resolvedFields.geometryType,
       geometryTypeSync: resolvedFields.geometryTypeSync,
+      geschossSync: resolvedFields.geschossSync,
       frontView: resolvedFields.frontView,
       backView: resolvedFields.backView,
       topView: resolvedFields.topView,

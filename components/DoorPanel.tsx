@@ -258,6 +258,7 @@ export default function DoorPanel({
             modelSource: modelSource || undefined,
             geometryType: geschossGeometrietypForAirtable(door),
             geometryTypeSync: door.csetStandardCH?.geometryType?.trim() || undefined,
+            geschossSync: door.storeyName?.trim() || undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
