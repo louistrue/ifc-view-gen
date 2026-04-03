@@ -591,7 +591,7 @@ export default function DoorPanel({
               <button className="close-button" onClick={closeModal}>×</button>
             </div>
             <div className="image-modal-body">
-              <div dangerouslySetInnerHTML={{ __html: modalImage.svg }} />
+              <div className="image-modal-svg-wrap" dangerouslySetInnerHTML={{ __html: modalImage.svg }} />
             </div>
             <div className="image-modal-footer">
               <button className="download-button" onClick={downloadFromModal}>Download</button>
@@ -962,18 +962,29 @@ export default function DoorPanel({
         .image-modal {
           background: #1a1a1a;
           border-radius: 12px;
-          max-width: 90vw;
-          max-height: 90vh;
+          width: min(95vw, calc(100vw - 2rem));
+          height: min(92vh, calc(100vh - 2rem));
+          max-width: 95vw;
+          max-height: min(92vh, calc(100vh - 2rem));
           display: flex;
           flex-direction: column;
           overflow: hidden;
+          min-height: 0;
+        }
+
+        @supports (height: 100dvh) {
+          .image-modal {
+            height: min(92vh, calc(100dvh - 2rem));
+            max-height: min(92vh, calc(100dvh - 2rem));
+          }
         }
 
         .image-modal-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 16px 20px;
+          flex-shrink: 0;
+          padding: 10px 16px;
           border-bottom: 1px solid #333;
         }
 
@@ -985,28 +996,38 @@ export default function DoorPanel({
         .image-modal-body {
           flex: 1;
           min-height: 0;
+          min-width: 0;
           overflow: hidden;
-          padding: 20px;
+          padding: 10px 12px;
           background: #fff;
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .image-modal-svg-wrap {
+          flex: 1;
+          min-height: 0;
+          min-width: 0;
           display: flex;
           align-items: center;
           justify-content: center;
         }
 
-        .image-modal-body :global(svg) {
+        .image-modal-svg-wrap :global(svg) {
           display: block;
           max-width: 100%;
           max-height: 100%;
           width: auto;
           height: auto;
-          object-fit: contain;
         }
 
         .image-modal-footer {
           display: flex;
+          flex-shrink: 0;
           gap: 12px;
           justify-content: flex-end;
-          padding: 16px 20px;
+          padding: 10px 16px;
           border-top: 1px solid #333;
         }
 

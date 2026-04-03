@@ -872,24 +872,33 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           align-items: center;
           justify-content: center;
           z-index: 2000;
-          padding: 2rem;
+          padding: 1rem;
         }
         .image-modal-content {
           background: #1a1a1a;
           border-radius: 8px;
-          max-width: 90vw;
-          max-height: 90vh;
+          width: min(95vw, calc(100vw - 2rem));
+          height: min(92vh, calc(100vh - 2rem));
+          max-width: 95vw;
+          max-height: min(92vh, calc(100vh - 2rem));
           display: flex;
           flex-direction: column;
           box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
           overflow: hidden;
           min-height: 0;
         }
+        @supports (height: 100dvh) {
+          .image-modal-content {
+            height: min(92vh, calc(100dvh - 2rem));
+            max-height: min(92vh, calc(100dvh - 2rem));
+          }
+        }
         .image-modal-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 1rem 1.5rem;
+          flex-shrink: 0;
+          padding: 0.625rem 1rem;
           border-bottom: 1px solid #333;
         }
         .image-modal-header h3 {
@@ -918,16 +927,19 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         .image-modal-body {
           flex: 1;
           min-height: 0;
+          min-width: 0;
           overflow: hidden;
-          padding: 2rem;
+          padding: 0.625rem 0.75rem;
           background: #fff;
           display: flex;
-          align-items: center;
-          justify-content: center;
+          flex-direction: column;
+          align-items: stretch;
         }
         .image-container {
           flex: 1;
           min-height: 0;
+          min-width: 0;
+          width: 100%;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -938,13 +950,13 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           max-height: 100%;
           width: auto;
           height: auto;
-          object-fit: contain;
         }
         .image-modal-footer {
           display: flex;
+          flex-shrink: 0;
           gap: 1rem;
           justify-content: flex-end;
-          padding: 1rem 1.5rem;
+          padding: 0.625rem 1rem;
           border-top: 1px solid #333;
         }
         .download-button-modal {
