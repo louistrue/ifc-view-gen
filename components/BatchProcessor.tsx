@@ -3,8 +3,13 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { type DoorContext, geschossGeometrietypForAirtable } from '@/lib/door-analyzer'
 import JSZip from 'jszip'
-import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
-import type { SVGRenderOptions } from '@/lib/svg-renderer'
+import {
+  renderDoorViews,
+  renderDoorElevationSVG,
+  renderDoorPlanSVG,
+  DEFAULT_SVG_FONT_FAMILY,
+  type SVGRenderOptions,
+} from '@/lib/svg-renderer'
 import {
   Lock,
   Upload,
@@ -60,10 +65,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     showFills: true,
     showLegend: true,
     showLabels: true,
-    legendTitleFontSize: 11,
-    legendItemFontSize: 11,
-    fontSize: 14,
-    fontFamily: 'Arial',
+    fontSize: 22,
+    fontFamily: DEFAULT_SVG_FONT_FAMILY,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
   })
@@ -558,28 +561,6 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             </label>
           </div>
           <div className="control-group">
-            <label>Legend title (px)</label>
-            <input
-              type="number"
-              min={6}
-              max={48}
-              step={1}
-              value={options.legendTitleFontSize ?? 11}
-              onChange={(e) => setOptions({ ...options, legendTitleFontSize: parseInt(e.target.value, 10) || 11 })}
-            />
-          </div>
-          <div className="control-group">
-            <label>Legend items (px)</label>
-            <input
-              type="number"
-              min={6}
-              max={48}
-              step={1}
-              value={options.legendItemFontSize ?? 11}
-              onChange={(e) => setOptions({ ...options, legendItemFontSize: parseInt(e.target.value, 10) || 11 })}
-            />
-          </div>
-          <div className="control-group">
             <label>
               <input
                 type="checkbox"
@@ -599,16 +580,17 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               min="8"
               max="48"
               step="1"
-              value={options.fontSize || 14}
-              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value) })}
+              value={options.fontSize ?? 22}
+              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value, 10) || 22 })}
             />
           </div>
           <div className="control-group">
             <label>Font Family</label>
             <select
-              value={options.fontFamily || 'Arial'}
+              value={options.fontFamily || DEFAULT_SVG_FONT_FAMILY}
               onChange={(e) => setOptions({ ...options, fontFamily: e.target.value })}
             >
+              <option value={DEFAULT_SVG_FONT_FAMILY}>Inter</option>
               <option value="Arial">Arial</option>
               <option value="Helvetica">Helvetica</option>
               <option value="Verdana">Verdana</option>

@@ -1,6 +1,11 @@
 import * as THREE from 'three'
 import type { DoorContext, DoorViewFrame } from './door-analyzer'
 import { getDoorMeshes } from './door-analyzer'
+import {
+    INTER_WOFF2_LATIN_400_BASE64,
+    INTER_WOFF2_LATIN_600_BASE64,
+    INTER_WOFF2_LATIN_700_BASE64,
+} from './inter-svg-font-embed-data'
 
 export interface SVGRenderOptions {
     width?: number
@@ -15,10 +20,7 @@ export interface SVGRenderOptions {
     showFills?: boolean
     showLegend?: boolean
     showLabels?: boolean
-    /** Pixel size for the "LEGENDE:" heading in the title block */
-    legendTitleFontSize?: number
-    /** Pixel size for legend item labels and color swatches */
-    legendItemFontSize?: number
+    /** Pixel size for all SVG title block and label text */
     fontSize?: number
     fontFamily?: string
     /** Wall reveal on each side as a fraction of door width (0–0.5, default 0.12 = 12 %) */
@@ -36,6 +38,30 @@ function escapeSvgText(value: string): string {
         .replace(/"/g, '&quot;')
 }
 
+/** Default typeface for SVG text; kept in sync with `next/font` Inter in `app/layout.tsx`. */
+export const DEFAULT_SVG_FONT_FAMILY = 'Inter' as const
+
+/**
+ * Embeds Inter (latin subset, wght 400/600/700) as data URLs so SVG text renders
+ * the same in Airtable, <img>, and offline — no external font fetch.
+ */
+function svgWebFontDefs(fontFamily: string): string {
+    if (fontFamily.trim() !== DEFAULT_SVG_FONT_FAMILY) {
+        return ''
+    }
+    const b400 = INTER_WOFF2_LATIN_400_BASE64
+    const b600 = INTER_WOFF2_LATIN_600_BASE64
+    const b700 = INTER_WOFF2_LATIN_700_BASE64
+    return `  <defs>
+    <style type="text/css"><![CDATA[
+@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url('data:font/woff2;base64,${b400}') format('woff2');}
+@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url('data:font/woff2;base64,${b600}') format('woff2');}
+@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url('data:font/woff2;base64,${b700}') format('woff2');}
+]]></style>
+  </defs>
+`
+}
+
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
@@ -49,10 +75,8 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     showFills: true,
     showLegend: true,
     showLabels: true,
-    legendTitleFontSize: 11,
-    legendItemFontSize: 11,
-    fontSize: 14,
-    fontFamily: 'Arial',
+    fontSize: 22,
+    fontFamily: DEFAULT_SVG_FONT_FAMILY,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
 }
@@ -943,8 +967,6 @@ function generateSVGString(
         showLabels,
         wallRevealSide,
         wallRevealTop,
-        legendTitleFontSize,
-        legendItemFontSize,
     } = options
 
     const hasDevices = renderMeta.context ? renderMeta.context.nearbyDevices.length > 0 : false
@@ -956,8 +978,7 @@ function generateSVGString(
     // Text takes about 2 lines (View/Type + Opening)
     // Legend takes about 1 line if shown
     const textLines = 3 // View, ID/Type, Opening
-    const legendRowPx = Math.max(legendTitleFontSize, legendItemFontSize)
-    const legendHeight = showLegendActual ? (legendRowPx + 18) : 0
+    const legendHeight = showLegendActual ? (fontSize + 18) : 0
 
     const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
 
@@ -1050,9 +1071,10 @@ function generateSVGString(
         )
         : ''
 
+    const fontDefs = svgWebFontDefs(options.fontFamily)
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <rect width="100%" height="100%" fill="${backgroundColor}"/>
+${fontDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
 ${wallBandsSvg}  <g id="fills">
 `
 
@@ -1117,8 +1139,6 @@ function renderTitleBlock(
         showLegend,
         showLabels,
         backgroundColor,
-        legendTitleFontSize,
-        legendItemFontSize,
     } = options
     const padding = 15
     const startY = fullHeight - blockHeight
@@ -1136,6 +1156,10 @@ function renderTitleBlock(
 
     let currentY = startY + padding + fontSize
     const leftX = padding
+    /** Left edge of the Typ/ID column — weiter Zeilen bündig darunter. */
+    const typeColumnX = leftX + 250
+    /** Vertikaler Abstand zwischen aufeinanderfolgenden Textzeilen (eine Zeile = nächste Baseline). */
+    const lineStep = fontSize * 1.5
 
     // Translate View Type
     const viewTypeMap: Record<string, string> = {
@@ -1147,18 +1171,18 @@ function renderTitleBlock(
 
     // 1. View Title & Type Name (instead of ID)
     if (showLabels) {
-        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="bold" fill="#000000">Ansicht: ${localizedViewType}</text>`
+        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="bold" fill="#000000">${localizedViewType}</text>`
 
         const typeLabel = escapeSvgText(context.doorTypeName ? context.doorTypeName : context.doorId)
         const labelPrefix = context.doorTypeName ? "Typ" : "ID"
-        content += `    <text x="${leftX + 250}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${labelPrefix}: ${typeLabel}</text>`
-        currentY += fontSize * 1.5
+        content += `    <text x="${typeColumnX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${labelPrefix}: ${typeLabel}</text>`
+        currentY += lineStep
 
-        // 2. Opening Direction (if valid)
+        // 2. Opening Direction (if valid) — bündig mit Typ-Spalte
         if (context.openingDirection && (viewType === 'Front' || viewType === 'Back')) {
             const dirText = escapeSvgText(formatOpeningDirection(context.openingDirection))
-            content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
-            currentY += fontSize * 1.5
+            content += `    <text x="${typeColumnX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
+            currentY += lineStep
         }
     }
 
@@ -1166,15 +1190,14 @@ function renderTitleBlock(
     const hasWall = Boolean(context.hostWall || context.wall)
 
     if (showLegend && (hasDevices || hasWall)) {
-        currentY += 10 // Extra spacing for legend
-        const titlePx = legendTitleFontSize
-        const itemPx = legendItemFontSize
+        // currentY steht nach den Labels schon auf der nächsten Zeilenbaseline (ein lineStep unter der letzten Textzeile).
+        // Kein weiteres += lineStep — sonst doppelter Abstand zur Legende. Ohne Labels: eine Zeile nach unten.
+        if (!showLabels) {
+            currentY += lineStep
+        }
 
-        // Group: Legend Title
-        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${titlePx}" font-weight="bold" fill="#555555">LEGENDE:</text>`
-
-        // Legend Items
-        let legendX = leftX + Math.max(72, titlePx * 5.5)
+        // Nur Farbfelder + Bezeichnungen (ohne „LEGENDE:“-Titel), bündig Typ-Spalte
+        let legendX = typeColumnX
         const items = [
             { color: options.doorColor, text: 'Tür' },
         ]
@@ -1188,11 +1211,11 @@ function renderTitleBlock(
         }
 
         for (const item of items) {
-            // Box
-            content += `    <rect x="${legendX}" y="${currentY - itemPx + 2}" width="${itemPx}" height="${itemPx}" fill="${item.color}"/>`
+            // Box (swatch matches text cap height visually)
+            content += `    <rect x="${legendX}" y="${currentY - fontSize + 2}" width="${fontSize}" height="${fontSize}" fill="${item.color}"/>`
             // Text
-            content += `    <text x="${legendX + itemPx + 5}" y="${currentY}" font-family="${fontFamily}" font-size="${itemPx}" fill="#000000">${item.text}</text>`
-            legendX += itemPx + item.text.length * (itemPx * 0.7) + 20
+            content += `    <text x="${legendX + fontSize + 5}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${item.text}</text>`
+            legendX += fontSize + item.text.length * (fontSize * 0.7) + 20
         }
     }
 
@@ -1396,7 +1419,7 @@ function renderElevationFromBoundingBox(
     const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, wallColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
 
     const padding = 60
-    const labelHeight = showLabels ? 80 : 0
+    const labelHeight = showLabels ? fontSize * 3 + 48 : 0
     const availableWidth = svgWidth - padding * 2
     const availableHeight = svgHeight - padding * 2 - labelHeight
 
@@ -1434,9 +1457,10 @@ function renderElevationFromBoundingBox(
         )
         : ''
 
+    const fontDefs = svgWebFontDefs(opts.fontFamily)
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
-  <rect width="100%" height="100%" fill="${backgroundColor}"/>
+${fontDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
 ${wallRevealSvg}  
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledHeight}" 
@@ -1455,16 +1479,16 @@ ${wallRevealSvg}
 `
 
     if (showLabels) {
-        const labelY = svgHeight - 40
+        const labelY = svgHeight - (fontSize * 3 + 24)
         svg += `
   <!-- Labels -->
   <text x="${svgWidth / 2}" y="${labelY}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="${lineColor}">
     ${isBackView ? 'Rückansicht' : 'Vorderansicht'} (vereinfacht)
   </text>
-  <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.8}" fill="#666">
+  <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="#666">
     ${escapeSvgText(context.doorId)}
   </text>
-  <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.7}" fill="#888">
+  <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="#888">
     ${(doorWidth * 100).toFixed(0)}cm × ${(doorHeight * 100).toFixed(0)}cm
   </text>
 `
@@ -2004,7 +2028,7 @@ function renderPlanFromBoundingBox(
     const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, wallColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
 
     const padding = 60
-    const labelHeight = showLabels ? 80 : 0
+    const labelHeight = showLabels ? fontSize * 4 + 72 : 0
     const availableWidth = svgWidth - padding * 2
     const availableHeight = svgHeight - padding * 2 - labelHeight
 
@@ -2047,9 +2071,10 @@ function renderPlanFromBoundingBox(
     const arrowY = offsetY + scaledThickness + 30
     const arrowEndY = arrowY + 25
 
+    const fontDefs = svgWebFontDefs(opts.fontFamily)
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
-  <rect width="100%" height="100%" fill="${backgroundColor}"/>
+${fontDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
 ${wallRevealSvg}
 
   <!-- Door outline (bounding box fallback) -->
@@ -2071,19 +2096,19 @@ ${wallRevealSvg}
 `
 
     if (showLabels) {
-        const labelY = svgHeight - 40
+        const labelY = svgHeight - (fontSize * 3 + 24)
         svg += `
   <!-- Labels -->
-  <text x="${svgWidth / 2}" y="${arrowEndY + 25}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.9}" fill="${lineColor}">
+  <text x="${svgWidth / 2}" y="${arrowEndY + 25}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="${lineColor}">
     Vorderansicht
   </text>
   <text x="${svgWidth / 2}" y="${labelY}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="${lineColor}">
     Grundriss (vereinfacht)
   </text>
-  <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.8}" fill="#666">
+  <text x="${svgWidth / 2}" y="${labelY + fontSize + 4}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="#666">
     ${escapeSvgText(context.doorId)}
   </text>
-  <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize * 0.7}" fill="#888">
+  <text x="${svgWidth / 2}" y="${labelY + fontSize * 2 + 8}" text-anchor="middle" font-family="${fontFamily}" font-size="${fontSize}" fill="#888">
     ${(doorWidth * 100).toFixed(0)}cm × ${(doorHeight * 100).toFixed(0)}cm
   </text>
 `

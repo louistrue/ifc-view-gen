@@ -3,8 +3,13 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { type DoorContext, geschossGeometrietypForAirtable } from '@/lib/door-analyzer'
 import JSZip from 'jszip'
-import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
-import type { SVGRenderOptions } from '@/lib/svg-renderer'
+import {
+  renderDoorViews,
+  renderDoorElevationSVG,
+  renderDoorPlanSVG,
+  DEFAULT_SVG_FONT_FAMILY,
+  type SVGRenderOptions,
+} from '@/lib/svg-renderer'
 import { Settings, ExternalLink, LogOut, Link2, Loader2, Check, X, Download, Upload } from 'lucide-react'
 
 interface AirtableAuthStatus {
@@ -60,10 +65,8 @@ export default function DoorPanel({
     showFills: true,
     showLegend: true,
     showLabels: true,
-    legendTitleFontSize: 11,
-    legendItemFontSize: 11,
-    fontSize: 14,
-    fontFamily: 'Arial',
+    fontSize: 22,
+    fontFamily: DEFAULT_SVG_FONT_FAMILY,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
   })
@@ -483,28 +486,6 @@ export default function DoorPanel({
               Show Legend
             </label>
           </div>
-          <div className="option-row">
-            <label>Legend title px</label>
-            <input
-              type="number"
-              min={6}
-              max={48}
-              step={1}
-              value={options.legendTitleFontSize ?? 11}
-              onChange={(e) => setOptions({ ...options, legendTitleFontSize: parseInt(e.target.value, 10) || 11 })}
-            />
-          </div>
-          <div className="option-row">
-            <label>Legend items px</label>
-            <input
-              type="number"
-              min={6}
-              max={48}
-              step={1}
-              value={options.legendItemFontSize ?? 11}
-              onChange={(e) => setOptions({ ...options, legendItemFontSize: parseInt(e.target.value, 10) || 11 })}
-            />
-          </div>
           <div className="option-row checkbox">
             <label>
               <input type="checkbox" checked={options.showLabels} onChange={(e) => setOptions({ ...options, showLabels: e.target.checked })} />
@@ -512,14 +493,14 @@ export default function DoorPanel({
             </label>
           </div>
           <div className="option-row">
-            <label>Labels px</label>
+            <label>Text px</label>
             <input
               type="number"
               min={8}
               max={48}
               step={1}
-              value={options.fontSize ?? 14}
-              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value, 10) || 14 })}
+              value={options.fontSize ?? 22}
+              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value, 10) || 22 })}
             />
           </div>
         </div>
