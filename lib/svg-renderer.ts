@@ -62,6 +62,13 @@ function svgWebFontDefs(fontFamily: string): string {
 `
 }
 
+/** Plan SVG canvas height = `width × PLAN_SVG_HEIGHT_RATIO` (Grundriss is wider-than-tall, not square). */
+export const PLAN_SVG_HEIGHT_RATIO = 0.5
+
+export function planSvgCanvasHeight(canvasWidth: number): number {
+    return Math.round(canvasWidth * PLAN_SVG_HEIGHT_RATIO)
+}
+
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
@@ -838,6 +845,85 @@ interface RenderMeta {
     context: DoorContext | null
     viewType: string
     planArcFlip: boolean
+    /** When set (e.g. from front elevation), plan view uses this scale so door size matches Vorderansicht. */
+    sharedDrawingScale?: number
+}
+
+function getSvgViewportMetrics(
+    options: Required<SVGRenderOptions>,
+    context: DoorContext | null
+): {
+    titleBlockHeight: number
+    viewHeight: number
+    padding: number
+    availWidth: number
+    availHeight: number
+} {
+    const hasDevices = context ? context.nearbyDevices.length > 0 : false
+    const hasWall = context ? Boolean(context.hostWall || context.wall) : false
+    const showLegendActual = options.showLegend && (hasDevices || hasWall)
+    const textLines = 3
+    const legendHeight = showLegendActual ? (options.fontSize + 18) : 0
+    const titleBlockHeight = (options.showLabels || showLegendActual)
+        ? (options.fontSize * textLines + legendHeight + 20)
+        : 0
+    const viewHeight = options.height - titleBlockHeight
+    const padding = 80
+    const availWidth = options.width - padding * 2
+    const availHeight = viewHeight - padding * 2
+    return { titleBlockHeight, viewHeight, padding, availWidth, availHeight }
+}
+
+function createElevationOrthographicCamera(
+    frame: DoorViewFrame,
+    margin: number,
+    isBackView: boolean
+): { camera: THREE.OrthographicCamera; frustumWidth: number; frustumHeight: number } {
+    const frustumWidth = frame.width + margin * 2
+    const frustumHeight = frame.height + margin * 2
+    const camera = new THREE.OrthographicCamera(
+        -frustumWidth / 2, frustumWidth / 2, frustumHeight / 2, -frustumHeight / 2, 0.1, 100
+    )
+    const distance = Math.max(frustumWidth, frustumHeight) * 2
+    const viewDir = isBackView
+        ? frame.semanticFacing.clone().negate()
+        : frame.semanticFacing.clone()
+    camera.position.copy(frame.origin).add(viewDir.multiplyScalar(distance))
+    camera.up.copy(frame.upAxis)
+    camera.lookAt(frame.origin)
+    camera.updateProjectionMatrix()
+    camera.updateMatrixWorld()
+    return { camera, frustumWidth, frustumHeight }
+}
+
+/** Fit geometry for front elevation — same camera as Vorderansicht for scale alignment with plan. */
+function collectFrontElevationFitGeometry(
+    context: DoorContext,
+    opts: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } | null {
+    const fitMeshes = getDoorMeshes(context)
+    if (fitMeshes.length === 0) {
+        return null
+    }
+    const frame = context.viewFrame
+    const margin = Math.max(opts.margin, 0.25)
+    const { camera, frustumWidth, frustumHeight } = createElevationOrthographicCamera(frame, margin, false)
+    return collectProjectedGeometry(fitMeshes, context, opts, camera, frustumWidth, frustumHeight, false, 0)
+}
+
+function computeFrontElevationScale(context: DoorContext, opts: Required<SVGRenderOptions>): number | undefined {
+    const fit = collectFrontElevationFitGeometry(context, opts)
+    if (!fit) {
+        return undefined
+    }
+    const fitBounds = getBoundsFromProjectedGeometry(fit.edges, fit.polygons)
+    if (!fitBounds) {
+        return undefined
+    }
+    const { availWidth, availHeight } = getSvgViewportMetrics(opts, context)
+    const contentWidth = fitBounds.maxX - fitBounds.minX
+    const contentHeight = fitBounds.maxY - fitBounds.minY
+    return Math.min(availWidth / (contentWidth || 1), availHeight / (contentHeight || 1))
 }
 
 interface WallRevealRect {
@@ -973,19 +1059,10 @@ function generateSVGString(
     const hasWall = renderMeta.context ? Boolean(renderMeta.context.hostWall || renderMeta.context.wall) : false
     const showLegendActual = showLegend && (hasDevices || hasWall)
 
-    // Calculate Title Block area
-    // Reserve lines for text + legend if needed
-    // Text takes about 2 lines (View/Type + Opening)
-    // Legend takes about 1 line if shown
-    const textLines = 3 // View, ID/Type, Opening
-    const legendHeight = showLegendActual ? (fontSize + 18) : 0
-
-    const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
-
-    // No Vorderansicht annotation rendered, so no extra space needed
-    const vorderansichtReserve = 0
-
-    const viewHeight = height - titleBlockHeight - vorderansichtReserve
+    const { titleBlockHeight, viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(
+        options,
+        renderMeta.context
+    )
 
     const fitBounds = getBoundsFromProjectedGeometry(
         fitGeometry?.edges ?? edges,
@@ -1018,17 +1095,14 @@ function generateSVGString(
     }
 
 
-    // Calculate scale to fit in viewport with padding
-    const padding = 80 // Increased from 50 to 80 pixels for more border room
     const contentWidth = maxX - minX
     const contentHeight = maxY - minY
-    const availWidth = width - padding * 2
-    const availHeight = viewHeight - padding * 2 // Use viewHeight instead of full height
 
-    const scale = Math.min(
+    const naturalScale = Math.min(
         availWidth / (contentWidth || 1),
         availHeight / (contentHeight || 1)
     )
+    const scale = renderMeta.sharedDrawingScale ?? naturalScale
 
     // Calculate offset to center content in the view area
     const scaledWidth = contentWidth * scale
@@ -1373,25 +1447,14 @@ function renderElevationFromMeshes(
 
     const frame = context.viewFrame
     const margin = Math.max(opts.margin, 0.25)
-    const width = frame.width + margin * 2
-    const height = frame.height + margin * 2
+    const { camera, frustumWidth, frustumHeight } = createElevationOrthographicCamera(frame, margin, isBackView)
 
-    const camera = new THREE.OrthographicCamera(
-        -width / 2, width / 2, height / 2, -height / 2, 0.1, 100
+    const renderGeometry = collectProjectedGeometry(
+        renderMeshes, context, opts, camera, frustumWidth, frustumHeight, false, 0
     )
-
-    const distance = Math.max(width, height) * 2
-    const viewDir = isBackView
-        ? frame.semanticFacing.clone().negate()
-        : frame.semanticFacing.clone()
-    camera.position.copy(frame.origin).add(viewDir.multiplyScalar(distance))
-    camera.up.copy(frame.upAxis)
-    camera.lookAt(frame.origin)
-    camera.updateProjectionMatrix()
-    camera.updateMatrixWorld()
-
-    const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, width, height, false, 0)
-    const fitGeometry = collectProjectedGeometry(fitMeshes, context, opts, camera, width, height, false, 0)
+    const fitGeometry = collectProjectedGeometry(
+        fitMeshes, context, opts, camera, frustumWidth, frustumHeight, false, 0
+    )
 
     return generateSVGString(
         renderGeometry.edges,
@@ -1504,16 +1567,22 @@ ${wallRevealSvg}
  */
 export async function renderDoorPlanSVG(
     context: DoorContext,
-    options: SVGRenderOptions = {}
+    options: SVGRenderOptions = {},
+    /** When rendering with `renderDoorViews`, pass front elevation scale so plan matches Vorderansicht. */
+    sharedScaleFromFront?: number
 ): Promise<string> {
-    const opts = { ...DEFAULT_OPTIONS, ...options }
+    const merged = { ...DEFAULT_OPTIONS, ...options }
+    const opts: Required<SVGRenderOptions> = {
+        ...merged,
+        height: planSvgCanvasHeight(merged.width),
+    }
     const { width: doorWidth, thickness: doorThickness, height: doorHeight } = context.viewFrame
 
     // Check if we have detailed geometry
     const hasDetailedGeometry = context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
 
     if (hasDetailedGeometry) {
-        return renderPlanFromMeshes(context, opts)
+        return renderPlanFromMeshes(context, opts, sharedScaleFromFront)
     }
 
     // Fallback to bounding box rendering
@@ -1528,6 +1597,9 @@ interface SwingArcParams {
     hingeSide?: 'left' | 'right' | 'both'  // For swing doors
     slideDirection?: 'left' | 'right'       // For sliding doors
 }
+
+/** Opening angle (radians) for symbolic door swing arc in projected plan view. */
+const PLAN_SWING_OPEN_RAD = (15 * Math.PI) / 180
 
 function parseOperationType(operationType: string | null): SwingArcParams {
     if (!operationType) {
@@ -1666,7 +1738,7 @@ function generateSingleLeafArc(
         isDashed: false // Door leaf line is solid
     })
 
-    // Add dashed line showing door in OPEN position (90 degrees)
+    // Add dashed line showing door in OPEN position (plan swing angle)
     const openDoorEnd = arcPoints[arcPoints.length - 1] // Last arc point = open position
     const openDoorProj = projectPoint(openDoorEnd, camera, width, height)
 
@@ -1721,7 +1793,7 @@ function calculateSwingArcEdges(
             leftHinge3D,
             leafWidth,
             0,
-            Math.PI / 2,
+            PLAN_SWING_OPEN_RAD,
             cutHeight,
             widthAxis,
             openAxis,
@@ -1738,7 +1810,7 @@ function calculateSwingArcEdges(
             rightHinge3D,
             leafWidth,
             Math.PI,
-            Math.PI / 2,
+            Math.PI - PLAN_SWING_OPEN_RAD,
             cutHeight,
             widthAxis,
             openAxis,
@@ -1759,7 +1831,7 @@ function calculateSwingArcEdges(
         hinge3D,
         frame.width,
         isLeftHinge ? 0 : Math.PI,
-        Math.PI / 2,
+        isLeftHinge ? PLAN_SWING_OPEN_RAD : Math.PI - PLAN_SWING_OPEN_RAD,
         cutHeight,
         widthAxis,
         openAxis,
@@ -1797,9 +1869,9 @@ function renderSwingArcSVGForBoundingBox(
 
     // Calculate arc angles
     // Door closed: horizontal line
-    // Door open: 90° arc
+    // Door open: plan swing arc (see PLAN_SWING_OPEN_RAD)
     const startAngle = params.hingeSide === 'left' ? Math.PI : 0 // Left hinge: start at 180°, Right: start at 0°
-    const endAngle = startAngle + (Math.PI / 2) * (params.hingeSide === 'left' ? -1 : 1)
+    const endAngle = startAngle + PLAN_SWING_OPEN_RAD * (params.hingeSide === 'left' ? -1 : 1)
 
     // Calculate arc start and end points
     const startX = hingeX + Math.cos(startAngle) * radius
@@ -1808,7 +1880,7 @@ function renderSwingArcSVGForBoundingBox(
     const endY = hingeY + Math.sin(endAngle) * radius
 
     // SVG arc path
-    const largeArcFlag = 0 // Always small arc (90°)
+    const largeArcFlag = 0 // Arc < 180°
     const sweepFlag = params.hingeSide === 'left' ? 0 : 1 // Left = counter-clockwise, Right = clockwise
 
     const path = `M ${startX},${startY} A ${radius},${radius} 0 ${largeArcFlag},${sweepFlag} ${endX},${endY}`
@@ -1925,7 +1997,8 @@ function buildDoorCrossSectionFallbackGeometry(
  */
 function renderPlanFromMeshes(
     context: DoorContext,
-    opts: Required<SVGRenderOptions>
+    opts: Required<SVGRenderOptions>,
+    sharedDrawingScale?: number
 ): string {
     const renderMeshes = getDoorMeshes(context, { includeNearbyDevices: true })
     if (renderMeshes.length === 0) {
@@ -1981,7 +2054,9 @@ function renderPlanFromMeshes(
     const halfW = frame.width / 2
     // openAxisFit must match the arc direction so the fit bounds contain both the door and the arc.
     const openAxisFit = flipArc ? frame.semanticFacing.clone().negate() : frame.semanticFacing.clone()
-    const arcReach = hasSwingArc ? frame.width : frame.thickness / 2
+    const arcReach = hasSwingArc
+        ? frame.width * Math.sin(PLAN_SWING_OPEN_RAD)
+        : frame.thickness / 2
 
     const fitPoint = (p: THREE.Vector3): ProjectedEdge => {
         const proj = projectPoint(p, camera, frustumWidth, frustumHeight)
@@ -2011,6 +2086,7 @@ function renderPlanFromMeshes(
             context,
             viewType: 'Plan',
             planArcFlip: flipArc,
+            ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
         }
     )
 }
@@ -2125,9 +2201,15 @@ export async function renderDoorViews(
     context: DoorContext,
     options: SVGRenderOptions = {}
 ): Promise<{ front: string; back: string; plan: string }> {
+    const opts = { ...DEFAULT_OPTIONS, ...options }
+    const sharedScaleFromFront =
+        context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
+            ? computeFrontElevationScale(context, opts)
+            : undefined
+
     const front = await renderDoorElevationSVG(context, false, options)
     const back = await renderDoorElevationSVG(context, true, options)
-    const plan = await renderDoorPlanSVG(context, options)
+    const plan = await renderDoorPlanSVG(context, options, sharedScaleFromFront)
 
     return { front, back, plan }
 }

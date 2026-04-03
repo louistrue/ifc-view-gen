@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict'
 import * as THREE from 'three'
 import { analyzeDoors, type DoorContext } from '../lib/door-analyzer'
 import type { ElementInfo, LoadedIFCModel } from '../lib/ifc-types'
-import { renderDoorViews, type SVGRenderOptions } from '../lib/svg-renderer'
+import { planSvgCanvasHeight, renderDoorViews, type SVGRenderOptions } from '../lib/svg-renderer'
 
 function createMesh(expressID: number, geometry: THREE.BufferGeometry): THREE.Mesh {
     geometry.computeBoundingBox()
@@ -331,12 +331,14 @@ async function main() {
     const withWallViews = await renderDoorViews(withWall, options)
     const withoutWallViews = await renderDoorViews(withoutWall, options)
 
+    const planH = planSvgCanvasHeight(options.width!)
     for (const [viewName, svg] of Object.entries(withWallViews)) {
         const fillGroup = extractFillGroup(svg)
         assert.ok(fillGroup.includes(`fill="${options.wallColor!}"`), `${viewName} SVG is missing wall geometry in the drawing area`)
         assert.ok(getWallFilledArea(svg, options.wallColor!) > 1000, `${viewName} SVG should contain non-degenerate wall fill geometry`)
         assert.ok(svg.includes('Wand'), `${viewName} SVG is missing the wall legend item`)
-        assertCoordinatesWithinBounds(svg, options.width!, options.height!)
+        const canvasH = viewName === 'plan' ? planH : options.height!
+        assertCoordinatesWithinBounds(svg, options.width!, canvasH)
     }
 
     for (const viewName of ['front', 'back', 'plan'] as const) {
@@ -408,7 +410,8 @@ async function main() {
     assert.ok(upwardGuide, 'IFC-reversed placement should still include a dashed open-position guide')
     assert.ok(planBounds, 'Plan view should contain rendered geometry')
     assert.ok(planBounds.maxX - planBounds.minX > 250, 'Plan view geometry should occupy a substantial width')
-    assert.ok(planBounds.maxY - planBounds.minY > 250, 'Plan view geometry should occupy a substantial height')
+    // Plan uses the same scale as Vorderansicht (renderDoorViews); the slice is shallow in screen Y.
+    assert.ok(planBounds.maxY - planBounds.minY > 20, 'Plan view geometry should have non-degenerate vertical extent')
 
     // Hinge origin side
     assert.ok(leftGuide.x1  < options.width! / 2, 'Left swing guide should originate from the left hinge side')
@@ -428,24 +431,22 @@ async function main() {
         ['rotated-45 plan', rot45Plan],
         ['upward-arc plan', upwardArcPlan],
     ] as [string, string][]) {
-        assertCoordinatesWithinBounds(planSvg, options.width!, options.height!)
+        assertCoordinatesWithinBounds(planSvg, options.width!, planH)
         assert.ok(
             planSvg.includes(`fill="${options.wallColor!}"`),
             `${label}: wall bands should be present`
         )
     }
 
-    // Door cross-section should sit near the TOP of the content (wall-band level)
-    // Wall bands are positioned at offsetY, which equals the door-back-face projected Y.
-    // The first wall-band rect's y attribute should be close to the margin (≤ 200px).
+    // Plan wall bands sit at offsetY (semantic door back vs opening side). Absolute Y shifts when
+    // scale matches Vorderansicht; compare default vs flipped arc instead of fixed pixels.
     const wallBandY = getLargestWallRectY(leftPlan, options.wallColor!)
-    if (wallBandY !== null) {
-        assert.ok(wallBandY <= 200, `Wall bands should be near the top of the canvas (got y=${wallBandY})`)
-    }
-
     const upwardWallBandY = getLargestWallRectY(upwardArcPlan, options.wallColor!)
-    if (upwardWallBandY !== null) {
-        assert.ok(upwardWallBandY >= 500, `Upward arc wall bands should move near the bottom of the canvas (got y=${upwardWallBandY})`)
+    if (wallBandY !== null && upwardWallBandY !== null) {
+        assert.ok(
+            wallBandY < upwardWallBandY - 20,
+            `Default plan wall bands should be above flipped-arc bands (got y=${wallBandY} vs ${upwardWallBandY})`
+        )
     }
 
     // The old plan tests (legacy)
@@ -456,8 +457,9 @@ async function main() {
 
     const thickWallContext = await buildContext({ includeWall: true, wallThickness: 0.6 })
     const thickWallViews = await renderDoorViews(thickWallContext, options)
-    for (const svg of Object.values(thickWallViews)) {
-        assertCoordinatesWithinBounds(svg, options.width!, options.height!)
+    for (const [viewName, svg] of Object.entries(thickWallViews)) {
+        const canvasH = viewName === 'plan' ? planH : options.height!
+        assertCoordinatesWithinBounds(svg, options.width!, canvasH)
     }
 
     // Write fixtures for visual inspection
