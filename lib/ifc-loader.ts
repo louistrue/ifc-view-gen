@@ -222,6 +222,9 @@ export interface DoorCsetStandardCHData {
     gebaeude: string | null
     feuerwiderstand: string | null
     bauschalldaemmmass: string | null
+    festverglasung: string | null
+    cfcBkpCccBcc: string | null
+    isExternal: string | null
 }
 
 function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
@@ -238,6 +241,9 @@ function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
         gebaeude: null,
         feuerwiderstand: null,
         bauschalldaemmmass: null,
+        festverglasung: null,
+        cfcBkpCccBcc: null,
+        isExternal: null,
     }
 }
 
@@ -274,6 +280,27 @@ const CSET_PROP_ALIASES: Record<string, string> = {
     massrohebreite: 'rb',
     massrohhoehe: 'rh',
     massrohehoehe: 'rh',
+    isexterior: 'isexternal',
+}
+
+/** IFC-style boolean display (IsExternal etc.): TRUE / FALSE */
+function formatIfcBooleanLikeString(raw: any): string | null {
+    const v = unwrapIfcValue(raw)
+    if (v === true) return 'TRUE'
+    if (v === false) return 'FALSE'
+    if (typeof v === 'number' && Number.isFinite(v)) {
+        if (v === 1) return 'TRUE'
+        if (v === 0) return 'FALSE'
+    }
+    if (typeof v === 'string') {
+        const t = v.trim()
+        if (!t) return null
+        const lower = t.toLowerCase().replace(/\./g, '')
+        if (lower === 'true' || lower === 't' || lower === 'ja' || lower === 'yes' || lower === '1' || lower === 'wahr') return 'TRUE'
+        if (lower === 'false' || lower === 'f' || lower === 'nein' || lower === 'no' || lower === '0' || lower === 'falsch') return 'FALSE'
+        return t
+    }
+    return null
 }
 
 function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nominalValue: any): void {
@@ -335,6 +362,25 @@ function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nom
     if (normalized === 'bauschalldammmass' || normalized === 'bauschalldaemmmass') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) target.bauschalldaemmmass = value.trim()
+        return
+    }
+    if (normalized === 'festverglasung') {
+        const value = unwrapIfcValue(nominalValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.festverglasung = s
+        return
+    }
+    if (normalized === 'cfcbkpcccbcc') {
+        const value = unwrapIfcValue(nominalValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.cfcBkpCccBcc = s
+        return
+    }
+    if (normalized === 'isexternal') {
+        const s = formatIfcBooleanLikeString(nominalValue)
+        if (s) target.isExternal = s
     }
 }
 
@@ -389,6 +435,7 @@ export async function extractDoorCsetStandardCH(file: File): Promise<Map<number,
             const normalizedPsetName = normalizeIfcName(psetName)
             const isRelevantPset =
                 normalizedPsetName === 'csetstandardch'
+                || normalizedPsetName === 'psetdoorcommon'
                 || normalizedPsetName.startsWith('al00')
                 || normalizedPsetName.startsWith('in01')
             if (!isRelevantPset) continue

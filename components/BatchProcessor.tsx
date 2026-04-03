@@ -1,10 +1,16 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import type { DoorContext } from '@/lib/door-analyzer'
+import { type DoorContext, geschossGeometrietypForAirtable } from '@/lib/door-analyzer'
 import JSZip from 'jszip'
-import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
-import type { SVGRenderOptions } from '@/lib/svg-renderer'
+import {
+  renderDoorViews,
+  renderDoorElevationSVG,
+  renderDoorPlanSVG,
+  DEFAULT_SVG_FONT_FAMILY,
+  type SVGRenderOptions,
+} from '@/lib/svg-renderer'
+import { svgStringToWebpDataUrl } from '@/lib/svg-to-webp'
 import {
   Lock,
   Upload,
@@ -52,16 +58,16 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     width: 1000,
     height: 1000,
     margin: 0.5,
-    doorColor: '#333333',
-    wallColor: '#5B7DB1',
-    deviceColor: '#CC0000',
+    doorColor: '#dedede',
+    wallColor: '#e3e3e3',
+    deviceColor: '#fcc647',
     lineWidth: 1.5,
     lineColor: '#000000',
     showFills: true,
     showLegend: true,
     showLabels: true,
-    fontSize: 14,
-    fontFamily: 'Arial',
+    fontSize: 22,
+    fontFamily: DEFAULT_SVG_FONT_FAMILY,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
   })
@@ -123,8 +129,11 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     try {
       const { front, back, plan } = await renderDoorViews(context, options)
 
-      const svgToDataUrl = (svg: string) =>
-        `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+      const [frontView, backView, topView] = await Promise.all([
+        svgStringToWebpDataUrl(front),
+        svgStringToWebpDataUrl(back),
+        svgStringToWebpDataUrl(plan),
+      ])
 
       const response = await fetch('/api/airtable', {
         method: 'POST',
@@ -135,7 +144,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           alTuernummer: context.csetStandardCH?.alTuernummer ?? undefined,
           openingDirection: context.openingDirection || undefined,
           modelSource: modelSource || undefined,
-          geometryType: context.csetStandardCH?.geometryType ?? undefined,
+          geometryType: geschossGeometrietypForAirtable(context),
+          geometryTypeSync: context.csetStandardCH?.geometryType?.trim() || undefined,
+          geschossSync: context.storeyName?.trim() || undefined,
           massDurchgangsbreite: context.csetStandardCH?.massDurchgangsbreite ?? undefined,
           massDurchgangshoehe: context.csetStandardCH?.massDurchgangshoehe ?? undefined,
           massRohbreite: context.csetStandardCH?.massRohbreite ?? undefined,
@@ -144,9 +155,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           massAussenrahmenHoehe: context.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
           feuerwiderstand: context.csetStandardCH?.feuerwiderstand ?? undefined,
           bauschalldaemmmass: context.csetStandardCH?.bauschalldaemmmass ?? undefined,
-          frontView: svgToDataUrl(front),
-          backView: svgToDataUrl(back),
-          topView: svgToDataUrl(plan),
+          frontView,
+          backView,
+          topView,
         }),
       })
 
@@ -188,8 +199,11 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
       try {
         const { front, back, plan } = await renderDoorViews(door, options)
 
-        const svgToDataUrl = (svg: string) =>
-          `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+        const [frontView, backView, topView] = await Promise.all([
+          svgStringToWebpDataUrl(front),
+          svgStringToWebpDataUrl(back),
+          svgStringToWebpDataUrl(plan),
+        ])
 
         const response = await fetch('/api/airtable', {
           method: 'POST',
@@ -200,7 +214,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
-            geometryType: door.csetStandardCH?.geometryType ?? undefined,
+            geometryType: geschossGeometrietypForAirtable(door),
+            geometryTypeSync: door.csetStandardCH?.geometryType?.trim() || undefined,
+            geschossSync: door.storeyName?.trim() || undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
@@ -209,9 +225,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             massAussenrahmenHoehe: door.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
             feuerwiderstand: door.csetStandardCH?.feuerwiderstand ?? undefined,
             bauschalldaemmmass: door.csetStandardCH?.bauschalldaemmmass ?? undefined,
-            frontView: svgToDataUrl(front),
-            backView: svgToDataUrl(back),
-            topView: svgToDataUrl(plan),
+            frontView,
+            backView,
+            topView,
           }),
         })
 
@@ -571,16 +587,17 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               min="8"
               max="48"
               step="1"
-              value={options.fontSize || 14}
-              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value) })}
+              value={options.fontSize ?? 22}
+              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value, 10) || 22 })}
             />
           </div>
           <div className="control-group">
             <label>Font Family</label>
             <select
-              value={options.fontFamily || 'Arial'}
+              value={options.fontFamily || DEFAULT_SVG_FONT_FAMILY}
               onChange={(e) => setOptions({ ...options, fontFamily: e.target.value })}
             >
+              <option value={DEFAULT_SVG_FONT_FAMILY}>Inter</option>
               <option value="Arial">Arial</option>
               <option value="Helvetica">Helvetica</option>
               <option value="Verdana">Verdana</option>
@@ -855,24 +872,33 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           align-items: center;
           justify-content: center;
           z-index: 2000;
-          padding: 2rem;
+          padding: 1rem;
         }
         .image-modal-content {
           background: #1a1a1a;
           border-radius: 8px;
-          max-width: 90vw;
-          max-height: 90vh;
+          width: min(95vw, calc(100vw - 2rem));
+          height: min(92vh, calc(100vh - 2rem));
+          max-width: 95vw;
+          max-height: min(92vh, calc(100vh - 2rem));
           display: flex;
           flex-direction: column;
           box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
           overflow: hidden;
           min-height: 0;
         }
+        @supports (height: 100dvh) {
+          .image-modal-content {
+            height: min(92vh, calc(100dvh - 2rem));
+            max-height: min(92vh, calc(100dvh - 2rem));
+          }
+        }
         .image-modal-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 1rem 1.5rem;
+          flex-shrink: 0;
+          padding: 0.625rem 1rem;
           border-bottom: 1px solid #333;
         }
         .image-modal-header h3 {
@@ -901,16 +927,19 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         .image-modal-body {
           flex: 1;
           min-height: 0;
+          min-width: 0;
           overflow: hidden;
-          padding: 2rem;
+          padding: 0.625rem 0.75rem;
           background: #fff;
           display: flex;
-          align-items: center;
-          justify-content: center;
+          flex-direction: column;
+          align-items: stretch;
         }
         .image-container {
           flex: 1;
           min-height: 0;
+          min-width: 0;
+          width: 100%;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -921,13 +950,13 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           max-height: 100%;
           width: auto;
           height: auto;
-          object-fit: contain;
         }
         .image-modal-footer {
           display: flex;
+          flex-shrink: 0;
           gap: 1rem;
           justify-content: flex-end;
-          padding: 1rem 1.5rem;
+          padding: 0.625rem 1rem;
           border-top: 1px solid #333;
         }
         .download-button-modal {
