@@ -10,6 +10,7 @@ import {
   DEFAULT_SVG_FONT_FAMILY,
   type SVGRenderOptions,
 } from '@/lib/svg-renderer'
+import { svgStringToWebpDataUrl } from '@/lib/svg-to-webp'
 import {
   Lock,
   Upload,
@@ -128,8 +129,11 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     try {
       const { front, back, plan } = await renderDoorViews(context, options)
 
-      const svgToDataUrl = (svg: string) =>
-        `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+      const [frontView, backView, topView] = await Promise.all([
+        svgStringToWebpDataUrl(front),
+        svgStringToWebpDataUrl(back),
+        svgStringToWebpDataUrl(plan),
+      ])
 
       const response = await fetch('/api/airtable', {
         method: 'POST',
@@ -151,9 +155,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
           massAussenrahmenHoehe: context.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
           feuerwiderstand: context.csetStandardCH?.feuerwiderstand ?? undefined,
           bauschalldaemmmass: context.csetStandardCH?.bauschalldaemmmass ?? undefined,
-          frontView: svgToDataUrl(front),
-          backView: svgToDataUrl(back),
-          topView: svgToDataUrl(plan),
+          frontView,
+          backView,
+          topView,
         }),
       })
 
@@ -195,8 +199,11 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
       try {
         const { front, back, plan } = await renderDoorViews(door, options)
 
-        const svgToDataUrl = (svg: string) =>
-          `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+        const [frontView, backView, topView] = await Promise.all([
+          svgStringToWebpDataUrl(front),
+          svgStringToWebpDataUrl(back),
+          svgStringToWebpDataUrl(plan),
+        ])
 
         const response = await fetch('/api/airtable', {
           method: 'POST',
@@ -218,9 +225,9 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             massAussenrahmenHoehe: door.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
             feuerwiderstand: door.csetStandardCH?.feuerwiderstand ?? undefined,
             bauschalldaemmmass: door.csetStandardCH?.bauschalldaemmmass ?? undefined,
-            frontView: svgToDataUrl(front),
-            backView: svgToDataUrl(back),
-            topView: svgToDataUrl(plan),
+            frontView,
+            backView,
+            topView,
           }),
         })
 

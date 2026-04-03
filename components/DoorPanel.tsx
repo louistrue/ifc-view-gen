@@ -10,6 +10,7 @@ import {
   DEFAULT_SVG_FONT_FAMILY,
   type SVGRenderOptions,
 } from '@/lib/svg-renderer'
+import { svgStringToWebpDataUrl } from '@/lib/svg-to-webp'
 import { Settings, ExternalLink, LogOut, Link2, Loader2, Check, X, Download, Upload } from 'lucide-react'
 
 interface AirtableAuthStatus {
@@ -247,8 +248,11 @@ export default function DoorPanel({
 
       try {
         const { front, back, plan } = await renderDoorViews(door, options)
-        const svgToDataUrl = (svg: string) =>
-          `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+        const [frontView, backView, topView] = await Promise.all([
+          svgStringToWebpDataUrl(front),
+          svgStringToWebpDataUrl(back),
+          svgStringToWebpDataUrl(plan),
+        ])
 
         const response = await fetch('/api/airtable', {
           method: 'POST',
@@ -270,9 +274,9 @@ export default function DoorPanel({
             massAussenrahmenHoehe: door.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
             feuerwiderstand: door.csetStandardCH?.feuerwiderstand ?? undefined,
             bauschalldaemmmass: door.csetStandardCH?.bauschalldaemmmass ?? undefined,
-            frontView: svgToDataUrl(front),
-            backView: svgToDataUrl(back),
-            topView: svgToDataUrl(plan),
+            frontView,
+            backView,
+            topView,
           }),
         })
 
