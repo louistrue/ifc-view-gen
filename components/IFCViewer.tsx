@@ -21,6 +21,21 @@ import TypeFilterPanel from './TypeFilterPanel'
 import IFCClassFilterPanel from './IFCClassFilterPanel'
 import DoorListDock from './DoorListDock'
 
+/** Skip viewer shortcuts while typing in form fields so keys like 1–7 don't change the camera. */
+function isKeyboardEventFromEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  const tag = target.tagName
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (tag === 'INPUT') {
+    const input = target as HTMLInputElement
+    if (input.disabled || input.readOnly) return false
+    const type = input.type
+    return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].includes(type)
+  }
+  return false
+}
+
 export default function IFCViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
@@ -540,6 +555,8 @@ export default function IFCViewer() {
 
     // Keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (isKeyboardEventFromEditableTarget(e.target)) return
+
       // View presets (1-7)
       if (e.key >= '1' && e.key <= '7' && navigationManagerRef.current) {
         const presets: Array<'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso'> = [
