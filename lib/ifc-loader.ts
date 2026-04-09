@@ -222,6 +222,23 @@ export interface DoorCsetStandardCHData {
     gebaeude: string | null
     feuerwiderstand: string | null
     bauschalldaemmmass: string | null
+    festverglasung: string | null
+    cfcBkpCccBcc: string | null
+    isExternal: string | null
+}
+
+export interface DoorPanelMetadata {
+    operation: string | null
+    widthRatio: number | null
+    position: string | null
+}
+
+export interface DoorLeafMetadata {
+    overallWidth: number | null
+    overallHeight: number | null
+    quantityWidth: number | null
+    quantityHeight: number | null
+    panels: DoorPanelMetadata[]
 }
 
 function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
@@ -238,6 +255,19 @@ function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
         gebaeude: null,
         feuerwiderstand: null,
         bauschalldaemmmass: null,
+        festverglasung: null,
+        cfcBkpCccBcc: null,
+        isExternal: null,
+    }
+}
+
+function emptyDoorLeafMetadata(): DoorLeafMetadata {
+    return {
+        overallWidth: null,
+        overallHeight: null,
+        quantityWidth: null,
+        quantityHeight: null,
+        panels: [],
     }
 }
 
@@ -266,6 +296,114 @@ function parseIfcNumber(raw: any): number | null {
     return null
 }
 
+function getEntityTypeName(entity: any): string {
+    if (!entity) return ''
+    if (typeof entity.type === 'string') return entity.type.toUpperCase()
+    if (typeof entity.type === 'number') return (getIfcTypeName(entity.type) || '').toUpperCase()
+    return ''
+}
+
+function getOrCreateDoorLeafMetadata(result: Map<number, DoorLeafMetadata>, doorId: number): DoorLeafMetadata {
+    const existing = result.get(doorId)
+    if (existing) return existing
+    const created = emptyDoorLeafMetadata()
+    result.set(doorId, created)
+    return created
+}
+
+function appendPanelMetadata(target: DoorLeafMetadata, panelDef: any): void {
+    const operationValue = unwrapIfcValue(panelDef?.PanelOperation ?? panelDef?.OperationType)
+    const positionValue = unwrapIfcValue(panelDef?.PanelPosition)
+    const widthRatio = parseIfcNumber(panelDef?.PanelWidth)
+    const operation = typeof operationValue === 'string' && operationValue.trim()
+        ? operationValue.trim().toUpperCase()
+        : null
+    const position = typeof positionValue === 'string' && positionValue.trim()
+        ? positionValue.trim().toUpperCase()
+        : null
+
+    const duplicate = target.panels.some((panel) =>
+        panel.operation === operation
+        && panel.position === position
+        && (
+            (panel.widthRatio === null && widthRatio === null)
+            || (panel.widthRatio !== null && widthRatio !== null && Math.abs(panel.widthRatio - widthRatio) < 1e-9)
+        )
+    )
+    if (duplicate) return
+
+    target.panels.push({
+        operation,
+        widthRatio,
+        position,
+    })
+}
+
+function applyDoorBaseQuantities(target: DoorLeafMetadata, quantitySet: any, api: IfcAPI, modelID: number): void {
+    const setName = String(unwrapIfcValue(quantitySet?.Name) || '')
+    if (normalizeIfcName(setName) !== 'qtodoorbasequantities') return
+
+    const quantities = Array.isArray(quantitySet?.Quantities) ? quantitySet.Quantities : []
+    for (const quantityRef of quantities) {
+        const quantityId = quantityRef?.value
+        if (typeof quantityId !== 'number') continue
+        const quantity = api.GetLine(modelID, quantityId)
+        const quantityName = normalizeIfcName(String(unwrapIfcValue(quantity?.Name) || ''))
+        const value =
+            parseIfcNumber(quantity?.LengthValue)
+            ?? parseIfcNumber(quantity?.AreaValue)
+            ?? parseIfcNumber(quantity?.VolumeValue)
+            ?? parseIfcNumber(quantity?.CountValue)
+            ?? parseIfcNumber(quantity?.WeightValue)
+            ?? parseIfcNumber(quantity?.TimeValue)
+
+        if (value === null) continue
+        if (quantityName === 'width' && target.quantityWidth === null) {
+            target.quantityWidth = value
+        } else if (quantityName === 'height' && target.quantityHeight === null) {
+            target.quantityHeight = value
+        }
+    }
+}
+
+function collectDoorLeafDefinitions(
+    api: IfcAPI,
+    modelID: number,
+    entity: any,
+    target: DoorLeafMetadata
+): void {
+    if (!entity) return
+
+    const inspectDefinition = (definition: any) => {
+        const typeName = getEntityTypeName(definition)
+        if (typeName === 'IFCDOORPANELPROPERTIES') {
+            appendPanelMetadata(target, definition)
+        } else if (typeName === 'IFCELEMENTQUANTITY') {
+            applyDoorBaseQuantities(target, definition, api, modelID)
+        }
+    }
+
+    if (Array.isArray(entity?.HasPropertySets)) {
+        for (const definitionRef of entity.HasPropertySets) {
+            const definitionId = definitionRef?.value
+            if (typeof definitionId !== 'number') continue
+            inspectDefinition(api.GetLine(modelID, definitionId))
+        }
+    }
+
+    const isDefinedBy = Array.isArray(entity?.IsDefinedBy)
+        ? entity.IsDefinedBy
+        : (entity?.IsDefinedBy ? [entity.IsDefinedBy] : [])
+    for (const relRef of isDefinedBy) {
+        const relId = relRef?.value
+        if (typeof relId !== 'number') continue
+        const rel = api.GetLine(modelID, relId)
+        const definitionId = rel?.RelatingPropertyDefinition?.value
+        if (typeof definitionId !== 'number') continue
+        inspectDefinition(api.GetLine(modelID, definitionId))
+    }
+}
+
 const CSET_PROP_ALIASES: Record<string, string> = {
     al00tuernummer: 'tuernummereindeutig',
     tuernummer: 'tuernummereindeutig',
@@ -274,6 +412,27 @@ const CSET_PROP_ALIASES: Record<string, string> = {
     massrohebreite: 'rb',
     massrohhoehe: 'rh',
     massrohehoehe: 'rh',
+    isexterior: 'isexternal',
+}
+
+/** IFC-style boolean display (IsExternal etc.): TRUE / FALSE */
+function formatIfcBooleanLikeString(raw: any): string | null {
+    const v = unwrapIfcValue(raw)
+    if (v === true) return 'TRUE'
+    if (v === false) return 'FALSE'
+    if (typeof v === 'number' && Number.isFinite(v)) {
+        if (v === 1) return 'TRUE'
+        if (v === 0) return 'FALSE'
+    }
+    if (typeof v === 'string') {
+        const t = v.trim()
+        if (!t) return null
+        const lower = t.toLowerCase().replace(/\./g, '')
+        if (lower === 'true' || lower === 't' || lower === 'ja' || lower === 'yes' || lower === '1' || lower === 'wahr') return 'TRUE'
+        if (lower === 'false' || lower === 'f' || lower === 'nein' || lower === 'no' || lower === '0' || lower === 'falsch') return 'FALSE'
+        return t
+    }
+    return null
 }
 
 function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nominalValue: any): void {
@@ -335,6 +494,25 @@ function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nom
     if (normalized === 'bauschalldammmass' || normalized === 'bauschalldaemmmass') {
         const value = unwrapIfcValue(nominalValue)
         if (typeof value === 'string' && value.trim()) target.bauschalldaemmmass = value.trim()
+        return
+    }
+    if (normalized === 'festverglasung') {
+        const value = unwrapIfcValue(nominalValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.festverglasung = s
+        return
+    }
+    if (normalized === 'cfcbkpcccbcc') {
+        const value = unwrapIfcValue(nominalValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.cfcBkpCccBcc = s
+        return
+    }
+    if (normalized === 'isexternal') {
+        const s = formatIfcBooleanLikeString(nominalValue)
+        if (s) target.isExternal = s
     }
 }
 
@@ -389,6 +567,7 @@ export async function extractDoorCsetStandardCH(file: File): Promise<Map<number,
             const normalizedPsetName = normalizeIfcName(psetName)
             const isRelevantPset =
                 normalizedPsetName === 'csetstandardch'
+                || normalizedPsetName === 'psetdoorcommon'
                 || normalizedPsetName.startsWith('al00')
                 || normalizedPsetName.startsWith('in01')
             if (!isRelevantPset) continue
@@ -420,6 +599,71 @@ export async function extractDoorCsetStandardCH(file: File): Promise<Map<number,
                     applyCsetProperty(existing, propName, prop?.NominalValue)
                 }
                 result.set(doorId, existing)
+            }
+        }
+
+        return result
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+export async function extractDoorLeafMetadata(file: File): Promise<Map<number, DoorLeafMetadata>> {
+    const api = await initializeIFCAPI()
+    const result = new Map<number, DoorLeafMetadata>()
+
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for door leaf metadata extraction')
+        return result
+    }
+
+    try {
+        const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
+        const doorToType = new Map<number, number>()
+
+        const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+        for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
+            const rel = api.GetLine(modelID, relDefinesByTypeIds.get(i))
+            const typeId = rel?.RelatingType?.value
+            if (typeof typeId !== 'number') continue
+            const relatedObjects = Array.isArray(rel?.RelatedObjects) ? rel.RelatedObjects : []
+            for (const related of relatedObjects) {
+                const doorId = related?.value
+                if (typeof doorId === 'number') {
+                    doorToType.set(doorId, typeId)
+                }
+            }
+        }
+
+        for (let i = 0; i < doorIds.size(); i++) {
+            const doorId = doorIds.get(i)
+            const door = api.GetLine(modelID, doorId)
+            if (!door) continue
+
+            const target = getOrCreateDoorLeafMetadata(result, doorId)
+            target.overallWidth = parseIfcNumber(door.OverallWidth) ?? target.overallWidth
+            target.overallHeight = parseIfcNumber(door.OverallHeight) ?? target.overallHeight
+            collectDoorLeafDefinitions(api, modelID, door, target)
+
+            const typeId = doorToType.get(doorId)
+            if (typeof typeId === 'number') {
+                const typeEntity = api.GetLine(modelID, typeId)
+                collectDoorLeafDefinitions(api, modelID, typeEntity, target)
+            }
+
+            const hasUsefulData =
+                target.overallWidth !== null
+                || target.overallHeight !== null
+                || target.quantityWidth !== null
+                || target.quantityHeight !== null
+                || target.panels.length > 0
+
+            if (!hasUsefulData) {
+                result.delete(doorId)
             }
         }
 

@@ -109,9 +109,9 @@ The SVG renderer supports these customization options:
 | width | 1000 | SVG width in pixels |
 | height | 1000 | SVG height in pixels |
 | margin | 0.5 | Margin around element (meters) |
-| doorColor | #333333 | Primary element fill color |
-| wallColor | #888888 | Secondary element fill color |
-| deviceColor | #CC0000 | Device/equipment fill color |
+| doorColor | #dedede | Primary element fill color |
+| wallColor | #e3e3e3 | Secondary element fill color |
+| deviceColor | #fcc647 | Device/equipment fill color |
 | lineWidth | 1.5 | Stroke width for edges |
 | lineColor | #000000 | Stroke color for edges |
 | showFills | true | Render filled polygons |

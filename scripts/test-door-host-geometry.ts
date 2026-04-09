@@ -155,6 +155,20 @@ function getPathBBoxesByFill(svg: string, fill: string): BBox2D[] {
             maxY: Math.max(...points.map((point) => point.y)),
         })
     }
+    for (const tag of svg.match(/<rect\b[^>]*>/g) || []) {
+        const fillValue = tag.match(/\bfill="([^"]+)"/)?.[1]
+        const x = Number.parseFloat(tag.match(/\bx="([^"]+)"/)?.[1] ?? 'NaN')
+        const y = Number.parseFloat(tag.match(/\by="([^"]+)"/)?.[1] ?? 'NaN')
+        const width = Number.parseFloat(tag.match(/\bwidth="([^"]+)"/)?.[1] ?? 'NaN')
+        const height = Number.parseFloat(tag.match(/\bheight="([^"]+)"/)?.[1] ?? 'NaN')
+        if (fillValue !== fill || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) continue
+        boxes.push({
+            minX: x,
+            minY: y,
+            maxX: x + width,
+            maxY: y + height,
+        })
+    }
     return boxes
 }
 

@@ -12,6 +12,8 @@ type ResolvedFields = {
   doorId: string
   alTuernummer?: string
   geometryType?: string
+  geometryTypeSync?: string
+  geschossSync?: string
   massDurchgangsbreite?: string
   massDurchgangshoehe?: string
   massRohbreite?: string
@@ -46,6 +48,8 @@ const FIELD_CANDIDATES = {
   doorId: ['AL00_GUID', 'Door ID'],
   alTuernummer: ['AL00_Türnummer', 'AL00_Tuernummer'],
   geometryType: ['Geometry type', 'Door Type'],
+  geometryTypeSync: ['GE01_Geometrietyp_sync'],
+  geschossSync: ['AL00_Geschoss'],
   massDurchgangsbreite: ['GE01_LichteBreiteLB', 'Mass - Durchgangsbreite'],
   massDurchgangshoehe: ['GE01_LichteHöheLH', 'GE01_LichteHoeheLH', 'Mass - Durchgangshöhe'],
   massRohbreite: ['GE01_RoheBreiteRB', 'GE01_RohBreiteRB', 'Mass - Rohbreite'],
@@ -66,6 +70,10 @@ interface DoorData {
   doorType?: string
   alTuernummer?: string
   geometryType?: string
+  /** IFC Cset_StandardCH GeometryType only (no storey prefix); mapped to GE01_Geometrietyp_sync when present in base */
+  geometryTypeSync?: string
+  /** Building storey name (spatial structure); mapped to AL00_Geschoss when present in base */
+  geschossSync?: string
   openingDirection?: string
   modelSource?: string
   massDurchgangsbreite?: number
@@ -149,6 +157,10 @@ function normalizeChoiceCompare(value: string): string {
 
 function isNumericFieldType(type: string): boolean {
   return type === 'number' || type === 'currency' || type === 'percent' || type === 'duration' || type === 'rating'
+}
+
+function isLinkFieldType(type: string): boolean {
+  return type === 'multipleRecordLinks' || type === 'singleRecordLink'
 }
 
 function pickAirtableSelectValue(rawValue: string | undefined, field?: TableField): string | undefined {
@@ -339,7 +351,6 @@ async function updateDoorRecord(
 ): Promise<void> {
   const fields: Record<string, unknown> = {}
   const normalizedGeometryType = sanitizeChoiceValue(data.geometryType)
-  const normalizedDoorType = sanitizeChoiceValue(data.doorType)
   const normalizedBrandschutz = sanitizeChoiceValue(data.feuerwiderstand)
   const normalizedSchallschutz = sanitizeSchallschutzValue(data.bauschalldaemmmass)
 
@@ -347,9 +358,36 @@ async function updateDoorRecord(
   if (normalizedTuernummer && fieldsMap.alTuernummer) fields[fieldsMap.alTuernummer] = normalizedTuernummer
   if (fieldsMap.geometryType) {
     const geometryTypeField = tableFieldsByName[fieldsMap.geometryType]
-    const mapped = pickAirtableSelectValue(normalizedGeometryType, geometryTypeField) ||
-      pickAirtableSelectValue(normalizedDoorType, geometryTypeField)
+    const mapped = pickAirtableSelectValue(normalizedGeometryType, geometryTypeField)
     if (mapped) fields[fieldsMap.geometryType] = mapped
+  }
+
+  const normalizedGeometryTypeSync = sanitizeChoiceValue(data.geometryTypeSync)
+  if (normalizedGeometryTypeSync && fieldsMap.geometryTypeSync) {
+    const geometryTypeSyncField = tableFieldsByName[fieldsMap.geometryTypeSync]
+    if (geometryTypeSyncField && isLinkFieldType(geometryTypeSyncField.type)) {
+      console.warn(
+        '[Airtable] GE01_Geometrietyp_sync maps to a link field; skipping plain-text sync (use a text or select field).',
+        { doorId: data.doorId }
+      )
+    } else {
+      const mappedSync = pickAirtableSelectValue(normalizedGeometryTypeSync, geometryTypeSyncField)
+      if (mappedSync) fields[fieldsMap.geometryTypeSync] = mappedSync
+    }
+  }
+
+  const normalizedGeschossSync = sanitizeChoiceValue(data.geschossSync)
+  if (normalizedGeschossSync && fieldsMap.geschossSync) {
+    const geschossSyncField = tableFieldsByName[fieldsMap.geschossSync]
+    if (geschossSyncField && isLinkFieldType(geschossSyncField.type)) {
+      console.warn(
+        '[Airtable] AL00_Geschoss maps to a link field; skipping plain-text sync (use a text or select field).',
+        { doorId: data.doorId }
+      )
+    } else {
+      const mappedGeschoss = pickAirtableSelectValue(normalizedGeschossSync, geschossSyncField)
+      if (mappedGeschoss) fields[fieldsMap.geschossSync] = mappedGeschoss
+    }
   }
 
   if (typeof data.massDurchgangsbreite === 'number' && fieldsMap.massDurchgangsbreite) fields[fieldsMap.massDurchgangsbreite] = data.massDurchgangsbreite
@@ -526,6 +564,8 @@ export async function POST(request: NextRequest) {
         doorId: pickField(availableFields, FIELD_CANDIDATES.doorId) || '',
         alTuernummer: pickField(availableFields, FIELD_CANDIDATES.alTuernummer),
         geometryType: pickField(availableFields, FIELD_CANDIDATES.geometryType),
+        geometryTypeSync: pickField(availableFields, FIELD_CANDIDATES.geometryTypeSync),
+        geschossSync: pickField(availableFields, FIELD_CANDIDATES.geschossSync),
         massDurchgangsbreite: pickField(availableFields, FIELD_CANDIDATES.massDurchgangsbreite),
         massDurchgangshoehe: pickField(availableFields, FIELD_CANDIDATES.massDurchgangshoehe),
         massRohbreite: pickField(availableFields, FIELD_CANDIDATES.massRohbreite),
@@ -563,6 +603,8 @@ export async function POST(request: NextRequest) {
       brandschutz: resolvedFields.brandschutzManuell,
       schallschutz: resolvedFields.schallschutzManuell,
       geometryType: resolvedFields.geometryType,
+      geometryTypeSync: resolvedFields.geometryTypeSync,
+      geschossSync: resolvedFields.geschossSync,
       frontView: resolvedFields.frontView,
       backView: resolvedFields.backView,
       topView: resolvedFields.topView,
