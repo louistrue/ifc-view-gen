@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import type { Box3 } from 'three'
 import type { DoorContext } from '@/lib/door-analyzer'
 import { filterDoors } from '@/lib/door-analyzer'
 import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
@@ -22,6 +23,7 @@ interface DoorPanelProps {
   doorContexts: DoorContext[]
   visibilityManager: ElementVisibilityManager | null
   navigationManager: NavigationManager | null
+  resolveDoorBoundingBox?: (door: DoorContext) => Box3 | undefined
   modelSource?: string
   onComplete?: () => void
   onShowSingleDoorReady?: (showSingleDoor: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => void
@@ -35,6 +37,7 @@ export default function DoorPanel({
   doorContexts,
   visibilityManager,
   navigationManager,
+  resolveDoorBoundingBox,
   modelSource,
   onComplete,
   onShowSingleDoorReady,
@@ -311,7 +314,8 @@ export default function DoorPanel({
 
   // Handle door click - zoom to door and highlight it
   const handleDoorClick = useCallback((door: DoorContext) => {
-    if (!navigationManager || !door.door.boundingBox) return
+    const box = resolveDoorBoundingBox?.(door) ?? door.door.boundingBox
+    if (!navigationManager || !box) return
 
 
     // Highlight the selected door in 3D
@@ -321,11 +325,11 @@ export default function DoorPanel({
 
     // Zoom to door from the front view
     navigationManager.zoomToElementFromNormal(
-      door.door.boundingBox,
+      box,
       door.normal,
       2.5
     )
-  }, [navigationManager, visibilityManager])
+  }, [navigationManager, resolveDoorBoundingBox, visibilityManager])
 
   // Toggle door selection
   const toggleDoorSelection = useCallback((doorId: string) => {
@@ -399,16 +403,22 @@ export default function DoorPanel({
             source: 'DoorPanel',
             doorId: context.doorId,
             view,
+            nearbyDeviceCount: context.nearbyDevices.length,
+            nearbyDeviceIds: context.nearbyDevices.map((device) => device.globalId || String(device.expressID)),
+            nearbyDeviceTypes: context.nearbyDevices.map((device) => device.typeName),
             wallColor: options.wallColor,
             doorColor: options.doorColor,
             hostWallId: context.hostWall?.expressID ?? null,
             wallBoundingBox: Boolean(context.hostWall?.boundingBox),
             detailedDoorMeshes: context.detailedGeometry?.doorMeshes.length ?? 0,
             detailedWallMeshes: context.detailedGeometry?.wallMeshes.length ?? 0,
+            detailedDeviceMeshes: context.detailedGeometry?.deviceMeshes.length ?? 0,
             svgIncludesWallColor: Boolean(options.wallColor && svg.includes(options.wallColor)),
             svgIncludesDoorColor: Boolean(options.doorColor && svg.includes(options.doorColor)),
+            svgIncludesDeviceColor: Boolean(options.deviceColor && svg.includes(options.deviceColor)),
             svgDoorFillCount: options.doorColor ? (svg.match(new RegExp(options.doorColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
             svgWallFillCount: options.wallColor ? (svg.match(new RegExp(options.wallColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
+            svgDeviceFillCount: options.deviceColor ? (svg.match(new RegExp(options.deviceColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
           })
         }
 

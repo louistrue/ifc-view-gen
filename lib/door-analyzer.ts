@@ -532,6 +532,76 @@ function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
     return fallback
 }
 
+function boxDistance(a: THREE.Box3, b: THREE.Box3): number {
+    const dx = Math.max(0, a.min.x - b.max.x, b.min.x - a.max.x)
+    const dy = Math.max(0, a.min.y - b.max.y, b.min.y - a.max.y)
+    const dz = Math.max(0, a.min.z - b.max.z, b.min.z - a.max.z)
+    return Math.sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+function boxPlaneDistance(referenceCenter: THREE.Vector3, box: THREE.Box3, axis: THREE.Vector3): number {
+    const corners = [
+        new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ]
+
+    let minProjection = Infinity
+    let maxProjection = -Infinity
+    for (const corner of corners) {
+        const projection = corner.clone().sub(referenceCenter).dot(axis)
+        minProjection = Math.min(minProjection, projection)
+        maxProjection = Math.max(maxProjection, projection)
+    }
+
+    if (minProjection <= 0 && maxProjection >= 0) {
+        return 0
+    }
+    return Math.min(Math.abs(minProjection), Math.abs(maxProjection))
+}
+
+function measureBoxInFrame(
+    box: THREE.Box3,
+    axisA: THREE.Vector3,
+    axisB: THREE.Vector3
+): { minA: number; maxA: number; minB: number; maxB: number } {
+    let minA = Infinity
+    let maxA = -Infinity
+    let minB = Infinity
+    let maxB = -Infinity
+
+    const corners = [
+        new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ]
+
+    for (const corner of corners) {
+        const a = corner.dot(axisA)
+        const b = corner.dot(axisB)
+        minA = Math.min(minA, a)
+        maxA = Math.max(maxA, a)
+        minB = Math.min(minB, b)
+        maxB = Math.max(maxB, b)
+    }
+
+    return { minA, maxA, minB, maxB }
+}
+
+function rangesOverlap(minA: number, maxA: number, minB: number, maxB: number): boolean {
+    return Math.min(maxA, maxB) >= Math.max(minA, minB)
+}
+
 function measureMeshesInFrame(
     meshes: THREE.Mesh[],
     widthAxis: THREE.Vector3,
@@ -714,47 +784,98 @@ function findNearbyDevices(
     door: ElementInfo,
     devices: ElementInfo[],
     normal: THREE.Vector3,
-    radius: number = 1.0
+    hostWall: ElementInfo | null,
+    viewFrame: DoorViewFrame,
+    radius: number = 1.25,
+    limit: number = 8
 ): ElementInfo[] {
     if (!door.boundingBox) return []
 
     const doorCenter = door.boundingBox.getCenter(new THREE.Vector3())
-    const nearby: ElementInfo[] = []
+    const hostWallBox = hostWall?.boundingBox ?? null
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const doorBoundsInFrame = measureBoxInFrame(door.boundingBox, widthAxis, upAxis)
+    const doorCenterA = (doorBoundsInFrame.minA + doorBoundsInFrame.maxA) / 2
+    const expandedDoorVerticalMin = doorBoundsInFrame.minB - 0.15
+    const expandedDoorVerticalMax = doorBoundsInFrame.maxB + 0.15
+    const edgeBandThreshold = Math.max(viewFrame.width * 0.12, 0.18)
 
-    for (const device of devices) {
-        if (!device.boundingBox) continue
+    const filtered = devices
+        .filter((device) => device.boundingBox)
+        .map((device) => {
+            const candidateBox = device.boundingBox!
+            const candidateCenter = candidateBox.getCenter(new THREE.Vector3())
+            const candidateSize = candidateBox.getSize(new THREE.Vector3())
+            const candidateBoundsInFrame = measureBoxInFrame(candidateBox, widthAxis, upAxis)
+            const candidateCenterA = (candidateBoundsInFrame.minA + candidateBoundsInFrame.maxA) / 2
+            const distanceToNearestJamb = Math.min(
+                Math.abs(candidateCenterA - doorBoundsInFrame.minA),
+                Math.abs(candidateCenterA - doorBoundsInFrame.maxA),
+            )
+            const overlapsDoorVerticalBand = rangesOverlap(
+                candidateBoundsInFrame.minB,
+                candidateBoundsInFrame.maxB,
+                expandedDoorVerticalMin,
+                expandedDoorVerticalMax
+            )
+            const bboxGap = boxDistance(door.boundingBox!, candidateBox)
+            const planeGap = boxPlaneDistance(doorCenter, candidateBox, normal)
+            const centerDistance = doorCenter.distanceTo(candidateCenter)
+            const halfDepthOnNormal =
+                0.5 * (
+                    Math.abs(normal.x) * candidateSize.x +
+                    Math.abs(normal.y) * candidateSize.y +
+                    Math.abs(normal.z) * candidateSize.z
+                )
+            const intersectsHostWall = Boolean(hostWallBox?.intersectsBox(candidateBox))
+            const inSameWallPlane = planeGap <= Math.max(0.6, halfDepthOnNormal + 0.2)
+            const nearDoorJamb = distanceToNearestJamb <= edgeBandThreshold
+            const shouldKeep =
+                overlapsDoorVerticalBand && (
+                    (bboxGap <= radius && inSameWallPlane && nearDoorJamb)
+                    || (intersectsHostWall && nearDoorJamb && bboxGap <= Math.max(radius * 1.5, 2.0) && planeGap <= Math.max(0.8, halfDepthOnNormal + 0.35))
+                )
 
-        const deviceCenter = device.boundingBox.getCenter(new THREE.Vector3())
-        const distance = doorCenter.distanceTo(deviceCenter)
+            return {
+                device,
+                bboxGap,
+                planeGap,
+                centerDistance,
+                distanceToNearestJamb,
+                score: bboxGap + planeGap + distanceToNearestJamb * 0.35 + Math.abs(candidateCenterA - doorCenterA) * 0.02,
+                shouldKeep,
+            }
+        })
+        .filter((entry) => entry.shouldKeep)
+        .sort((a, b) =>
+            a.score - b.score
+            || a.bboxGap - b.bboxGap
+            || a.distanceToNearestJamb - b.distanceToNearestJamb
+            || a.planeGap - b.planeGap
+            || a.centerDistance - b.centerDistance
+        )
 
-        // Check if device is roughly in the same plane as the door (wall)
-        // Vector from door to device
-        const toDevice = deviceCenter.clone().sub(doorCenter)
+    const selected: typeof filtered = []
+    if (filtered.length > 0) {
+        selected.push(filtered[0])
+        const bestScore = filtered[0].score
 
-        // Project vector onto door normal (which points OUT of the wall)
-        // This gives the distance perpendicular to the wall plane
-        const distFromPlane = Math.abs(toDevice.dot(normal))
-
-        // Threshold: 30cm (0.3m). Standard walls are ~10-20cm. 
-        // If device is >30cm away from the plane, it's likely on a perpendicular wall.
-        const isAlignedWithWallPlane = distFromPlane < 0.3
-
-        // NEW: Check orientation match
-        // Even if device is "in plane" (e.g. at corner), it might be on perpendicular wall.
-        // We check if Element Normal is parallel to Door Normal.
-        const deviceNormal = calculateElementNormal(device)
-        const orientationDot = Math.abs(normal.dot(deviceNormal))
-
-        // Dot product of parallel vectors is 1 (or -1). Perpendicular is 0.
-        // Allow some tolerance (e.g. > 0.8 means < ~36 degrees difference)
-        const isOrientationMatching = orientationDot > 0.8
-
-        if (distance <= radius && isAlignedWithWallPlane && isOrientationMatching) {
-            nearby.push(device)
+        for (let i = 1; i < filtered.length; i++) {
+            const current = filtered[i]
+            const previous = selected[selected.length - 1]
+            const scoreDelta = current.score - previous.score
+            const fromBest = current.score - bestScore
+            if (scoreDelta > 0.32 || fromBest > 0.45) {
+                break
+            }
+            selected.push(current)
         }
     }
 
-    return nearby
+    return selected
+        .slice(0, limit)
+        .map((entry) => entry.device)
 }
 
 /**
@@ -1013,12 +1134,12 @@ export async function analyzeDoors(
         }
 
         const semanticFacing = doorNormal.clone()
-        const nearbyDevices = findNearbyDevices(door, devices, geometricNormal, 1.0)
+        const viewFrame = buildDoorViewFrame(door, semanticFacing)
+        const nearbyDevices = findNearbyDevices(door, devices, geometricNormal, hostWall, viewFrame)
 
         const center = door.boundingBox
             ? door.boundingBox.getCenter(new THREE.Vector3())
             : new THREE.Vector3(0, 0, 0)
-        const viewFrame = buildDoorViewFrame(door, semanticFacing)
 
         const doorId = door.globalId || String(door.expressID)
 
@@ -1154,7 +1275,8 @@ function collectMeshesFromElement(element: ElementInfo): THREE.Mesh[] {
 export async function loadDetailedGeometry(
     doorContexts: DoorContext[],
     file: File,
-    modelCenterOffset: THREE.Vector3
+    modelCenterOffset: THREE.Vector3,
+    secondaryFile?: File
 ): Promise<void> {
     // Dynamically import to avoid circular dependencies
     const { extractDetailedGeometry } = await import('./ifc-loader')
@@ -1175,17 +1297,30 @@ export async function loadDetailedGeometry(
     }
 
 
+    const applyCenterOffset = (geometryMap: Map<number, THREE.Mesh[]>) => {
+        for (const meshes of geometryMap.values()) {
+            for (const mesh of meshes) {
+                if (mesh.geometry) {
+                    mesh.geometry.translate(-modelCenterOffset.x, -modelCenterOffset.y, -modelCenterOffset.z)
+                }
+            }
+        }
+    }
+
     // Extract all geometry in one pass
     const allIDs = [...doorIDs, ...wallIDs, ...deviceIDs]
     const geometryMap = await extractDetailedGeometry(file, allIDs)
+    applyCenterOffset(geometryMap)
 
-    // Apply centering offset to all extracted meshes
-    let meshCount = 0
-    for (const meshes of geometryMap.values()) {
-        for (const mesh of meshes) {
-            if (mesh.geometry) {
-                mesh.geometry.translate(-modelCenterOffset.x, -modelCenterOffset.y, -modelCenterOffset.z)
-                meshCount++
+    if (secondaryFile && deviceIDs.size > 0) {
+        const missingDeviceIDs = [...deviceIDs].filter((expressID) => (geometryMap.get(expressID)?.length ?? 0) === 0)
+        if (missingDeviceIDs.length > 0) {
+            const secondaryGeometryMap = await extractDetailedGeometry(secondaryFile, missingDeviceIDs)
+            applyCenterOffset(secondaryGeometryMap)
+            for (const [expressID, meshes] of secondaryGeometryMap.entries()) {
+                if (meshes.length > 0) {
+                    geometryMap.set(expressID, meshes)
+                }
             }
         }
     }

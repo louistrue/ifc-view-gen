@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
+import { loadIFCModelWithMetadata } from '@/lib/ifc-loader'
 import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
 import DoorPanel from './DoorPanel'
@@ -30,8 +31,11 @@ export default function IFCViewer() {
   const electricalModelGroupRef = useRef<THREE.Group | null>(null)
 
   const loadedModelRef = useRef<any>(null)
+  const archAnalysisModelRef = useRef<any>(null)
   const electricalModelRef = useRef<any>(null)
+  const electricalAnalysisModelRef = useRef<any>(null)
   const archFileRef = useRef<File | null>(null) // Store arch file for detailed geometry extraction
+  const electricalFileRef = useRef<File | null>(null)
   const modelCenterOffsetRef = useRef<THREE.Vector3>(new THREE.Vector3()) // Store centering offset
   const dockShowSingleDoorRef = useRef<((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null>(null)
 
@@ -146,13 +150,21 @@ export default function IFCViewer() {
     [doorContexts]
   )
 
+  const getDisplayDoorBoundingBox = useCallback((door: DoorContext) => {
+    const displayDoor = loadedModelRef.current?.elements?.find(
+      (element: { expressID: number; boundingBox?: THREE.Box3 }) => element.expressID === door.door.expressID
+    )
+    return displayDoor?.boundingBox ?? door.door.boundingBox
+  }, [])
+
   const handleDockDoorClick = useCallback((door: DoorContext) => {
     const nav = navigationManagerRef.current
-    if (!nav || !door.door.boundingBox) return
+    const box = getDisplayDoorBoundingBox(door)
+    if (!nav || !box) return
 
     // Only zoom – do NOT change selection/colors (checkbox controls selection)
-    nav.zoomToElementFromNormal(door.door.boundingBox, door.normal, 2.5)
-  }, [])
+    nav.zoomToElementFromNormal(box, door.normal, 2.5)
+  }, [getDisplayDoorBoundingBox])
 
   const handleDockShowSingleDoorReady = useCallback((fn: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => {
     dockShowSingleDoorRef.current = fn
@@ -360,7 +372,7 @@ export default function IFCViewer() {
       let closestDist = Infinity
 
       for (const context of doorContexts) {
-        const box = context.door.boundingBox
+        const box = getDisplayDoorBoundingBox(context)
         if (!box) continue
         const hit = ray.intersectBox(box, intersection)
         if (hit) {
@@ -397,7 +409,7 @@ export default function IFCViewer() {
       document.removeEventListener('pointercancel', handlePointerCancel)
       window.removeEventListener('blur', handleBlur)
     }
-  }, [showBatchProcessor, doorContexts, zoomWindowActive, sectionMode, toggleDockDoorSelection])
+  }, [showBatchProcessor, doorContexts, zoomWindowActive, sectionMode, toggleDockDoorSelection, getDisplayDoorBoundingBox])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -617,6 +629,33 @@ export default function IFCViewer() {
     triggerRenderRef.current()
   }
 
+  const applyModelOffset = useCallback((model: any, offset: THREE.Vector3, includeGroup: boolean = true) => {
+    if (!model || offset.lengthSq() === 0) return
+
+    if (includeGroup) {
+      model.group.position.sub(offset)
+    }
+
+    for (const element of model.elements ?? []) {
+      if (element.boundingBox) {
+        element.boundingBox.min.sub(offset)
+        element.boundingBox.max.sub(offset)
+      }
+      if (element.meshes) {
+        for (const mesh of element.meshes) {
+          if (mesh.geometry) {
+            mesh.geometry = mesh.geometry.clone()
+            mesh.geometry.translate(-offset.x, -offset.y, -offset.z)
+          }
+        }
+      }
+      if (element.mesh?.geometry) {
+        element.mesh.geometry = element.mesh.geometry.clone()
+        element.mesh.geometry.translate(-offset.x, -offset.y, -offset.z)
+      }
+    }
+  }, [])
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'arch' | 'elec') => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -666,6 +705,7 @@ export default function IFCViewer() {
         }
 
         loadedModelRef.current = null
+        archAnalysisModelRef.current = null
 
         // Load model using fragments (10x faster!)
         setLoadingStage('Starting...')
@@ -681,36 +721,29 @@ export default function IFCViewer() {
         const group = loadedModel.group
 
         // Center the model at origin
+        const previousCenter = modelCenterOffsetRef.current.clone()
         const box = new THREE.Box3().setFromObject(group)
         const center = box.getCenter(new THREE.Vector3())
         group.position.sub(center)
         modelCenterOffsetRef.current = center.clone() // Store for geometry offset
 
-        // CRITICAL: Apply centering offset to extracted elements' bounding boxes and meshes
-        // The extracted meshes have world-space geometry, but we've now shifted the scene.
-        // We MUST CLONE geometry before translating to avoid modifying shared/instanced geometry!
-        for (const element of loadedModel.elements) {
-          // Offset bounding box
-          if (element.boundingBox) {
-            element.boundingBox.min.sub(center)
-            element.boundingBox.max.sub(center)
-          }
-          // Offset mesh geometry - CLONE first to avoid shared geometry issues!
-          if (element.meshes) {
-            for (let i = 0; i < element.meshes.length; i++) {
-              const mesh = element.meshes[i]
-              if (mesh.geometry) {
-                // Clone geometry to avoid modifying shared instances
-                mesh.geometry = mesh.geometry.clone()
-                mesh.geometry.translate(-center.x, -center.y, -center.z)
-              }
-            }
-          }
-          if (element.mesh?.geometry) {
-            // Clone geometry to avoid modifying shared instances
-            element.mesh.geometry = element.mesh.geometry.clone()
-            element.mesh.geometry.translate(-center.x, -center.y, -center.z)
-          }
+        applyModelOffset(loadedModel, center, false)
+
+        try {
+          const analysisModel = await loadIFCModelWithMetadata(file)
+          applyModelOffset(analysisModel, center)
+          archAnalysisModelRef.current = analysisModel
+        } catch (analysisErr) {
+          archAnalysisModelRef.current = null
+          console.warn('Failed to load architectural analysis metadata model, falling back to fragments metadata:', analysisErr)
+        }
+
+        const centerDelta = center.clone().sub(previousCenter)
+        if (electricalModelRef.current) {
+          applyModelOffset(electricalModelRef.current, centerDelta)
+        }
+        if (electricalAnalysisModelRef.current) {
+          applyModelOffset(electricalAnalysisModelRef.current, centerDelta)
         }
 
         if (sceneRef.current) {
@@ -835,6 +868,17 @@ export default function IFCViewer() {
           setLoadingStage(`Electrical: ${stage}`)
         })
         electricalModelRef.current = loadedElecModel
+        electricalFileRef.current = file
+
+        try {
+          const analysisModel = await loadIFCModelWithMetadata(file)
+          const center = modelCenterOffsetRef.current
+          applyModelOffset(analysisModel, center)
+          electricalAnalysisModelRef.current = analysisModel
+        } catch (analysisErr) {
+          electricalAnalysisModelRef.current = null
+          console.warn('Failed to load electrical analysis metadata model, falling back to fragments metadata:', analysisErr)
+        }
 
         const group = loadedElecModel.group
 
@@ -842,6 +886,9 @@ export default function IFCViewer() {
           const offset = modelGroupRef.current.position.clone()
           group.position.copy(offset)
         }
+
+        const center = modelCenterOffsetRef.current
+        applyModelOffset(loadedElecModel, center, false)
 
         if (sceneRef.current) {
           sceneRef.current.add(group)
@@ -887,18 +934,53 @@ export default function IFCViewer() {
 
         // Pass spatial structure to extract storey names for doors
         const contexts = await analyzeDoors(
-          loadedModelRef.current,
-          electricalModelRef.current || undefined,
+          archAnalysisModelRef.current || loadedModelRef.current,
+          electricalAnalysisModelRef.current || electricalModelRef.current || undefined,
           spatialStructureRef.current,  // Use ref for immediate access
           operationTypeMap,  // Pass OperationType map for swing arc rendering
           csetStandardCHMap
         )
 
+        if (process.env.NODE_ENV === 'development') {
+          const contextsWithDevices = contexts.filter((context) => context.nearbyDevices.length > 0)
+          console.info('[ifc-viewer-door-analysis]', {
+            totalDoors: contexts.length,
+            doorsWithNearbyDevices: contextsWithDevices.length,
+            archAnalysisModelLoaded: Boolean(archAnalysisModelRef.current),
+            electricalAnalysisModelLoaded: Boolean(electricalAnalysisModelRef.current),
+            electricalFragmentsModelLoaded: Boolean(electricalModelRef.current),
+            archAnalysisElementCount: archAnalysisModelRef.current?.elements.length ?? 0,
+            electricalAnalysisElementCount: electricalAnalysisModelRef.current?.elements.length ?? 0,
+            electricalFragmentsElementCount: electricalModelRef.current?.elements.length ?? 0,
+            sampleDoorsWithDevices: contextsWithDevices.slice(0, 8).map((context) => ({
+              doorId: context.doorId,
+              hostWallId: context.hostWall?.expressID ?? null,
+              nearbyDeviceCount: context.nearbyDevices.length,
+              nearbyDeviceIds: context.nearbyDevices.map((device) => device.globalId || String(device.expressID)),
+              nearbyDeviceTypes: context.nearbyDevices.map((device) => device.typeName),
+            })),
+            trackedDoors: contexts
+              .filter((context) => context.doorId === '3Kl0$vZffOIhy95LXj6B5L' || context.doorId === '2RNnIkfBtlJfI51kwLSpfy')
+              .map((context) => ({
+                doorId: context.doorId,
+                hostWallId: context.hostWall?.expressID ?? null,
+                nearbyDeviceCount: context.nearbyDevices.length,
+                nearbyDeviceIds: context.nearbyDevices.map((device) => device.globalId || String(device.expressID)),
+                nearbyDeviceTypes: context.nearbyDevices.map((device) => device.typeName),
+              })),
+          })
+        }
+
         // Load detailed geometry from web-ifc for high-quality SVG generation
         if (archFileRef.current && contexts.length > 0) {
           setLoadingStage('Extracting detailed geometry...')
           try {
-            await loadDetailedGeometry(contexts, archFileRef.current, modelCenterOffsetRef.current)
+            await loadDetailedGeometry(
+              contexts,
+              archFileRef.current,
+              modelCenterOffsetRef.current,
+              electricalFileRef.current || undefined
+            )
           } catch (err) {
             console.warn('Failed to load detailed geometry, SVG will use simplified rendering:', err)
           }
@@ -1315,6 +1397,7 @@ Section:
               doorContexts={doorContexts}
               visibilityManager={visibilityManagerRef.current}
               navigationManager={navigationManagerRef.current}
+              resolveDoorBoundingBox={getDisplayDoorBoundingBox}
               onComplete={() => {
                 // Optional callback when export completes
               }}

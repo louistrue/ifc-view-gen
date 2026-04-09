@@ -658,6 +658,85 @@ function createSemanticPlanWallGeometry(
     return geometry
 }
 
+function createSemanticElevationDeviceGeometry(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    options: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
+    const frame = context.viewFrame
+    const depthCenter = frame.origin.dot(frame.semanticFacing)
+
+    for (const device of context.nearbyDevices) {
+        const deviceBox = device.boundingBox
+        if (!deviceBox) continue
+
+        const bounds = measureBoundingBoxInAxes(deviceBox, frame.widthAxis, frame.upAxis, frame.semanticFacing)
+        const rectWidth = Math.max(bounds.maxA - bounds.minA, 0.05)
+        const rectHeight = Math.max(bounds.maxB - bounds.minB, 0.05)
+        const centerA = (bounds.minA + bounds.maxA) / 2
+        const centerB = (bounds.minB + bounds.maxB) / 2
+        const center = frame.widthAxis.clone().multiplyScalar(centerA)
+            .add(frame.upAxis.clone().multiplyScalar(centerB))
+            .add(frame.semanticFacing.clone().multiplyScalar(depthCenter))
+
+        const rect = createRectPoints3D(
+            center,
+            frame.widthAxis,
+            frame.upAxis,
+            -rectWidth / 2,
+            rectWidth / 2,
+            -rectHeight / 2,
+            rectHeight / 2
+        )
+        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 0)
+    }
+
+    return geometry
+}
+
+function createSemanticPlanDeviceGeometry(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    cutHeight: number,
+    options: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
+    const frame = context.viewFrame
+    const depthCap = Math.max(frame.thickness * 0.9, 0.05)
+
+    for (const device of context.nearbyDevices) {
+        const deviceBox = device.boundingBox
+        if (!deviceBox) continue
+
+        const bounds = measureBoundingBoxInAxes(deviceBox, frame.widthAxis, frame.semanticFacing, frame.upAxis)
+        const rectWidth = Math.max(bounds.maxA - bounds.minA, 0.05)
+        const rectDepth = Math.min(Math.max(bounds.maxB - bounds.minB, 0.02), depthCap)
+        const centerA = (bounds.minA + bounds.maxA) / 2
+        const centerB = (bounds.minB + bounds.maxB) / 2
+        const center = frame.widthAxis.clone().multiplyScalar(centerA)
+            .add(frame.semanticFacing.clone().multiplyScalar(centerB))
+            .add(frame.upAxis.clone().multiplyScalar(cutHeight))
+
+        const rect = createRectPoints3D(
+            center,
+            frame.widthAxis,
+            frame.semanticFacing,
+            -rectWidth / 2,
+            rectWidth / 2,
+            -rectDepth / 2,
+            rectDepth / 2
+        )
+        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 0)
+    }
+
+    return geometry
+}
+
 interface ProjectedBounds {
     minX: number
     maxX: number
@@ -1324,8 +1403,7 @@ function renderElevationFromMeshes(
     isBackView: boolean,
     opts: Required<SVGRenderOptions>
 ): string {
-    const fitMeshes = getDoorMeshes(context)
-    const renderMeshes = getDoorMeshes(context, { includeNearbyDevices: true })
+    const renderMeshes = getDoorMeshes(context)
     if (renderMeshes.length === 0) {
         throw new Error('No meshes available for rendering')
     }
@@ -1350,7 +1428,13 @@ function renderElevationFromMeshes(
     camera.updateMatrixWorld()
 
     const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, width, height, false, 0)
-    const fitGeometry = collectProjectedGeometry(fitMeshes, context, opts, camera, width, height, false, 0)
+    const deviceGeometry = createSemanticElevationDeviceGeometry(context, camera, width, height, opts)
+    renderGeometry.edges.push(...deviceGeometry.edges)
+    renderGeometry.polygons.push(...deviceGeometry.polygons)
+    const fitGeometry = {
+        edges: [...renderGeometry.edges],
+        polygons: [...renderGeometry.polygons],
+    }
 
     return generateSVGString(
         renderGeometry.edges,
@@ -1885,7 +1969,7 @@ function renderPlanFromMeshes(
     context: DoorContext,
     opts: Required<SVGRenderOptions>
 ): string {
-    const renderMeshes = getDoorMeshes(context, { includeNearbyDevices: true })
+    const renderMeshes = getDoorMeshes(context)
     if (renderMeshes.length === 0) {
         throw new Error('No meshes available for rendering')
     }
@@ -1912,6 +1996,9 @@ function renderPlanFromMeshes(
     const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
 
     const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, frustumWidth, frustumHeight, true, 0)
+    const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
+    renderGeometry.edges.push(...deviceGeometry.edges)
+    renderGeometry.polygons.push(...deviceGeometry.polygons)
 
     // Synthetic door cross-section rectangle – always added so the door is visible
     // even when the web-ifc mesh produces degenerate edges at cut height.
@@ -1956,8 +2043,9 @@ function renderPlanFromMeshes(
             // Arc envelope corners (full reach in openAxisFit direction)
             fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
             fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
+            ...deviceGeometry.edges,
         ],
-        polygons: [] as ProjectedPolygon[],
+        polygons: [...deviceGeometry.polygons],
     }
 
     return generateSVGString(
