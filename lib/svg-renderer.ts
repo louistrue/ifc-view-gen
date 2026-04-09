@@ -1941,24 +1941,6 @@ function buildDoorCrossSectionFallbackGeometry(
         layer: 0,
     }]
 
-    // Add a simple inset panel outline so the fallback reads more like a door than a plain slab.
-    const insetW = Math.max(frame.width * 0.12, 0.03)
-    const insetT = Math.max(frame.thickness * 0.22, 0.01)
-    if (frame.width > insetW * 2 && frame.thickness > insetT * 2) {
-        const innerCorners = [
-            frame.origin.clone().sub(w.clone().multiplyScalar(hw - insetW)).sub(f.clone().multiplyScalar(ht - insetT)),
-            frame.origin.clone().add(w.clone().multiplyScalar(hw - insetW)).sub(f.clone().multiplyScalar(ht - insetT)),
-            frame.origin.clone().add(w.clone().multiplyScalar(hw - insetW)).add(f.clone().multiplyScalar(ht - insetT)),
-            frame.origin.clone().sub(w.clone().multiplyScalar(hw - insetW)).add(f.clone().multiplyScalar(ht - insetT)),
-        ].map(p => { p.y = cutHeight; return p })
-
-        for (let i = 0; i < 4; i++) {
-            const a = projectPoint(innerCorners[i], camera, frustumWidth, frustumHeight)
-            const b = projectPoint(innerCorners[(i + 1) % 4], camera, frustumWidth, frustumHeight)
-            edges.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, color: opts.lineColor, depth, layer: 0 })
-        }
-    }
-
     return { edges, polygons }
 }
 
@@ -1999,18 +1981,6 @@ function renderPlanFromMeshes(
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
-
-    // Synthetic door cross-section rectangle – always added so the door is visible
-    // even when the web-ifc mesh produces degenerate edges at cut height.
-    const syntheticEdges = buildDoorCrossSectionEdges(frame, camera, frustumWidth, frustumHeight, cutHeight, opts)
-    renderGeometry.edges.push(...syntheticEdges)
-
-    const hasDetailedDoorFill = renderGeometry.polygons.some((polygon) => polygon.color === opts.doorColor)
-    if (!hasDetailedDoorFill) {
-        const fallbackGeometry = buildDoorCrossSectionFallbackGeometry(frame, camera, frustumWidth, frustumHeight, cutHeight, opts)
-        renderGeometry.polygons.push(...fallbackGeometry.polygons)
-        renderGeometry.edges.push(...fallbackGeometry.edges)
-    }
 
     if (showPlanSwing && context.openingDirection) {
         const arcEdges = calculateSwingArcEdges(context, frame, camera, frustumWidth, frustumHeight, cutHeight, flipArc)
@@ -2125,11 +2095,6 @@ ${wallRevealSvg}
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 
         fill="${doorColor}" fill-opacity="0.3" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
-  
-  <!-- Door panel detail -->
-  <line x1="${offsetX + scaledWidth * 0.1}" y1="${offsetY + scaledThickness / 2}" 
-        x2="${offsetX + scaledWidth * 0.9}" y2="${offsetY + scaledThickness / 2}" 
-        stroke="${lineColor}" stroke-width="${lineWidth}" stroke-dasharray="4,2"/>
   
   ${renderSwingArcSVGForBoundingBox(context, offsetX, offsetY, scaledWidth, scaledThickness, opts)}
   
