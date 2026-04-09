@@ -14,6 +14,19 @@ export interface DoorViewFrame {
     thickness: number
 }
 
+export interface OperableDoorLeaf {
+    width: number
+    hingeSide: 'left' | 'right'
+    hingeOffsetFromCenter: number
+}
+
+export interface OperableDoorLeaves {
+    source: 'ifc-panels' | 'cset-clear-width'
+    totalWidth: number
+    clearWidth: number | null
+    leaves: OperableDoorLeaf[]
+}
+
 export interface DoorContext {
     door: ElementInfo
     wall: ElementInfo | null
@@ -42,6 +55,7 @@ export interface DoorContext {
         feuerwiderstand: string | null
         bauschalldaemmmass: string | null
     }
+    operableLeaves?: OperableDoorLeaves
 
     // Detailed geometry from web-ifc (for high-quality SVG rendering)
     detailedGeometry?: {
