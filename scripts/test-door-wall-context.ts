@@ -312,6 +312,30 @@ function getLargestWallRectY(svg: string, fill: string): number | null {
     return bestY
 }
 
+function getLargestWallRectRightX(svg: string, fill: string): number | null {
+    const rectTags = svg.match(/<rect\b[^>]*>/g) || []
+    let bestRightX = -Infinity
+
+    for (const rectTag of rectTags) {
+        const rectFill = rectTag.match(/\bfill="([^"]+)"/)?.[1]
+        if (rectFill !== fill) continue
+
+        const x = Number.parseFloat(rectTag.match(/\bx="([^"]+)"/)?.[1] || 'NaN')
+        const width = Number.parseFloat(rectTag.match(/\bwidth="([^"]+)"/)?.[1] || 'NaN')
+        if (!Number.isFinite(x) || !Number.isFinite(width)) continue
+        bestRightX = Math.max(bestRightX, x + width)
+    }
+
+    return Number.isFinite(bestRightX) ? bestRightX : null
+}
+
+function getStoreyMarkerTextX(svg: string): number | null {
+    const markerGroup = svg.match(/<g id="storey-marker">([\s\S]*?)<\/g>/)?.[1]
+    if (!markerGroup) return null
+    const textX = Number.parseFloat(markerGroup.match(/<text\b[^>]*\bx="([^"]+)"/)?.[1] || 'NaN')
+    return Number.isFinite(textX) ? textX : null
+}
+
 async function main() {
     const options: SVGRenderOptions = {
         width: 1000,
@@ -328,6 +352,8 @@ async function main() {
 
     const withWall = await buildContext({ includeWall: true })
     const withoutWall = await buildContext({ includeWall: false })
+    withWall.storeyName = '01OG Administration / Gesundheitsdienst'
+    withoutWall.storeyName = withWall.storeyName
     const withWallViews = await renderDoorViews(withWall, options)
     const withoutWallViews = await renderDoorViews(withoutWall, options)
 
@@ -354,6 +380,18 @@ async function main() {
             devicePathsWithWall,
             devicePathsWithoutWall,
             `${viewName} device fill geometry changed when wall context was added`
+        )
+    }
+
+    for (const viewName of ['front', 'back'] as const) {
+        const bounds = getRenderedContentBounds(withWallViews[viewName])
+        const wallRightX = getLargestWallRectRightX(withWallViews[viewName], options.wallColor!)
+        const markerTextX = getStoreyMarkerTextX(withWallViews[viewName])
+        const occupiedRightX = Math.max(bounds?.maxX ?? -Infinity, wallRightX ?? -Infinity)
+        assert.ok(markerTextX !== null, `${viewName} SVG is missing the storey marker text`)
+        assert.ok(
+            markerTextX! > occupiedRightX + 4,
+            `${viewName} storey marker should sit to the right of wall context (marker x=${markerTextX}, occupied max x=${occupiedRightX})`
         )
     }
 

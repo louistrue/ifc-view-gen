@@ -1236,6 +1236,7 @@ function renderStoreyMarkerSvg(
     const triangleWidth = Math.max(fontSize, 12)
     const triangleHeight = Math.max(fontSize * 0.9, 10)
     const textY = anchorY - triangleHeight - 6
+    const textX = anchorX + triangleWidth / 2 + 6
     const escapedLabel = escapeSvgText(label)
     const points = [
         `${(anchorX - triangleWidth / 2).toFixed(2)},${(anchorY - triangleHeight).toFixed(2)}`,
@@ -1246,7 +1247,7 @@ function renderStoreyMarkerSvg(
     return `
   <g id="storey-marker">
     <polygon points="${points}" fill="#000000"/>
-    <text x="${anchorX.toFixed(2)}" y="${textY.toFixed(2)}" text-anchor="start" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${escapedLabel}</text>
+    <text x="${textX.toFixed(2)}" y="${textY.toFixed(2)}" text-anchor="start" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${escapedLabel}</text>
   </g>`
 }
 
@@ -1362,6 +1363,71 @@ function renderWallRevealSvg(
     ).join('\n') + '\n'
 }
 
+function getRenderedContentMaxX(params: {
+    edges: ProjectedEdge[]
+    polygons: ProjectedPolygon[]
+    transformX: (x: number) => number
+    clampMaxX: number
+    extraRects?: WallRevealRect[]
+}): number {
+    const { edges, polygons, transformX, clampMaxX, extraRects = [] } = params
+    let maxX = -Infinity
+
+    const track = (value: number, shouldClamp: boolean = false) => {
+        const safeValue = shouldClamp ? clampToRange(value, 0, clampMaxX) : value
+        if (Number.isFinite(safeValue)) {
+            maxX = Math.max(maxX, safeValue)
+        }
+    }
+
+    for (const edge of edges) {
+        track(transformX(edge.x1), edge.layer < 0)
+        track(transformX(edge.x2), edge.layer < 0)
+    }
+
+    for (const polygon of polygons) {
+        for (const point of polygon.points) {
+            track(transformX(point.x), polygon.layer < 0)
+        }
+    }
+
+    for (const rect of extraRects) {
+        track(rect.x + rect.width)
+    }
+
+    return maxX
+}
+
+function getStoreyMarkerAnchorX(params: {
+    doorRightX: number
+    contentRightX: number
+    svgWidth: number
+    label: string
+    fontSize: number
+}): number {
+    const { doorRightX, contentRightX, svgWidth, label, fontSize } = params
+    const triangleWidth = Math.max(fontSize, 12)
+    const labelWidthEstimate = label.length * fontSize * 0.58
+    const minimumGap = Math.max(fontSize * 0.75, 12)
+    const desiredX = Math.max(
+        doorRightX + 18,
+        contentRightX + triangleWidth / 2 + minimumGap
+    )
+    const maxAnchorX = svgWidth - (triangleWidth / 2 + 6 + Math.max(140, labelWidthEstimate + 12))
+    return Math.min(desiredX, maxAnchorX)
+}
+
+function getStoreyMarkerReserveWidth(label: string | null, fontSize: number): number {
+    if (!label) return 0
+    const triangleWidth = Math.max(fontSize, 12)
+    const labelWidthEstimate = label.length * fontSize * 0.58
+    return triangleWidth + 6 + Math.max(140, labelWidthEstimate + 12) + Math.max(fontSize, 16)
+}
+
+function clampToRange(value: number, min: number, max: number): number {
+    return Math.min(Math.max(value, min), max)
+}
+
 /**
  * Generate SVG string from edges and polygons
  * Normalizes coordinates to fit within the viewport
@@ -1387,6 +1453,8 @@ function generateSVGString(
         wallRevealTop,
     } = options
 
+    const storeyMarkerLabel = getStoreyMarkerLabel(renderMeta.context, renderMeta.viewType)
+    const storeyMarkerReserveWidth = getStoreyMarkerReserveWidth(storeyMarkerLabel, fontSize)
     const hasDevices = renderMeta.context ? renderMeta.context.nearbyDevices.length > 0 : false
     const hasWall = renderMeta.context ? Boolean(renderMeta.context.hostWall || renderMeta.context.wall) : false
     const showLegendActual = showLegend && (hasDevices || hasWall)
@@ -1396,7 +1464,7 @@ function generateSVGString(
     // Text takes about 2 lines (View/Type + Opening)
     // Legend takes about 1 line if shown
     const textLines = 3 // View, ID/Type, Opening
-    const legendHeight = showLegendActual ? (fontSize + 10) : 0
+    const legendHeight = showLegend ? (fontSize + 10) : 0
 
     const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
 
@@ -1440,7 +1508,7 @@ function generateSVGString(
     const padding = 80 // Increased from 50 to 80 pixels for more border room
     const contentWidth = maxX - minX
     const contentHeight = maxY - minY
-    const availWidth = width - padding * 2
+    const availWidth = width - padding * 2 - storeyMarkerReserveWidth
     const availHeight = viewHeight - padding * 2 // Use viewHeight instead of full height
 
     const scale = Math.min(
@@ -1467,22 +1535,25 @@ function generateSVGString(
     // These are placed relative to offsetX/offsetY/scaledWidth/scaledHeight which come from
     // the ACTUAL projected door bounds (fitBounds), so they are guaranteed to sit just outside
     // the door geometry and can never be covered by door fills.
-    const wallBandsSvg = showFills && hasWall && !renderMeta.suppressSyntheticWallBands
+    const wallRevealRects = showFills && hasWall && !renderMeta.suppressSyntheticWallBands
+        ? getWallRevealRects({
+            bounds: { minX: 0, maxX: width, minY: 0, maxY: viewHeight },
+            offsetX,
+            offsetY,
+            scaledWidth,
+            scaledHeight,
+            wallRevealSide,
+            wallRevealTop,
+            viewType: renderMeta.viewType,
+            wallThicknessPx: renderMeta.context?.viewFrame
+                ? Math.max(renderMeta.context.viewFrame.thickness * scale, 12)
+                : undefined,
+            planArcFlip: renderMeta.planArcFlip,
+        })
+        : []
+    const wallBandsSvg = wallRevealRects.length > 0
         ? renderWallRevealSvg(
-            getWallRevealRects({
-                bounds: { minX: 0, maxX: width, minY: 0, maxY: viewHeight },
-                offsetX,
-                offsetY,
-                scaledWidth,
-                scaledHeight,
-                wallRevealSide,
-                wallRevealTop,
-                viewType: renderMeta.viewType,
-                wallThicknessPx: renderMeta.context?.viewFrame
-                    ? Math.max(renderMeta.context.viewFrame.thickness * scale, 12)
-                    : undefined,
-                planArcFlip: renderMeta.planArcFlip,
-            }),
+            wallRevealRects,
             wallColor,
             options.lineColor,
             lineWidth
@@ -1498,9 +1569,15 @@ ${wallBandsSvg}  <g id="fills">
     // Draw filled polygons first (if enabled)
     if (showFills) {
         for (const poly of renderPolygons) {
-            const pathData = poly.points.map((p, i) =>
-                `${i === 0 ? 'M' : 'L'} ${transformX(p.x).toFixed(2)} ${transformY(p.y).toFixed(2)}`
-            ).join(' ') + ' Z'
+            const pathData = poly.points.map((p, i) => {
+                let x = transformX(p.x)
+                let y = transformY(p.y)
+                if (poly.layer < 0) {
+                    x = clampToRange(x, 0, width)
+                    y = clampToRange(y, 0, viewHeight)
+                }
+                return `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`
+            }).join(' ') + ' Z'
 
             svg += `    <path d="${pathData}" fill="${poly.color}" fill-opacity="0.3" stroke="none"/>\n`
         }
@@ -1513,10 +1590,16 @@ ${wallBandsSvg}  <g id="fills">
     // Draw edges with transformed coordinates
     let dashedCount = 0
     for (const edge of renderEdges) {
-        const x1 = transformX(edge.x1)
-        const y1 = transformY(edge.y1)
-        const x2 = transformX(edge.x2)
-        const y2 = transformY(edge.y2)
+        let x1 = transformX(edge.x1)
+        let y1 = transformY(edge.y1)
+        let x2 = transformX(edge.x2)
+        let y2 = transformY(edge.y2)
+        if (edge.layer < 0) {
+            x1 = clampToRange(x1, 0, width)
+            y1 = clampToRange(y1, 0, viewHeight)
+            x2 = clampToRange(x2, 0, width)
+            y2 = clampToRange(y2, 0, viewHeight)
+        }
         const dashAttr = edge.isDashed ? ' stroke-dasharray="4,2"' : ''
         if (edge.isDashed) dashedCount++
         svg += `    <line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${edge.color}" stroke-width="${lineWidth * (edge.isDashed ? 0.75 : 1)}" stroke-linecap="round"${dashAttr} opacity="${edge.isDashed ? 0.7 : 1}"/>\n`
@@ -1527,9 +1610,21 @@ ${wallBandsSvg}  <g id="fills">
 
     // "Vorderansicht" arrow intentionally omitted – not needed on generated pictures
 
-    const storeyMarkerLabel = getStoreyMarkerLabel(renderMeta.context, renderMeta.viewType)
     if (storeyMarkerLabel) {
-        const markerX = Math.min(offsetX + scaledWidth + 18, width - 140)
+        const contentRightX = getRenderedContentMaxX({
+            edges: renderEdges,
+            polygons: renderPolygons,
+            transformX,
+            clampMaxX: width,
+            extraRects: wallRevealRects,
+        })
+        const markerX = getStoreyMarkerAnchorX({
+            doorRightX: offsetX + scaledWidth,
+            contentRightX: Number.isFinite(contentRightX) ? contentRightX : (offsetX + scaledWidth),
+            svgWidth: width,
+            label: storeyMarkerLabel,
+            fontSize,
+        })
         const markerY = Math.min(
             Math.max(offsetY + scaledHeight - 8, fontSize + 28),
             viewHeight - 18
@@ -1823,9 +1918,21 @@ function renderElevationFromMeshes(
     const deviceGeometry = createSemanticElevationDeviceGeometry(context, camera, width, height, opts)
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
+    const fitPoint = (p: THREE.Vector3): ProjectedEdge => {
+        const proj = projectPoint(p, camera, width, height)
+        return { x1: proj.x, y1: proj.y, x2: proj.x, y2: proj.y, color: 'none', depth: 0, layer: 0 }
+    }
+    const halfW = frame.width / 2
+    const halfH = frame.height / 2
     const fitGeometry = {
-        edges: [...renderGeometry.edges],
-        polygons: [...renderGeometry.polygons],
+        edges: [
+            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.upAxis.clone().multiplyScalar(halfH))),
+            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.upAxis.clone().multiplyScalar(halfH))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.upAxis.clone().multiplyScalar(halfH))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.upAxis.clone().multiplyScalar(halfH))),
+            ...deviceGeometry.edges,
+        ],
+        polygons: [...deviceGeometry.polygons],
     }
 
     return generateSVGString(
@@ -1856,7 +1963,9 @@ function renderElevationFromBoundingBox(
 
     const padding = 60
     const labelHeight = showLabels ? 80 : 0
-    const availableWidth = svgWidth - padding * 2
+    const storeyMarkerLabel = getStoreyMarkerLabel(context, isBackView ? 'Back' : 'Front')
+    const storeyMarkerReserveWidth = getStoreyMarkerReserveWidth(storeyMarkerLabel, fontSize)
+    const availableWidth = svgWidth - padding * 2 - storeyMarkerReserveWidth
     const availableHeight = svgHeight - padding * 2 - labelHeight
 
     const marginMeters = Math.max(opts.margin, 0.25)
@@ -1872,24 +1981,27 @@ function renderElevationFromBoundingBox(
     const hasWall = Boolean(context.hostWall?.boundingBox)
     const scalePxPerMeter = scaledHeight / Math.max(doorHeight, 1e-6)
     const slabGapPx = (getElevationTopBandGapMeters(context) ?? 0) * scalePxPerMeter
-    const wallRevealSvg = hasWall
+    const wallRevealRects = hasWall
+        ? getWallRevealRects({
+            bounds: {
+                minX: padding,
+                maxX: svgWidth - padding,
+                minY: padding,
+                maxY: padding + availableHeight,
+            },
+            offsetX,
+            offsetY,
+            scaledWidth,
+            scaledHeight,
+            wallRevealSide: opts.wallRevealSide,
+            wallRevealTop: opts.wallRevealTop,
+            viewType: isBackView ? 'Back' : 'Front',
+            topBandBottomY: offsetY - slabGapPx,
+        })
+        : []
+    const wallRevealSvg = wallRevealRects.length > 0
         ? renderWallRevealSvg(
-            getWallRevealRects({
-                bounds: {
-                    minX: padding,
-                    maxX: svgWidth - padding,
-                    minY: padding,
-                    maxY: padding + availableHeight,
-                },
-                offsetX,
-                offsetY,
-                scaledWidth,
-                scaledHeight,
-                wallRevealSide: opts.wallRevealSide,
-                wallRevealTop: opts.wallRevealTop,
-                viewType: isBackView ? 'Back' : 'Front',
-                topBandBottomY: offsetY - slabGapPx,
-            }),
+            wallRevealRects,
             wallColor,
             lineColor,
             lineWidth
@@ -1916,9 +2028,15 @@ ${wallRevealSvg}
         fill="${lineColor}" fill-opacity="0.6"/>
 `
 
-    const storeyMarkerLabel = getStoreyMarkerLabel(context, isBackView ? 'Back' : 'Front')
     if (storeyMarkerLabel) {
-        const markerX = Math.min(offsetX + scaledWidth + 18, svgWidth - 140)
+        const wallRightX = wallRevealRects.reduce((maxX, rect) => Math.max(maxX, rect.x + rect.width), -Infinity)
+        const markerX = getStoreyMarkerAnchorX({
+            doorRightX: offsetX + scaledWidth,
+            contentRightX: Number.isFinite(wallRightX) ? Math.max(offsetX + scaledWidth, wallRightX) : (offsetX + scaledWidth),
+            svgWidth,
+            label: storeyMarkerLabel,
+            fontSize,
+        })
         const markerY = Math.min(
             Math.max(offsetY + scaledHeight - 8, fontSize + 28),
             svgHeight - labelHeight - 18
@@ -1968,71 +2086,30 @@ export async function renderDoorPlanSVG(
     return renderPlanFromBoundingBox(context, opts, doorWidth, doorThickness, doorHeight)
 }
 
-/**
- * Parse OperationType to determine swing parameters
- */
-interface SwingArcParams {
-    type: 'swing' | 'sliding' | 'folding' | 'none'
-    hingeSide?: 'left' | 'right' | 'both'  // For swing doors
-    slideDirection?: 'left' | 'right'       // For sliding doors
-}
-
 interface ResolvedSwingLeaf {
     width: number
     hingeSide: 'left' | 'right'
     hingeOffsetFromCenter: number
 }
 
-function parseOperationType(operationType: string | null): SwingArcParams {
-    if (!operationType) {
-        return { type: 'none' }
-    }
+interface DoorFrameInsets {
+    left: number
+    right: number
+}
 
-    const upper = operationType.toUpperCase()
+interface ResolvedPlanSwingGeometry {
+    leaves: ResolvedSwingLeaf[]
+    openAngle: number
+}
 
-    if (upper.includes('SWING_FIXED_LEFT')) {
-        return { type: 'swing', hingeSide: 'left' }
-    }
-    if (upper.includes('SWING_FIXED_RIGHT')) {
-        return { type: 'swing', hingeSide: 'right' }
-    }
-
-    // Single swing doors
-    if (upper.includes('SINGLE_SWING_LEFT') || upper === 'SINGLE_SWING_LEFT') {
-        return { type: 'swing', hingeSide: 'left' }
-    }
-    if (upper.includes('SINGLE_SWING_RIGHT') || upper === 'SINGLE_SWING_RIGHT') {
-        return { type: 'swing', hingeSide: 'right' }
-    }
-
-    // Double doors
-    if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING')) {
-        return { type: 'swing', hingeSide: 'both' }
-    }
-
-    // Sliding doors
-    if (upper.includes('SLIDING_TO_LEFT')) {
-        return { type: 'sliding', slideDirection: 'left' }
-    }
-    if (upper.includes('SLIDING_TO_RIGHT')) {
-        return { type: 'sliding', slideDirection: 'right' }
-    }
-    if (upper.includes('SLIDING') && !upper.includes('FOLDING')) {
-        // Generic sliding door
-        return { type: 'sliding', slideDirection: 'right' }
-    }
-
-    // Folding doors
-    if (upper.includes('FOLDING')) {
-        return { type: 'folding' }
-    }
-
-    // Default: assume swing if unknown
-    if (upper.includes('SWING')) {
-        return { type: 'swing', hingeSide: 'right' }
-    }
-
-    return { type: 'none' }
+function shouldRenderDashedOpening(context: DoorContext): boolean {
+    const operableLeaves = context.operableLeaves
+    return Boolean(
+        operableLeaves
+        && operableLeaves.hasSwingOperation
+        && operableLeaves.isOperable
+        && operableLeaves.leaves.length > 0
+    )
 }
 
 function shouldFlipPlanArc(context: DoorContext, frame: DoorViewFrame): boolean {
@@ -2058,47 +2135,109 @@ function shouldRenderPlanSwing(frame: DoorViewFrame): boolean {
     return axisAligned(frame.widthAxis) && axisAligned(frame.semanticFacing)
 }
 
-function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): ResolvedSwingLeaf[] {
-    const params = parseOperationType(context.openingDirection)
-    if (params.type !== 'swing' || !params.hingeSide || totalWidth <= 0) {
-        return []
-    }
+function estimateDoorFrameInsets(
+    context: DoorContext,
+    frame: DoorViewFrame
+): DoorFrameInsets {
+    const meshes = context.detailedGeometry?.doorMeshes ?? []
+    if (meshes.length === 0) return { left: 0, right: 0 }
 
-    const operableLeaves = context.operableLeaves
-    if (operableLeaves?.leaves.length) {
-        const scale = operableLeaves.totalWidth > 1e-6 ? totalWidth / operableLeaves.totalWidth : 1
-        const leaves = operableLeaves.leaves
-            .map((leaf) => ({
-                width: leaf.width * scale,
-                hingeSide: leaf.hingeSide,
-                hingeOffsetFromCenter: leaf.hingeOffsetFromCenter * scale,
-            }))
-            .filter((leaf) => Number.isFinite(leaf.width) && leaf.width > 0.01)
-        if (leaves.length > 0) {
-            return leaves
+    const originWidth = frame.origin.dot(frame.widthAxis)
+    const values: number[] = []
+    const point = new THREE.Vector3()
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.getAttribute('position')
+        if (!geometry || !positions || positions.count === 0) continue
+
+        mesh.updateMatrixWorld(true)
+        const index = geometry.getIndex()
+        const projectVertex = (vertexIndex: number) => {
+            point
+                .set(positions.getX(vertexIndex), positions.getY(vertexIndex), positions.getZ(vertexIndex))
+                .applyMatrix4(mesh.matrixWorld)
+            values.push(point.dot(frame.widthAxis) - originWidth)
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i < index.count; i++) {
+                projectVertex(index.getX(i))
+            }
+        } else {
+            for (let i = 0; i < positions.count; i++) {
+                projectVertex(i)
+            }
         }
     }
 
-    if (params.hingeSide === 'both') {
-        return [
-            { width: totalWidth / 2, hingeSide: 'left', hingeOffsetFromCenter: -totalWidth / 2 },
-            { width: totalWidth / 2, hingeSide: 'right', hingeOffsetFromCenter: totalWidth / 2 },
-        ]
+    if (values.length < 4) return { left: 0, right: 0 }
+    values.sort((a, b) => a - b)
+
+    const tolerance = Math.max(frame.width * 0.01, 0.005)
+    const clustered: number[] = []
+    for (const value of values) {
+        const last = clustered[clustered.length - 1]
+        if (last === undefined || Math.abs(value - last) > tolerance) {
+            clustered.push(value)
+        }
     }
 
-    return [
-        {
-            width: totalWidth,
-            hingeSide: params.hingeSide,
-            hingeOffsetFromCenter: params.hingeSide === 'left' ? -totalWidth / 2 : totalWidth / 2,
-        },
-    ]
+    if (clustered.length < 4) return { left: 0, right: 0 }
+
+    const normalizeInset = (inset: number): number => {
+        if (!Number.isFinite(inset) || inset < 0.02 || inset > frame.width * 0.2) {
+            return 0
+        }
+        return inset
+    }
+
+    return {
+        left: normalizeInset(clustered[1] - clustered[0]),
+        right: normalizeInset(clustered[clustered.length - 1] - clustered[clustered.length - 2]),
+    }
+}
+
+function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): ResolvedPlanSwingGeometry {
+    if (totalWidth <= 0 || !shouldRenderDashedOpening(context)) {
+        return { leaves: [], openAngle: Math.PI / 6 }
+    }
+
+    const operableLeaves = context.operableLeaves
+    const scaleToRequestedWidth = context.viewFrame.width > 1e-6 ? totalWidth / context.viewFrame.width : 1
+    const rawFrameInsets = estimateDoorFrameInsets(context, context.viewFrame)
+    const leftInset = rawFrameInsets.left * scaleToRequestedWidth
+    const rightInset = rawFrameInsets.right * scaleToRequestedWidth
+    const availableOpeningWidth = Math.max(totalWidth - leftInset - rightInset, totalWidth * 0.1)
+    const scale = operableLeaves.totalWidth > 1e-6 ? totalWidth / operableLeaves.totalWidth : 1
+    const baseLeafWidths = operableLeaves.leaves.map((leaf) => leaf.width * scale)
+    const sumLeafWidths = baseLeafWidths.reduce((sum, width) => sum + width, 0)
+    const leaves = operableLeaves.leaves
+        .map((leaf, index) => {
+            const effectiveWidth =
+                operableLeaves.source === 'cset-clear-width' && operableLeaves.leaves.length === 1
+                    ? Math.max(baseLeafWidths[index] - leftInset - rightInset, totalWidth * 0.1)
+                    : Math.max(baseLeafWidths[index] * (availableOpeningWidth / Math.max(sumLeafWidths, 1e-6)), totalWidth * 0.1)
+            return {
+                width: effectiveWidth,
+                hingeSide: leaf.hingeSide,
+                hingeOffsetFromCenter: leaf.hingeSide === 'left'
+                    ? (-totalWidth / 2 + leftInset)
+                    : (totalWidth / 2 - rightInset),
+            }
+        })
+        .filter((leaf) => Number.isFinite(leaf.width) && leaf.width > 0.01)
+
+    return {
+        leaves,
+        openAngle: Math.PI / 6,
+    }
 }
 
 function getPlanSwingReach(context: DoorContext, frame: DoorViewFrame): number {
-    const leaves = resolveSwingLeavesForWidth(context, frame.width)
-    if (leaves.length === 0) return frame.thickness / 2
-    return Math.max(...leaves.map((leaf) => leaf.width))
+    const geometry = resolveSwingLeavesForWidth(context, frame.width)
+    if (geometry.leaves.length === 0) return frame.thickness / 2
+    return Math.max(...geometry.leaves.map((leaf) => leaf.width))
 }
 
 /**
@@ -2171,7 +2310,7 @@ function generateSingleLeafArc(
     })
 
     // Add dashed line showing door in OPEN position (90 degrees)
-    const openDoorEnd = arcPoints[arcPoints.length - 1] // Last arc point = open position
+    const openDoorEnd = arcPoints[arcPoints.length - 1]
     const openDoorProj = projectPoint(openDoorEnd, camera, width, height)
 
     edges.push({
@@ -2201,9 +2340,8 @@ function calculateSwingArcEdges(
     cutHeight: number,
     flipArc = false
 ): ProjectedEdge[] {
-    const params = parseOperationType(context.openingDirection)
-
-    if (params.type !== 'swing' || !params.hingeSide) {
+    const swingGeometry = resolveSwingLeavesForWidth(context, frame.width)
+    if (swingGeometry.leaves.length === 0) {
         return []
     }
 
@@ -2214,17 +2352,21 @@ function calculateSwingArcEdges(
     // in the opposite direction (upward in SVG) – useful for IFC models where the door
     // normal points toward the room instead of the corridor.
     const openAxis = flipArc ? frame.semanticFacing.clone().negate() : frame.semanticFacing.clone()
+    const openingFaceOffset = (flipArc ? -1 : 1) * frame.thickness / 2
     const allEdges: ProjectedEdge[] = []
-    const leaves = resolveSwingLeavesForWidth(context, frame.width)
-    for (const leaf of leaves) {
-        const hinge3D = center.clone().add(widthAxis.clone().multiplyScalar(leaf.hingeOffsetFromCenter))
+    for (const leaf of swingGeometry.leaves) {
+        const hinge3D = center.clone()
+            .add(widthAxis.clone().multiplyScalar(leaf.hingeOffsetFromCenter))
+            .add(frame.semanticFacing.clone().multiplyScalar(openingFaceOffset))
         hinge3D.y = cutHeight
         allEdges.push(
             ...generateSingleLeafArc(
                 hinge3D,
                 leaf.width,
                 leaf.hingeSide === 'left' ? 0 : Math.PI,
-                Math.PI / 2,
+                leaf.hingeSide === 'left'
+                    ? swingGeometry.openAngle
+                    : Math.PI - swingGeometry.openAngle,
                 cutHeight,
                 widthAxis,
                 openAxis,
@@ -2246,27 +2388,33 @@ function renderSwingArcSVGForBoundingBox(
     offsetY: number,
     scaledWidth: number,
     scaledThickness: number,
-    options: Required<SVGRenderOptions>
+    options: Required<SVGRenderOptions>,
+    flipArc: boolean
 ): string {
-    const leaves = resolveSwingLeavesForWidth(context, scaledWidth)
-    if (leaves.length === 0) {
+    const swingGeometry = resolveSwingLeavesForWidth(context, scaledWidth)
+    if (swingGeometry.leaves.length === 0) {
         return ''
     }
 
     const { lineColor, lineWidth } = options
-    const hingeY = offsetY + scaledThickness / 2
+    const hingeY = flipArc ? offsetY : offsetY + scaledThickness
 
-    const segments = leaves.map((leaf) => {
+    const segments = swingGeometry.leaves.map((leaf) => {
         const hingeX = offsetX + scaledWidth / 2 + leaf.hingeOffsetFromCenter
         const radius = leaf.width
-        const startAngle = leaf.hingeSide === 'left' ? Math.PI : 0
-        const endAngle = startAngle + (Math.PI / 2) * (leaf.hingeSide === 'left' ? -1 : 1)
+        const startAngle = leaf.hingeSide === 'left'
+            ? (flipArc ? Math.PI : Math.PI)
+            : (flipArc ? 0 : 0)
+        const directionMultiplier = flipArc ? -1 : 1
+        const endAngle = startAngle + swingGeometry.openAngle * (leaf.hingeSide === 'left' ? -directionMultiplier : directionMultiplier)
         const startX = hingeX + Math.cos(startAngle) * radius
         const startY = hingeY + Math.sin(startAngle) * radius
         const endX = hingeX + Math.cos(endAngle) * radius
         const endY = hingeY + Math.sin(endAngle) * radius
         const closedEndX = leaf.hingeSide === 'left' ? hingeX + radius : hingeX - radius
-        const sweepFlag = leaf.hingeSide === 'left' ? 0 : 1
+        const sweepFlag = flipArc
+            ? (leaf.hingeSide === 'left' ? 1 : 0)
+            : (leaf.hingeSide === 'left' ? 0 : 1)
         return `
     <path d="M ${startX},${startY} A ${radius},${radius} 0 0,${sweepFlag} ${endX},${endY}" 
           stroke="${lineColor}" 
@@ -2278,6 +2426,7 @@ function renderSwingArcSVGForBoundingBox(
           x2="${closedEndX}" y2="${hingeY}" 
           stroke="${lineColor}" 
           stroke-width="${lineWidth * 0.5}" 
+          stroke-dasharray="4,2"
           opacity="0.5"/>`
     }).join('\n')
 
@@ -2384,7 +2533,7 @@ function renderPlanFromMeshes(
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
 
-    const showPlanSwing = shouldRenderPlanSwing(frame)
+    const showPlanSwing = shouldRenderPlanSwing(frame) && shouldRenderDashedOpening(context)
     const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
 
     const wallGeometry = createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
@@ -2405,7 +2554,7 @@ function renderPlanFromMeshes(
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
 
-    if (showPlanSwing && context.openingDirection) {
+    if (showPlanSwing) {
         const arcEdges = calculateSwingArcEdges(context, frame, camera, frustumWidth, frustumHeight, cutHeight, flipArc)
         renderGeometry.edges.push(...arcEdges)
     }
@@ -2414,12 +2563,12 @@ function renderPlanFromMeshes(
     // Using projected mesh geometry for fitBounds is unreliable: web-ifc meshes viewed from above
     // often produce degenerate edges, and arc edges may be at different positions than the door mesh.
     // Instead, project the semantic corners of the door + arc envelope directly.
-    const arcParams = context.openingDirection ? parseOperationType(context.openingDirection) : null
-    const hasSwingArc = showPlanSwing && arcParams?.type === 'swing' && !!arcParams.hingeSide
+    const resolvedSwing = showPlanSwing ? resolveSwingLeavesForWidth(context, frame.width) : { leaves: [], openAngle: Math.PI / 6 }
+    const hasSwingArc = resolvedSwing.leaves.length > 0
     const halfW = frame.width / 2
     // openAxisFit must match the arc direction so the fit bounds contain both the door and the arc.
     const openAxisFit = flipArc ? frame.semanticFacing.clone().negate() : frame.semanticFacing.clone()
-    const arcReach = hasSwingArc ? getPlanSwingReach(context, frame) : frame.thickness / 2
+    const arcReach = hasSwingArc ? Math.max(...resolvedSwing.leaves.map((leaf) => leaf.width)) : frame.thickness / 2
 
     const fitPoint = (p: THREE.Vector3): ProjectedEdge => {
         const proj = projectPoint(p, camera, frustumWidth, frustumHeight)
@@ -2428,7 +2577,6 @@ function renderPlanFromMeshes(
 
     const fitGeometry = {
         edges: [
-            ...wallGeometry.edges,
             // Door outline corners (back and front)
             fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
             fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
@@ -2439,7 +2587,7 @@ function renderPlanFromMeshes(
             fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
             ...deviceGeometry.edges,
         ],
-        polygons: [...wallGeometry.polygons, ...deviceGeometry.polygons],
+        polygons: [...deviceGeometry.polygons],
     }
 
     return generateSVGString(
@@ -2451,7 +2599,7 @@ function renderPlanFromMeshes(
             context,
             viewType: 'Plan',
             planArcFlip: flipArc,
-            suppressSyntheticWallBands: true,
+            suppressSyntheticWallBands: false,
         }
     )
 }
@@ -2484,6 +2632,8 @@ function renderPlanFromBoundingBox(
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledThickness) / 2
     const hasWall = Boolean(context.hostWall?.boundingBox)
+    const showPlanSwing = shouldRenderPlanSwing(context.viewFrame) && shouldRenderDashedOpening(context)
+    const flipArc = showPlanSwing ? shouldFlipPlanArc(context, context.viewFrame) : false
     const planWallMetrics = getLocalHostWallPlanMetrics(context)
     const scalePxPerMeter = scaledThickness / Math.max(doorThickness, 1e-6)
     const wallThicknessPx = planWallMetrics
@@ -2512,7 +2662,7 @@ function renderPlanFromBoundingBox(
                 wallThicknessPx,
                 planBandY,
                 planBandHeight: wallThicknessPx,
-                planArcFlip: false,
+                planArcFlip: flipArc,
             }),
             wallColor,
             lineColor,
@@ -2532,7 +2682,7 @@ ${wallRevealSvg}
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 
         fill="${doorColor}" fill-opacity="0.3" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
   
-  ${renderSwingArcSVGForBoundingBox(context, offsetX, offsetY, scaledWidth, scaledThickness, opts)}
+  ${showPlanSwing ? renderSwingArcSVGForBoundingBox(context, offsetX, offsetY, scaledWidth, scaledThickness, opts, flipArc) : ''}
   
   <!-- Front direction arrow -->
   <line x1="${svgWidth / 2}" y1="${arrowY}" x2="${svgWidth / 2}" y2="${arrowEndY}" 

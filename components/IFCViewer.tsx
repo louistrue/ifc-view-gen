@@ -4,8 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { loadIFCModelWithMetadata } from '@/lib/ifc-loader'
-import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
+import { applyModelOffset, buildDoorContextsFromIfcState } from '@/lib/door-context-pipeline'
 import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
@@ -629,33 +629,6 @@ export default function IFCViewer() {
     triggerRenderRef.current()
   }
 
-  const applyModelOffset = useCallback((model: any, offset: THREE.Vector3, includeGroup: boolean = true) => {
-    if (!model || offset.lengthSq() === 0) return
-
-    if (includeGroup) {
-      model.group.position.sub(offset)
-    }
-
-    for (const element of model.elements ?? []) {
-      if (element.boundingBox) {
-        element.boundingBox.min.sub(offset)
-        element.boundingBox.max.sub(offset)
-      }
-      if (element.meshes) {
-        for (const mesh of element.meshes) {
-          if (mesh.geometry) {
-            mesh.geometry = mesh.geometry.clone()
-            mesh.geometry.translate(-offset.x, -offset.y, -offset.z)
-          }
-        }
-      }
-      if (element.mesh?.geometry) {
-        element.mesh.geometry = element.mesh.geometry.clone()
-        element.mesh.geometry.translate(-offset.x, -offset.y, -offset.z)
-      }
-    }
-  }, [])
-
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'arch' | 'elec') => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -906,40 +879,19 @@ export default function IFCViewer() {
       if (loadedModelRef.current) {
         setLoadingStage('Analyzing doors...')
 
-        // Extract OperationTypes from web-ifc for swing arc rendering
-        let operationTypeMap: Map<number, string> | undefined
-        let csetStandardCHMap: Map<number, {
-          alTuernummer: string | null
-          geometryType: string | null
-          massDurchgangsbreite: number | null
-          massDurchgangshoehe: number | null
-          massRohbreite: number | null
-          massRohhoehe: number | null
-          massAussenrahmenBreite: number | null
-          massAussenrahmenHoehe: number | null
-          symbolFluchtweg: string | null
-          gebaeude: string | null
-          feuerwiderstand: string | null
-          bauschalldaemmmass: string | null
-        }> | undefined
-        if (archFileRef.current) {
-          try {
-            const { extractDoorOperationTypes, extractDoorCsetStandardCH } = await import('@/lib/ifc-loader')
-            operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
-            csetStandardCHMap = await extractDoorCsetStandardCH(archFileRef.current)
-          } catch (err) {
-            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH):', err)
-          }
+        if (!archFileRef.current) {
+          throw new Error('Architectural IFC file is required for door analysis')
         }
 
-        // Pass spatial structure to extract storey names for doors
-        const contexts = await analyzeDoors(
-          archAnalysisModelRef.current || loadedModelRef.current,
-          electricalAnalysisModelRef.current || electricalModelRef.current || undefined,
-          spatialStructureRef.current,  // Use ref for immediate access
-          operationTypeMap,  // Pass OperationType map for swing arc rendering
-          csetStandardCHMap
-        )
+        setLoadingStage('Preparing door SVG data...')
+        const { contexts } = await buildDoorContextsFromIfcState({
+          primaryFile: archFileRef.current,
+          primaryModel: archAnalysisModelRef.current || loadedModelRef.current,
+          secondaryFile: electricalFileRef.current || undefined,
+          secondaryModel: electricalAnalysisModelRef.current || electricalModelRef.current || undefined,
+          spatialStructure: spatialStructureRef.current,
+          detailedGeometryOffset: modelCenterOffsetRef.current,
+        })
 
         if (process.env.NODE_ENV === 'development') {
           const contextsWithDevices = contexts.filter((context) => context.nearbyDevices.length > 0)
@@ -969,21 +921,6 @@ export default function IFCViewer() {
                 nearbyDeviceTypes: context.nearbyDevices.map((device) => device.typeName),
               })),
           })
-        }
-
-        // Load detailed geometry from web-ifc for high-quality SVG generation
-        if (archFileRef.current && contexts.length > 0) {
-          setLoadingStage('Extracting detailed geometry...')
-          try {
-            await loadDetailedGeometry(
-              contexts,
-              archFileRef.current,
-              modelCenterOffsetRef.current,
-              electricalFileRef.current || undefined
-            )
-          } catch (err) {
-            console.warn('Failed to load detailed geometry, SVG will use simplified rendering:', err)
-          }
         }
 
         setDoorContexts(contexts)

@@ -224,6 +224,20 @@ export interface DoorCsetStandardCHData {
     bauschalldaemmmass: string | null
 }
 
+export interface DoorPanelMetadata {
+    operation: string | null
+    widthRatio: number | null
+    position: string | null
+}
+
+export interface DoorLeafMetadata {
+    overallWidth: number | null
+    overallHeight: number | null
+    quantityWidth: number | null
+    quantityHeight: number | null
+    panels: DoorPanelMetadata[]
+}
+
 function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
     return {
         alTuernummer: null,
@@ -238,6 +252,16 @@ function emptyDoorCsetStandardCHData(): DoorCsetStandardCHData {
         gebaeude: null,
         feuerwiderstand: null,
         bauschalldaemmmass: null,
+    }
+}
+
+function emptyDoorLeafMetadata(): DoorLeafMetadata {
+    return {
+        overallWidth: null,
+        overallHeight: null,
+        quantityWidth: null,
+        quantityHeight: null,
+        panels: [],
     }
 }
 
@@ -338,6 +362,114 @@ function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nom
     }
 }
 
+function getEntityTypeName(entity: any): string {
+    if (!entity) return ''
+    if (typeof entity.type === 'string') return entity.type.toUpperCase()
+    if (typeof entity.type === 'number') return (getIfcTypeName(entity.type) || '').toUpperCase()
+    return ''
+}
+
+function getOrCreateDoorLeafMetadata(result: Map<number, DoorLeafMetadata>, doorId: number): DoorLeafMetadata {
+    const existing = result.get(doorId)
+    if (existing) return existing
+    const created = emptyDoorLeafMetadata()
+    result.set(doorId, created)
+    return created
+}
+
+function appendPanelMetadata(target: DoorLeafMetadata, panelDef: any): void {
+    const operationValue = unwrapIfcValue(panelDef?.PanelOperation ?? panelDef?.OperationType)
+    const positionValue = unwrapIfcValue(panelDef?.PanelPosition)
+    const widthRatio = parseIfcNumber(panelDef?.PanelWidth)
+    const operation = typeof operationValue === 'string' && operationValue.trim()
+        ? operationValue.trim().toUpperCase()
+        : null
+    const position = typeof positionValue === 'string' && positionValue.trim()
+        ? positionValue.trim().toUpperCase()
+        : null
+
+    const duplicate = target.panels.some((panel) =>
+        panel.operation === operation
+        && panel.position === position
+        && (
+            (panel.widthRatio === null && widthRatio === null)
+            || (panel.widthRatio !== null && widthRatio !== null && Math.abs(panel.widthRatio - widthRatio) < 1e-9)
+        )
+    )
+    if (duplicate) return
+
+    target.panels.push({
+        operation,
+        widthRatio,
+        position,
+    })
+}
+
+function applyDoorBaseQuantities(target: DoorLeafMetadata, quantitySet: any, api: IfcAPI, modelID: number): void {
+    const setName = String(unwrapIfcValue(quantitySet?.Name) || '')
+    if (normalizeIfcName(setName) !== 'qtodoorbasequantities') return
+
+    const quantities = Array.isArray(quantitySet?.Quantities) ? quantitySet.Quantities : []
+    for (const quantityRef of quantities) {
+        const quantityId = quantityRef?.value
+        if (typeof quantityId !== 'number') continue
+        const quantity = api.GetLine(modelID, quantityId)
+        const quantityName = normalizeIfcName(String(unwrapIfcValue(quantity?.Name) || ''))
+        const value =
+            parseIfcNumber(quantity?.LengthValue)
+            ?? parseIfcNumber(quantity?.AreaValue)
+            ?? parseIfcNumber(quantity?.VolumeValue)
+            ?? parseIfcNumber(quantity?.CountValue)
+            ?? parseIfcNumber(quantity?.WeightValue)
+            ?? parseIfcNumber(quantity?.TimeValue)
+
+        if (value === null) continue
+        if (quantityName === 'width' && target.quantityWidth === null) {
+            target.quantityWidth = value
+        } else if (quantityName === 'height' && target.quantityHeight === null) {
+            target.quantityHeight = value
+        }
+    }
+}
+
+function collectDoorLeafDefinitions(
+    api: IfcAPI,
+    modelID: number,
+    entity: any,
+    target: DoorLeafMetadata
+): void {
+    if (!entity) return
+
+    const inspectDefinition = (definition: any) => {
+        const typeName = getEntityTypeName(definition)
+        if (typeName === 'IFCDOORPANELPROPERTIES') {
+            appendPanelMetadata(target, definition)
+        } else if (typeName === 'IFCELEMENTQUANTITY') {
+            applyDoorBaseQuantities(target, definition, api, modelID)
+        }
+    }
+
+    if (Array.isArray(entity?.HasPropertySets)) {
+        for (const definitionRef of entity.HasPropertySets) {
+            const definitionId = definitionRef?.value
+            if (typeof definitionId !== 'number') continue
+            inspectDefinition(api.GetLine(modelID, definitionId))
+        }
+    }
+
+    const isDefinedBy = Array.isArray(entity?.IsDefinedBy)
+        ? entity.IsDefinedBy
+        : (entity?.IsDefinedBy ? [entity.IsDefinedBy] : [])
+    for (const relRef of isDefinedBy) {
+        const relId = relRef?.value
+        if (typeof relId !== 'number') continue
+        const rel = api.GetLine(modelID, relId)
+        const definitionId = rel?.RelatingPropertyDefinition?.value
+        if (typeof definitionId !== 'number') continue
+        inspectDefinition(api.GetLine(modelID, definitionId))
+    }
+}
+
 /**
  * Extract Cset_StandardCH values for each door occurrence from IFC.
  * Supports direct door properties and properties assigned to door types.
@@ -420,6 +552,71 @@ export async function extractDoorCsetStandardCH(file: File): Promise<Map<number,
                     applyCsetProperty(existing, propName, prop?.NominalValue)
                 }
                 result.set(doorId, existing)
+            }
+        }
+
+        return result
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+export async function extractDoorLeafMetadata(file: File): Promise<Map<number, DoorLeafMetadata>> {
+    const api = await initializeIFCAPI()
+    const result = new Map<number, DoorLeafMetadata>()
+
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for door leaf metadata extraction')
+        return result
+    }
+
+    try {
+        const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
+        const doorToType = new Map<number, number>()
+
+        const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+        for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
+            const rel = api.GetLine(modelID, relDefinesByTypeIds.get(i))
+            const typeId = rel?.RelatingType?.value
+            if (typeof typeId !== 'number') continue
+            const relatedObjects = Array.isArray(rel?.RelatedObjects) ? rel.RelatedObjects : []
+            for (const related of relatedObjects) {
+                const doorId = related?.value
+                if (typeof doorId === 'number') {
+                    doorToType.set(doorId, typeId)
+                }
+            }
+        }
+
+        for (let i = 0; i < doorIds.size(); i++) {
+            const doorId = doorIds.get(i)
+            const door = api.GetLine(modelID, doorId)
+            if (!door) continue
+
+            const target = getOrCreateDoorLeafMetadata(result, doorId)
+            target.overallWidth = parseIfcNumber(door.OverallWidth) ?? target.overallWidth
+            target.overallHeight = parseIfcNumber(door.OverallHeight) ?? target.overallHeight
+            collectDoorLeafDefinitions(api, modelID, door, target)
+
+            const typeId = doorToType.get(doorId)
+            if (typeof typeId === 'number') {
+                const typeEntity = api.GetLine(modelID, typeId)
+                collectDoorLeafDefinitions(api, modelID, typeEntity, target)
+            }
+
+            const hasUsefulData =
+                target.overallWidth !== null
+                || target.overallHeight !== null
+                || target.quantityWidth !== null
+                || target.quantityHeight !== null
+                || target.panels.length > 0
+
+            if (!hasUsefulData) {
+                result.delete(doorId)
             }
         }
 
