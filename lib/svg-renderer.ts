@@ -2415,7 +2415,7 @@ function generateSingleLeafArc(
             color,
             depth: (proj1.z + proj2.z) / 2,
             layer: 0,
-            isDashed: true // Mark arc edges as dashed
+            isDashed: false // Mark arc edges as dashed
         })
     }
 
@@ -2433,7 +2433,7 @@ function generateSingleLeafArc(
         color: '#666666', // Same color as arc
         depth: (hingeProj.z + openDoorProj.z) / 2,
         layer: 0,
-        isDashed: true // Dashed to indicate open position
+        isDashed: false // Dashed to indicate open position
     })
 
     return edges
