@@ -67,6 +67,8 @@ export default function DoorPanel({
     doorColor: '#dedede',
     wallColor: '#e3e3e3',
     deviceColor: '#fcc647',
+    glassColor: '#b8d4e8',
+    glassFillOpacity: 0.32,
     lineWidth: 1.5,
     lineColor: '#000000',
     showFills: true,
@@ -483,6 +485,21 @@ export default function DoorPanel({
           <div className="option-row">
             <label>Device</label>
             <input type="color" value={options.deviceColor || '#CC0000'} onChange={(e) => setOptions({ ...options, deviceColor: e.target.value })} />
+          </div>
+          <div className="option-row">
+            <label>Glass</label>
+            <input type="color" value={options.glassColor || '#b8d4e8'} onChange={(e) => setOptions({ ...options, glassColor: e.target.value })} />
+          </div>
+          <div className="option-row">
+            <label>Glass opacity</label>
+            <input
+              type="number"
+              min={0.05}
+              max={1}
+              step={0.02}
+              value={options.glassFillOpacity ?? 0.32}
+              onChange={(e) => setOptions({ ...options, glassFillOpacity: parseFloat(e.target.value) })}
+            />
           </div>
           <div className="option-row">
             <label>Line Width</label>

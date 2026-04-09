@@ -14,6 +14,10 @@ export interface SVGRenderOptions {
     doorColor?: string
     wallColor?: string
     deviceColor?: string
+    /** Fill color for glazing in Vorder-/Rückansicht only; Grundriss uses `doorColor` for those meshes. */
+    glassColor?: string
+    /** Opacity for glazing fills in Ansichten (0–1); ignored im Grundriss (gleiche Opacity wie übrige Türfläche). */
+    glassFillOpacity?: number
     backgroundColor?: string // Background color for area outside door
     lineWidth?: number
     lineColor?: string
@@ -76,6 +80,8 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     doorColor: '#dedede',
     wallColor: '#e3e3e3',
     deviceColor: '#fcc647',
+    glassColor: '#b8d4e8',
+    glassFillOpacity: 0.32,
     backgroundColor: '#fff', // Light gray background
     lineWidth: 1.5,
     lineColor: '#000000',
@@ -162,23 +168,73 @@ function setupDoorCamera(
 
 
 /**
- * Get color for element based on type
+ * Combined world-space size of meshes (for glazing heuristic vs. overall door scale).
  */
-function getElementColor(
+function computeMeshesReferenceSize(meshes: THREE.Mesh[]): THREE.Vector3 {
+    const box = new THREE.Box3()
+    for (const mesh of meshes) {
+        mesh.updateMatrixWorld()
+        const geom = mesh.geometry
+        if (!geom.boundingBox) geom.computeBoundingBox()
+        const bb = geom.boundingBox!.clone()
+        bb.applyMatrix4(mesh.matrixWorld)
+        box.union(bb)
+    }
+    const size = new THREE.Vector3()
+    if (!box.isEmpty()) {
+        box.getSize(size)
+    }
+    return size
+}
+
+/**
+ * True if the mesh looks like a thin in-plane sheet (typical glazing) vs. frame/solid leaf.
+ * Uses axis-aligned bounds in world space; tuned for IFC door aggregates.
+ */
+function isLikelyGlazingPanelMesh(mesh: THREE.Mesh, referenceSize: THREE.Vector3): boolean {
+    mesh.updateMatrixWorld()
+    const geom = mesh.geometry
+    if (!geom.boundingBox) geom.computeBoundingBox()
+    const bb = geom.boundingBox!.clone()
+    bb.applyMatrix4(mesh.matrixWorld)
+    const size = new THREE.Vector3()
+    bb.getSize(size)
+    const dims = [size.x, size.y, size.z].sort((a, b) => a - b)
+    const [dMin, dMid, dMax] = dims
+    const doorScale = Math.max(referenceSize.x, referenceSize.y, referenceSize.z)
+    if (doorScale < 1e-6) return false
+
+    const maxThickness = Math.max(0.03, doorScale * 0.04)
+    const thinEnough = dMin <= maxThickness
+    const bothFacesLarge = dMid > doorScale * 0.14 && dMax > doorScale * 0.22
+    return thinEnough && bothFacesLarge
+}
+
+/**
+ * Fill color and optional per-mesh opacity for projected polygons.
+ * @param useGlassStyling — If false (Grundriss), glazing uses the same fill as the door; if true (Ansichten), `glassColor` / `glassFillOpacity` apply.
+ */
+function getMeshPolygonStyle(
+    mesh: THREE.Mesh,
     expressID: number,
     context: DoorContext,
-    options: Required<SVGRenderOptions>
-): string {
+    options: Required<SVGRenderOptions>,
+    referenceSize: THREE.Vector3,
+    useGlassStyling: boolean
+): { color: string; fillOpacity?: number } {
     if (expressID === context.door.expressID) {
-        return options.doorColor
-    } else if (
+        if (useGlassStyling && isLikelyGlazingPanelMesh(mesh, referenceSize)) {
+            return { color: options.glassColor, fillOpacity: options.glassFillOpacity }
+        }
+        return { color: options.doorColor }
+    }
+    if (
         (context.hostWall && expressID === context.hostWall.expressID)
         || (context.wall && expressID === context.wall.expressID)
     ) {
-        return options.wallColor
-    } else {
-        return options.deviceColor
+        return { color: options.wallColor }
     }
+    return { color: options.deviceColor }
 }
 
 /**
@@ -418,7 +474,8 @@ function extractPolygons(
     width: number,
     height: number,
     layer: number = 0,
-    cullMode: PolygonCullMode = 'camera-facing'
+    cullMode: PolygonCullMode = 'camera-facing',
+    fillOpacity?: number
 ): ProjectedPolygon[] {
     const polygons: ProjectedPolygon[] = []
 
@@ -489,7 +546,7 @@ function extractPolygons(
         // Average depth for sorting
         const depth = (proj1.z + proj2.z + proj3.z) / 3
 
-        polygons.push({
+        const poly: ProjectedPolygon = {
             points: [
                 { x: proj1.x, y: proj1.y },
                 { x: proj2.x, y: proj2.y },
@@ -497,8 +554,12 @@ function extractPolygons(
             ],
             color,
             depth,
-            layer
-        })
+            layer,
+        }
+        if (fillOpacity !== undefined) {
+            poly.fillOpacity = fillOpacity
+        }
+        polygons.push(poly)
     }
 
     if (indices) {
@@ -523,22 +584,34 @@ function collectProjectedGeometry(
     height: number,
     clipZ: boolean,
     layer: number,
-    polygonCullMode: PolygonCullMode = 'camera-facing'
+    polygonCullMode: PolygonCullMode = 'camera-facing',
+    /** Grundriss: false (Glas = Türfarbe); Vorder-/Rückansicht: true */
+    useGlassStyling: boolean = true
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const edges: ProjectedEdge[] = []
     const polygons: ProjectedPolygon[] = []
 
+    const doorMeshes = meshes.filter((m) => m.userData.expressID === context.door.expressID)
+    const referenceSize = computeMeshesReferenceSize(doorMeshes.length > 0 ? doorMeshes : meshes)
+
     for (const mesh of meshes) {
         try {
             const expressID = mesh.userData.expressID
-            const color = getElementColor(expressID, context, options)
+            const { color, fillOpacity } = getMeshPolygonStyle(
+                mesh,
+                expressID,
+                context,
+                options,
+                referenceSize,
+                useGlassStyling
+            )
             const posCount = mesh.geometry?.attributes?.position?.count || 0
             if (posCount === 0) continue
 
             edges.push(...extractEdges(mesh, camera, options.lineColor, width, height, clipZ, layer))
 
             if (options.showFills) {
-                polygons.push(...extractPolygons(mesh, camera, color, width, height, layer, polygonCullMode))
+                polygons.push(...extractPolygons(mesh, camera, color, width, height, layer, polygonCullMode, fillOpacity))
             }
         } catch (error) {
             console.warn('Failed to extract geometry from mesh:', error)
@@ -1393,7 +1466,7 @@ function collectFrontElevationFitGeometry(
     const frame = context.viewFrame
     const margin = Math.max(opts.margin, 0.25)
     const { camera, frustumWidth, frustumHeight } = createElevationOrthographicCamera(frame, margin, false)
-    return collectProjectedGeometry(fitMeshes, context, opts, camera, frustumWidth, frustumHeight, false, 0)
+    return collectProjectedGeometry(fitMeshes, context, opts, camera, frustumWidth, frustumHeight, false, 0, 'camera-facing', true)
 }
 
 function computeFrontElevationScale(context: DoorContext, opts: Required<SVGRenderOptions>): number | undefined {
@@ -1876,6 +1949,9 @@ function renderTitleBlock(
         const items = [
             { color: options.doorColor, text: 'Tür' },
         ]
+        if (viewType !== 'Plan') {
+            items.push({ color: options.glassColor, text: 'Glas' })
+        }
 
         if (hasWall) {
             items.push({ color: options.wallColor, text: 'Wand' })
@@ -2058,7 +2134,8 @@ function renderElevationFromMeshes(
         frustumHeight,
         false,
         0,
-        'none'
+        'none',
+        true
     )
     const fitGeometry = {
         edges: [...renderGeometry.edges],
@@ -2666,7 +2743,8 @@ function renderPlanFromMeshes(
         frustumHeight,
         true,
         0,
-        'camera-facing'
+        'camera-facing',
+        false
     )
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
     renderGeometry.edges.push(...deviceGeometry.edges)
