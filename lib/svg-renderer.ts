@@ -76,7 +76,7 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     doorColor: '#dedede',
     wallColor: '#e3e3e3',
     deviceColor: '#fcc647',
-    backgroundColor: '#f5f5f5', // Light gray background
+    backgroundColor: '#fff', // Light gray background
     lineWidth: 1.5,
     lineColor: '#000000',
     showFills: true,
