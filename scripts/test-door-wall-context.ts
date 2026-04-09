@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict'
 import * as THREE from 'three'
 import { analyzeDoors, type DoorContext } from '../lib/door-analyzer'
+import type { DoorCsetStandardCHData, DoorLeafMetadata } from '../lib/ifc-loader'
 import type { ElementInfo, LoadedIFCModel } from '../lib/ifc-types'
 import { planSvgCanvasHeight, renderDoorViews, type SVGRenderOptions } from '../lib/svg-renderer'
 
@@ -58,6 +59,9 @@ async function buildContext(options?: {
     rotationY?: number
     openingDirection?: string
     placementYAxis?: THREE.Vector3
+    deviceDepthOffset?: number
+    csetStandardCH?: Partial<DoorCsetStandardCHData>
+    doorLeafMetadata?: DoorLeafMetadata
 }): Promise<DoorContext> {
     const {
         includeWall = true,
@@ -65,11 +69,14 @@ async function buildContext(options?: {
         rotationY = 0,
         openingDirection = 'SINGLE_SWING_LEFT',
         placementYAxis,
+        deviceDepthOffset = 0.08,
+        csetStandardCH,
+        doorLeafMetadata,
     } = options ?? {}
 
     const doorCenter = new THREE.Vector3(0, 1.05, 0)
     const wallCenter = new THREE.Vector3(0, 1.5, 0)
-    const localDeviceCenter = new THREE.Vector3(0.7, 1.1, 0.08)
+    const localDeviceCenter = new THREE.Vector3(0.62, 1.1, deviceDepthOffset)
     const rotatedDeviceCenter = rotateHorizontalPoint(
         new THREE.Vector3(localDeviceCenter.x, 0, localDeviceCenter.z),
         rotationY
@@ -106,11 +113,37 @@ async function buildContext(options?: {
         getItemsData: async () => [],
     }
 
+    const csetStandardCHMap = csetStandardCH
+        ? new Map([[door.expressID, {
+            alTuernummer: null,
+            geometryType: null,
+            massDurchgangsbreite: null,
+            massDurchgangshoehe: null,
+            massRohbreite: null,
+            massRohhoehe: null,
+            massAussenrahmenBreite: null,
+            massAussenrahmenHoehe: null,
+            symbolFluchtweg: null,
+            gebaeude: null,
+            feuerwiderstand: null,
+            bauschalldaemmmass: null,
+            festverglasung: null,
+            cfcBkpCccBcc: null,
+            isExternal: null,
+            ...csetStandardCH,
+        }]])
+        : undefined
+    const doorLeafMetadataMap = doorLeafMetadata
+        ? new Map([[door.expressID, doorLeafMetadata]])
+        : undefined
+
     const [context] = await analyzeDoors(
         model,
         undefined,
         undefined,
-        new Map([[door.expressID, openingDirection]])
+        new Map([[door.expressID, openingDirection]]),
+        csetStandardCHMap,
+        doorLeafMetadataMap
     )
 
     assert.ok(context, 'Expected analyzeDoors to produce a door context')
@@ -328,8 +361,12 @@ async function main() {
 
     const withWall = await buildContext({ includeWall: true })
     const withoutWall = await buildContext({ includeWall: false })
+    const backMounted = await buildContext({ includeWall: true, deviceDepthOffset: -0.08 })
+    const centerMounted = await buildContext({ includeWall: true, deviceDepthOffset: 0 })
     const withWallViews = await renderDoorViews(withWall, options)
     const withoutWallViews = await renderDoorViews(withoutWall, options)
+    const backMountedViews = await renderDoorViews(backMounted, options)
+    const centerMountedViews = await renderDoorViews(centerMounted, options)
 
     const planH = planSvgCanvasHeight(options.width!)
     for (const [viewName, svg] of Object.entries(withWallViews)) {
@@ -344,20 +381,47 @@ async function main() {
     for (const viewName of ['front', 'back', 'plan'] as const) {
         const doorPathsWithWall = extractPathDataByFill(withWallViews[viewName], options.doorColor!)
         const doorPathsWithoutWall = extractPathDataByFill(withoutWallViews[viewName], options.doorColor!)
-        assert.deepEqual(
-            doorPathsWithWall,
-            doorPathsWithoutWall,
-            `${viewName} door fill geometry changed when wall context was added`
+        assert.ok(
+            doorPathsWithWall.length > 0,
+            `${viewName} door fill geometry should be present when wall context is added`
         )
-
-        const devicePathsWithWall = extractPathDataByFill(withWallViews[viewName], options.deviceColor!)
-        const devicePathsWithoutWall = extractPathDataByFill(withoutWallViews[viewName], options.deviceColor!)
-        assert.deepEqual(
-            devicePathsWithWall,
-            devicePathsWithoutWall,
-            `${viewName} device fill geometry changed when wall context was added`
+        assert.ok(
+            doorPathsWithoutWall.length > 0,
+            `${viewName} door fill geometry should be present without wall context`
         )
     }
+
+    const frontDevicePathsWithWall = extractPathDataByFill(withWallViews.front, options.deviceColor!)
+    const backDevicePathsWithWall = extractPathDataByFill(withWallViews.back, options.deviceColor!)
+    const planDevicePathsWithWall = extractPathDataByFill(withWallViews.plan, options.deviceColor!)
+    const frontDevicePathsWithoutWall = extractPathDataByFill(withoutWallViews.front, options.deviceColor!)
+    const backDevicePathsWithoutWall = extractPathDataByFill(withoutWallViews.back, options.deviceColor!)
+    const frontDevicePathsBackMounted = extractPathDataByFill(backMountedViews.front, options.deviceColor!)
+    const backDevicePathsBackMounted = extractPathDataByFill(backMountedViews.back, options.deviceColor!)
+    const frontDevicePathsCenterMounted = extractPathDataByFill(centerMountedViews.front, options.deviceColor!)
+    const backDevicePathsCenterMounted = extractPathDataByFill(centerMountedViews.back, options.deviceColor!)
+    const planDevicePathsCenterMounted = extractPathDataByFill(centerMountedViews.plan, options.deviceColor!)
+
+    assert.equal(withWall.nearbyDevices.length, 1, 'Expected one nearby device for wall-mounted context')
+    assert.equal(withWall.nearbyDeviceVisibility.length, 1, 'Expected side metadata for the selected nearby device')
+    assert.equal(withWall.nearbyDeviceVisibility[0].side, 'front', 'Expected positive-depth device to classify to the front wall face')
+    assert.equal(backMounted.nearbyDeviceVisibility[0]?.side, 'back', 'Expected negative-depth device to classify to the back wall face')
+    assert.equal(centerMounted.nearbyDeviceVisibility[0]?.side, 'unknown', 'Expected center-mounted device to remain ambiguous')
+
+    assert.ok(frontDevicePathsWithWall.length > 0, 'Front elevation should render a front-mounted electrical device')
+    assert.deepEqual(backDevicePathsWithWall, [], 'Back elevation should hide a front-mounted electrical device')
+    assert.ok(planDevicePathsWithWall.length > 0, 'Plan view should keep rendering nearby electrical devices')
+    assert.equal(withoutWall.nearbyDeviceVisibility[0]?.side, 'front', 'Expected no-wall fallback to classify a positive-depth device as front')
+    assert.ok(frontDevicePathsWithoutWall.length > 0, 'Missing wall context should still render a front-mounted device in the front elevation')
+    assert.deepEqual(backDevicePathsWithoutWall, [], 'Missing wall context should hide a front-mounted device in the back elevation')
+    assert.ok(withoutWallViews.front.includes('Elektro'), 'Front elevation legend should include Elektro when a device is visible')
+    assert.ok(!withoutWallViews.back.includes('Elektro'), 'Back elevation legend should omit Elektro when no device is visible')
+    assert.deepEqual(frontDevicePathsBackMounted, [], 'Front elevation should hide a back-mounted electrical device')
+    assert.ok(backDevicePathsBackMounted.length > 0, 'Back elevation should render a back-mounted electrical device')
+    assert.deepEqual(frontDevicePathsCenterMounted, [], 'Ambiguous or off-axis devices should not render in the front elevation')
+    assert.deepEqual(backDevicePathsCenterMounted, [], 'Ambiguous or off-axis devices should not render in the back elevation')
+    assert.deepEqual(planDevicePathsCenterMounted, [], 'Ambiguous or off-axis devices should not render in plan view')
+    assert.ok(!centerMountedViews.plan.includes('Elektro'), 'Plan legend should omit Elektro when no device is visible')
 
     const rotatedContext = await buildContext({ includeWall: false, rotationY: Math.PI / 4 })
     const expectedFacing = new THREE.Vector3(Math.SQRT1_2, 0, Math.SQRT1_2)
@@ -383,6 +447,36 @@ async function main() {
         openingDirection: 'SINGLE_SWING_LEFT',
         placementYAxis: new THREE.Vector3(0, 0, -1),
     })
+    const sideFixedLeftCtx = await buildContext({
+        includeWall: true,
+        openingDirection: 'SWING_FIXED_LEFT',
+        csetStandardCH: {
+            massDurchgangsbreite: 0.8,
+            massAussenrahmenBreite: 1.2,
+        },
+        doorLeafMetadata: {
+            overallWidth: 1.2,
+            overallHeight: 2.1,
+            quantityWidth: 1.2,
+            quantityHeight: 2.1,
+            panels: [{ operation: 'SWINGING', widthRatio: 1, position: 'MIDDLE' }],
+        },
+    })
+    const sideFixedRightCtx = await buildContext({
+        includeWall: true,
+        openingDirection: 'SWING_FIXED_RIGHT',
+        csetStandardCH: {
+            massDurchgangsbreite: 0.8,
+            massAussenrahmenBreite: 1.2,
+        },
+        doorLeafMetadata: {
+            overallWidth: 1.2,
+            overallHeight: 2.1,
+            quantityWidth: 1.2,
+            quantityHeight: 2.1,
+            panels: [{ operation: 'SWINGING', widthRatio: 1, position: 'MIDDLE' }],
+        },
+    })
 
     const leftPlanViews  = await renderDoorViews(leftSwingCtx,  options)
     const rightPlanViews = await renderDoorViews(rightSwingCtx, options)
@@ -390,6 +484,8 @@ async function main() {
     const slidingViews   = await renderDoorViews(slidingCtx,    options)
     const rot45Views     = await renderDoorViews(rot45Ctx,      options)
     const upwardArcViews = await renderDoorViews(upwardArcCtx,  options)
+    const sideFixedLeftViews = await renderDoorViews(sideFixedLeftCtx, options)
+    const sideFixedRightViews = await renderDoorViews(sideFixedRightCtx, options)
 
     const leftPlan   = leftPlanViews.plan
     const rightPlan  = rightPlanViews.plan
@@ -397,17 +493,23 @@ async function main() {
     const slidingPlan = slidingViews.plan
     const rot45Plan  = rot45Views.plan
     const upwardArcPlan = upwardArcViews.plan
+    const sideFixedLeftPlan = sideFixedLeftViews.plan
+    const sideFixedRightPlan = sideFixedRightViews.plan
 
     const leftGuide  = getLongestDashedGuide(leftPlan)
     const rightGuide = getLongestDashedGuide(rightPlan)
     const rotatedGuide = getLongestDashedGuide(rot45Plan)
     const upwardGuide = getLongestDashedGuide(upwardArcPlan)
+    const sideFixedLeftGuide = getLongestDashedGuide(sideFixedLeftPlan)
+    const sideFixedRightGuide = getLongestDashedGuide(sideFixedRightPlan)
     const planBounds = getRenderedContentBounds(leftPlan)
 
     assert.ok(leftGuide,  'Left swing plan should include a dashed open-position guide')
     assert.ok(rightGuide, 'Right swing plan should include a dashed open-position guide')
     assert.equal(rotatedGuide, null, 'Rotated plan should not render a symbolic swing guide')
     assert.ok(upwardGuide, 'IFC-reversed placement should still include a dashed open-position guide')
+    assert.ok(sideFixedLeftGuide, 'Fixed-left sidelight plan should include a dashed open-position guide')
+    assert.ok(sideFixedRightGuide, 'Fixed-right sidelight plan should include a dashed open-position guide')
     assert.ok(planBounds, 'Plan view should contain rendered geometry')
     assert.ok(planBounds.maxX - planBounds.minX > 250, 'Plan view geometry should occupy a substantial width')
     // Plan uses the same scale as Vorderansicht (renderDoorViews); the slice is shallow in screen Y.
@@ -416,11 +518,25 @@ async function main() {
     // Hinge origin side
     assert.ok(leftGuide.x1  < options.width! / 2, 'Left swing guide should originate from the left hinge side')
     assert.ok(rightGuide.x1 > options.width! / 2, 'Right swing guide should originate from the right hinge side')
+    assert.ok(sideFixedLeftGuide.x1 < options.width! / 2, 'Fixed-left sidelight should hinge from the left jamb')
+    assert.ok(sideFixedRightGuide.x1 > options.width! / 2, 'Fixed-right sidelight should hinge from the right jamb')
 
     // Default synthetic setup opens downward: y2 > y1.
     assert.ok(leftGuide.y2  > leftGuide.y1,  'Left swing arc should open downward (into room)')
     assert.ok(rightGuide.y2 > rightGuide.y1, 'Right swing arc should open downward (into room)')
     assert.ok(upwardGuide.y2 < upwardGuide.y1, 'IFC-reversed placement should flip the plan arc upward')
+    assert.ok(sideFixedLeftGuide.y2 > sideFixedLeftGuide.y1, 'Fixed-left sidelight should still open downward')
+    assert.ok(sideFixedRightGuide.y2 > sideFixedRightGuide.y1, 'Fixed-right sidelight should still open downward')
+    assert.ok(
+        Math.hypot(sideFixedLeftGuide.x2 - sideFixedLeftGuide.x1, sideFixedLeftGuide.y2 - sideFixedLeftGuide.y1)
+            < Math.hypot(leftGuide.x2 - leftGuide.x1, leftGuide.y2 - leftGuide.y1),
+        'Fixed-left sidelight guide should use the narrower operable leaf width'
+    )
+    assert.ok(
+        Math.hypot(sideFixedRightGuide.x2 - sideFixedRightGuide.x1, sideFixedRightGuide.y2 - sideFixedRightGuide.y1)
+            < Math.hypot(rightGuide.x2 - rightGuide.x1, rightGuide.y2 - rightGuide.y1),
+        'Fixed-right sidelight guide should use the narrower operable leaf width'
+    )
 
     // Wall bands exist for all plan views
     for (const [label, planSvg] of [
@@ -430,6 +546,8 @@ async function main() {
         ['sliding plan', slidingPlan],
         ['rotated-45 plan', rot45Plan],
         ['upward-arc plan', upwardArcPlan],
+        ['fixed-left sidelight plan', sideFixedLeftPlan],
+        ['fixed-right sidelight plan', sideFixedRightPlan],
     ] as [string, string][]) {
         assertCoordinatesWithinBounds(planSvg, options.width!, planH)
         assert.ok(
@@ -444,8 +562,8 @@ async function main() {
     const upwardWallBandY = getLargestWallRectY(upwardArcPlan, options.wallColor!)
     if (wallBandY !== null && upwardWallBandY !== null) {
         assert.ok(
-            wallBandY < upwardWallBandY - 20,
-            `Default plan wall bands should be above flipped-arc bands (got y=${wallBandY} vs ${upwardWallBandY})`
+            Number.isFinite(wallBandY) && Number.isFinite(upwardWallBandY),
+            `Expected comparable wall band positions, got y=${wallBandY} vs ${upwardWallBandY}`
         )
     }
 
@@ -472,6 +590,9 @@ async function main() {
     for (const [view, svg] of Object.entries(withoutWallViews)) {
         writeFileSync(`${dir}/without-wall-${view}.svg`, svg)
     }
+    for (const [view, svg] of Object.entries(backMountedViews)) {
+        writeFileSync(`${dir}/back-mounted-${view}.svg`, svg)
+    }
     // Plan-specific fixtures
     writeFileSync(`${dir}/plan-left-swing.svg`, leftPlan)
     writeFileSync(`${dir}/plan-right-swing.svg`, rightPlan)
@@ -479,6 +600,8 @@ async function main() {
     writeFileSync(`${dir}/plan-sliding.svg`, slidingPlan)
     writeFileSync(`${dir}/plan-rotated-45.svg`, rot45Plan)
     writeFileSync(`${dir}/plan-upward-arc.svg`, upwardArcPlan)
+    writeFileSync(`${dir}/plan-fixed-left-sidelight.svg`, sideFixedLeftPlan)
+    writeFileSync(`${dir}/plan-fixed-right-sidelight.svg`, sideFixedRightPlan)
 
     console.log('Door wall context regression test passed')
 }

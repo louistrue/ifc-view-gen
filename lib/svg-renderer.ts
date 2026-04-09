@@ -1100,12 +1100,76 @@ function createSemanticPlanWallGeometry(
     return geometry
 }
 
+function shouldRenderDeviceInElevation(
+    context: DoorContext,
+    deviceExpressID: number,
+    isBackView: boolean
+): boolean {
+    const side = (context.nearbyDeviceVisibility || []).find(
+        (entry) => entry.deviceExpressID === deviceExpressID
+    )?.side
+
+    if (side === 'front') {
+        return !isBackView
+    }
+    if (side === 'back') {
+        return isBackView
+    }
+    if (side === 'unknown') {
+        return false
+    }
+
+    // Preserve previous behavior only for truly legacy contexts with no metadata.
+    return true
+}
+
+function shouldRenderDeviceInPlan(
+    context: DoorContext,
+    deviceExpressID: number
+): boolean {
+    const side = (context.nearbyDeviceVisibility || []).find(
+        (entry) => entry.deviceExpressID === deviceExpressID
+    )?.side
+
+    if (side === 'front' || side === 'back') {
+        return true
+    }
+    if (side === 'unknown') {
+        return false
+    }
+
+    // Preserve previous behavior only for truly legacy contexts with no metadata.
+    return true
+}
+
+function hasVisibleDevicesForView(
+    context: DoorContext | null,
+    viewType: 'Front' | 'Back' | 'Plan' | ''
+): boolean {
+    if (!context) {
+        return false
+    }
+    if (viewType === 'Plan') {
+        return context.nearbyDevices.some((device) =>
+            shouldRenderDeviceInPlan(context, device.expressID)
+        )
+    }
+    if (viewType === '') {
+        return context.nearbyDevices.length > 0
+    }
+
+    return context.nearbyDevices.some((device) =>
+        shouldRenderDeviceInElevation(context, device.expressID, viewType === 'Back')
+    )
+}
+
 function createSemanticElevationDeviceGeometry(
     context: DoorContext,
     camera: THREE.OrthographicCamera,
     width: number,
     height: number,
-    options: Required<SVGRenderOptions>
+    options: Required<SVGRenderOptions>,
+    isBackView: boolean
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
@@ -1113,6 +1177,9 @@ function createSemanticElevationDeviceGeometry(
     const hasWallContext = Boolean(context.hostWall || context.wall)
 
     for (const device of context.nearbyDevices) {
+        if (!shouldRenderDeviceInElevation(context, device.expressID, isBackView)) {
+            continue
+        }
         const deviceBox = device.boundingBox
         if (!deviceBox) continue
 
@@ -1182,6 +1249,9 @@ function createSemanticPlanDeviceGeometry(
     const depthCap = Math.max(frame.thickness * 0.9, 0.05)
 
     for (const device of context.nearbyDevices) {
+        if (!shouldRenderDeviceInPlan(context, device.expressID)) {
+            continue
+        }
         const deviceBox = device.boundingBox
         if (!deviceBox) continue
 
@@ -1409,7 +1479,8 @@ function renderStoreyMarkerSvg(
 
 function getSvgViewportMetrics(
     options: Required<SVGRenderOptions>,
-    context: DoorContext | null
+    context: DoorContext | null,
+    viewType: 'Front' | 'Back' | 'Plan' | '' = ''
 ): {
     titleBlockHeight: number
     viewHeight: number
@@ -1417,7 +1488,7 @@ function getSvgViewportMetrics(
     availWidth: number
     availHeight: number
 } {
-    const hasDevices = context ? context.nearbyDevices.length > 0 : false
+    const hasDevices = hasVisibleDevicesForView(context, viewType)
     const hasWall = context ? Boolean(context.hostWall || context.wall) : false
     const showLegendActual = options.showLegend && (hasDevices || hasWall)
     const lineStep = options.fontSize * 1.5
@@ -1480,7 +1551,7 @@ function computeFrontElevationScale(context: DoorContext, opts: Required<SVGRend
     if (!fitBounds) {
         return undefined
     }
-    const { availWidth, availHeight } = getSvgViewportMetrics(opts, context)
+    const { availWidth, availHeight } = getSvgViewportMetrics(opts, context, 'Front')
     const contentWidth = fitBounds.maxX - fitBounds.minX
     const contentHeight = fitBounds.maxY - fitBounds.minY
     return Math.min(availWidth / (contentWidth || 1), availHeight / (contentHeight || 1))
@@ -1696,13 +1767,14 @@ function generateSVGString(
         wallRevealTop,
     } = options
 
-    const hasDevices = renderMeta.context ? renderMeta.context.nearbyDevices.length > 0 : false
+    const hasDevices = hasVisibleDevicesForView(renderMeta.context, renderMeta.viewType as 'Front' | 'Back' | 'Plan' | '')
     const hasWall = renderMeta.context ? Boolean(renderMeta.context.hostWall || renderMeta.context.wall) : false
     const showLegendActual = showLegend && (hasDevices || hasWall)
 
     const { titleBlockHeight, viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(
         options,
-        renderMeta.context
+        renderMeta.context,
+        renderMeta.viewType as 'Front' | 'Back' | 'Plan' | ''
     )
 
     const fitBounds = getBoundsFromProjectedGeometry(
@@ -1934,7 +2006,7 @@ function renderTitleBlock(
         }
     }
 
-    const hasDevices = context.nearbyDevices.length > 0
+    const hasDevices = hasVisibleDevicesForView(context, viewType as 'Front' | 'Back' | 'Plan')
     const hasWall = Boolean(context.hostWall || context.wall)
 
     if (showLegend && (hasDevices || hasWall)) {
@@ -2137,7 +2209,14 @@ function renderElevationFromMeshes(
         edges: [...renderGeometry.edges],
         polygons: [...renderGeometry.polygons],
     }
-    const deviceGeometry = createSemanticElevationDeviceGeometry(context, camera, frustumWidth, frustumHeight, opts)
+    const deviceGeometry = createSemanticElevationDeviceGeometry(
+        context,
+        camera,
+        frustumWidth,
+        frustumHeight,
+        opts,
+        isBackView
+    )
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
 
@@ -2301,15 +2380,27 @@ interface ResolvedSwingLeaf {
     hingeOffsetFromCenter: number
 }
 
-function getPlanSwingFrameInset(context: DoorContext, totalWidth: number): number {
-    const clearWidth =
-        context.operableLeaves?.clearWidth
-        ?? context.csetStandardCH?.massDurchgangsbreite
-        ?? null
-    if (!clearWidth || !Number.isFinite(clearWidth) || clearWidth <= 0 || clearWidth >= totalWidth) {
-        return 0
+function shouldMirrorSidelightSwing(context: DoorContext): boolean {
+    const upper = context.openingDirection?.toUpperCase() || ''
+    if (!upper.includes('SWING_FIXED_LEFT') && !upper.includes('SWING_FIXED_RIGHT')) {
+        return false
     }
-    return Math.max((totalWidth - clearWidth) / 2, 0)
+
+    const placementYAxis = context.door.placementYAxis?.clone().setY(0)
+    if (!placementYAxis || placementYAxis.lengthSq() < 1e-8) {
+        return false
+    }
+
+    placementYAxis.normalize()
+    return placementYAxis.dot(context.viewFrame.semanticFacing) > 0
+}
+
+function mirrorResolvedSwingLeaves(leaves: ResolvedSwingLeaf[]): ResolvedSwingLeaf[] {
+    return leaves.map((leaf) => ({
+        width: leaf.width,
+        hingeSide: leaf.hingeSide === 'left' ? 'right' : 'left',
+        hingeOffsetFromCenter: -leaf.hingeOffsetFromCenter,
+    }))
 }
 /** Opening angle (radians) for symbolic plan swing graphics. */
 const PLAN_SWING_OPEN_RAD = (15 * Math.PI) / 180
@@ -2337,7 +2428,7 @@ function parseOperationType(operationType: string | null): SwingArcParams {
     }
 
     // Double doors
-    if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING')) {
+    if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING') || upper === 'DOUBLE_SWING') {
         return { type: 'swing', hingeSide: 'both' }
     }
 
@@ -2395,7 +2486,6 @@ function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): R
         return []
     }
 
-    const frameInset = getPlanSwingFrameInset(context, totalWidth)
     const operableLeaves = context.operableLeaves
     if (operableLeaves?.leaves.length) {
         const scale = operableLeaves.totalWidth > 1e-6 ? totalWidth / operableLeaves.totalWidth : 1
@@ -2403,39 +2493,63 @@ function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): R
             .map((leaf) => ({
                 width: leaf.width * scale,
                 hingeSide: leaf.hingeSide,
-                hingeOffsetFromCenter:
-                    leaf.hingeSide === 'left'
-                        ? leaf.hingeOffsetFromCenter * scale + frameInset
-                        : leaf.hingeOffsetFromCenter * scale - frameInset,
+                hingeOffsetFromCenter: leaf.hingeOffsetFromCenter * scale,
             }))
             .filter((leaf) => Number.isFinite(leaf.width) && leaf.width > 0.01)
         if (leaves.length > 0) {
-            return leaves
+            return shouldMirrorSidelightSwing(context) ? mirrorResolvedSwingLeaves(leaves) : leaves
         }
     }
 
     if (params.hingeSide === 'both') {
         return [
-            { width: totalWidth / 2, hingeSide: 'left', hingeOffsetFromCenter: -totalWidth / 2 + frameInset },
-            { width: totalWidth / 2, hingeSide: 'right', hingeOffsetFromCenter: totalWidth / 2 - frameInset },
+            { width: totalWidth / 2, hingeSide: 'left', hingeOffsetFromCenter: -totalWidth / 2 },
+            { width: totalWidth / 2, hingeSide: 'right', hingeOffsetFromCenter: totalWidth / 2 },
         ]
     }
 
-    return [
+    const leaves = [
         {
             width: totalWidth,
             hingeSide: params.hingeSide,
-            hingeOffsetFromCenter: params.hingeSide === 'left'
-                ? -totalWidth / 2 + frameInset
-                : totalWidth / 2 - frameInset,
+            hingeOffsetFromCenter: params.hingeSide === 'left' ? -totalWidth / 2 : totalWidth / 2,
         },
     ]
+    return shouldMirrorSidelightSwing(context) ? mirrorResolvedSwingLeaves(leaves) : leaves
+}
+
+function normalizeSwingLeavesForScreen(
+    leaves: ResolvedSwingLeaf[],
+    frame: DoorViewFrame,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    cutHeight: number
+): ResolvedSwingLeaf[] {
+    const center = frame.origin.clone()
+    center.y = cutHeight
+    const positive = center.clone().add(frame.widthAxis.clone().multiplyScalar(Math.max(frame.width * 0.25, 0.1)))
+    const negative = center.clone().add(frame.widthAxis.clone().multiplyScalar(-Math.max(frame.width * 0.25, 0.1)))
+    const positiveProj = projectPoint(positive, camera, width, height)
+    const negativeProj = projectPoint(negative, camera, width, height)
+    const isMirrored = positiveProj.x < negativeProj.x
+
+    if (!isMirrored) {
+        return leaves
+    }
+
+    return leaves.map((leaf) => ({
+        width: leaf.width,
+        hingeSide: leaf.hingeSide === 'left' ? 'right' : 'left',
+        hingeOffsetFromCenter: -leaf.hingeOffsetFromCenter,
+    }))
 }
 
 function getPlanSwingReach(context: DoorContext, frame: DoorViewFrame): number {
     const leaves = resolveSwingLeavesForWidth(context, frame.width)
     if (leaves.length === 0) return frame.thickness / 2
-    return Math.max(...leaves.map((leaf) => leaf.width * Math.sin(PLAN_SWING_OPEN_RAD)))
+    const faceOffset = frame.thickness / 2
+    return faceOffset + Math.max(...leaves.map((leaf) => leaf.width * Math.sin(PLAN_SWING_OPEN_RAD)))
 }
 
 /**
@@ -2449,17 +2563,18 @@ function generateSingleLeafArc(
     cutHeight: number,
     widthAxis: THREE.Vector3,
     openAxis: THREE.Vector3,
+    faceOffset: number,
     camera: THREE.OrthographicCamera,
     width: number,
     height: number
 ): ProjectedEdge[] {
     const edges: ProjectedEdge[] = []
     const color = '#666666' // Lighter color for arc
+    const pivot3D = hinge3D.clone().add(openAxis.clone().multiplyScalar(faceOffset))
 
     const startDir = widthAxis.clone().multiplyScalar(Math.cos(startAngle))
         .add(openAxis.clone().multiplyScalar(Math.sin(startAngle)))
         .normalize()
-    const latch3D = hinge3D.clone().add(startDir.clone().multiplyScalar(leafWidth))
 
     const arcPoints: THREE.Vector3[] = []
     const numSegments = 20
@@ -2470,7 +2585,7 @@ function generateSingleLeafArc(
         const dir = widthAxis.clone().multiplyScalar(Math.cos(angle))
             .add(openAxis.clone().multiplyScalar(Math.sin(angle)))
             .normalize()
-        const point = hinge3D.clone().add(dir.multiplyScalar(leafWidth))
+        const point = pivot3D.clone().add(dir.multiplyScalar(leafWidth))
         point.y = cutHeight
         arcPoints.push(point)
     }
@@ -2488,11 +2603,11 @@ function generateSingleLeafArc(
             color,
             depth: (proj1.z + proj2.z) / 2,
             layer: 0,
-            isDashed: false // Mark arc edges as dashed
+            isDashed: true
         })
     }
 
-    const hingeProj = projectPoint(hinge3D, camera, width, height)
+    const hingeProj = projectPoint(pivot3D, camera, width, height)
 
     // Add dashed line showing door in OPEN position (plan swing angle)
     const openDoorEnd = arcPoints[arcPoints.length - 1] // Last arc point = open position
@@ -2506,7 +2621,7 @@ function generateSingleLeafArc(
         color: '#666666', // Same color as arc
         depth: (hingeProj.z + openDoorProj.z) / 2,
         layer: 0,
-        isDashed: false // Dashed to indicate open position
+        isDashed: true
     })
 
     return edges
@@ -2538,8 +2653,16 @@ function calculateSwingArcEdges(
     // in the opposite direction (upward in SVG) – useful for IFC models where the door
     // normal points toward the room instead of the corridor.
     const openAxis = flipArc ? frame.semanticFacing.clone().negate() : frame.semanticFacing.clone()
+    const faceOffset = frame.thickness / 2
     const allEdges: ProjectedEdge[] = []
-    const leaves = resolveSwingLeavesForWidth(context, frame.width)
+    const leaves = normalizeSwingLeavesForScreen(
+        resolveSwingLeavesForWidth(context, frame.width),
+        frame,
+        camera,
+        width,
+        height,
+        cutHeight
+    )
     for (const leaf of leaves) {
         const hinge3D = center.clone().add(widthAxis.clone().multiplyScalar(leaf.hingeOffsetFromCenter))
         hinge3D.y = cutHeight
@@ -2552,6 +2675,7 @@ function calculateSwingArcEdges(
                 cutHeight,
                 widthAxis,
                 openAxis,
+                faceOffset,
                 camera,
                 width,
                 height
@@ -2570,7 +2694,8 @@ function renderSwingArcSVGForBoundingBox(
     offsetY: number,
     scaledWidth: number,
     scaledThickness: number,
-    options: Required<SVGRenderOptions>
+    options: Required<SVGRenderOptions>,
+    flipArc = false
 ): string {
     const leaves = resolveSwingLeavesForWidth(context, scaledWidth)
     if (leaves.length === 0) {
@@ -2578,9 +2703,17 @@ function renderSwingArcSVGForBoundingBox(
     }
 
     const { lineColor, lineWidth } = options
-    const hingeY = offsetY + scaledThickness / 2
+    const hingeY = offsetY + (flipArc ? 0 : scaledThickness)
+    const screenLeaves = normalizeSwingLeavesForScreen(
+        leaves,
+        context.viewFrame,
+        new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10),
+        options.width,
+        planSvgCanvasHeight(options.width),
+        0
+    )
 
-    const segments = leaves.map((leaf) => {
+    const segments = screenLeaves.map((leaf) => {
         const hingeX = offsetX + scaledWidth / 2 + leaf.hingeOffsetFromCenter
         const radius = leaf.width
         const startAngle = leaf.hingeSide === 'left' ? Math.PI : 0
@@ -2596,6 +2729,12 @@ function renderSwingArcSVGForBoundingBox(
           stroke-width="${lineWidth * 0.75}" 
           stroke-dasharray="4,2" 
           fill="none"
+          opacity="0.7"/>
+    <line x1="${hingeX}" y1="${hingeY}" 
+          x2="${endX}" y2="${endY}" 
+          stroke="${lineColor}" 
+          stroke-width="${lineWidth * 0.75}" 
+          stroke-dasharray="4,2"
           opacity="0.7"/>`
     }).join('\n')
 
@@ -2881,7 +3020,15 @@ ${wallRevealSvg}
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 
         fill="${doorColor}" fill-opacity="1" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
   
-  ${renderSwingArcSVGForBoundingBox(context, offsetX, offsetY, scaledWidth, scaledThickness, opts)}
+  ${renderSwingArcSVGForBoundingBox(
+      context,
+      offsetX,
+      offsetY,
+      scaledWidth,
+      scaledThickness,
+      opts,
+      shouldRenderPlanSwing(context.viewFrame) ? shouldFlipPlanArc(context, context.viewFrame) : false
+  )}
   
   <!-- Front direction arrow -->
   <line x1="${svgWidth / 2}" y1="${arrowY}" x2="${svgWidth / 2}" y2="${arrowEndY}" 

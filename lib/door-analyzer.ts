@@ -27,11 +27,23 @@ export interface OperableDoorLeaves {
     leaves: OperableDoorLeaf[]
 }
 
+export type DeviceVisibilitySide = 'front' | 'back' | 'unknown'
+
+export interface NearbyDeviceVisibility {
+    deviceExpressID: number
+    side: DeviceVisibilitySide
+    overlapScore: number
+    signedDepth: number
+    frontOverlapScore: number
+    backOverlapScore: number
+}
+
 export interface DoorContext {
     door: ElementInfo
     wall: ElementInfo | null
     hostWall: ElementInfo | null
     nearbyDevices: ElementInfo[]
+    nearbyDeviceVisibility: NearbyDeviceVisibility[]
     geometricNormal: THREE.Vector3
     semanticFacing: THREE.Vector3
     viewFrame: DoorViewFrame
@@ -249,6 +261,7 @@ function hasCsetValues(data: CsetStandardCH): boolean {
 type DoorOperationInfo = {
     kind: 'swing' | 'sliding' | 'folding' | 'fixed' | 'none'
     hingeSide: 'left' | 'right' | 'both' | null
+    fixedSide: 'left' | 'right' | null
     swingCapable: boolean
     fixedLabeled: boolean
 }
@@ -258,6 +271,7 @@ function parseDoorOperationType(operationType: string | null): DoorOperationInfo
         return {
             kind: 'none',
             hingeSide: null,
+            fixedSide: null,
             swingCapable: false,
             fixedLabeled: false,
         }
@@ -265,33 +279,33 @@ function parseDoorOperationType(operationType: string | null): DoorOperationInfo
 
     const upper = operationType.toUpperCase()
     if (upper.includes('SWING_FIXED_LEFT')) {
-        return { kind: 'fixed', hingeSide: 'left', swingCapable: true, fixedLabeled: true }
+        return { kind: 'fixed', hingeSide: 'left', fixedSide: 'right', swingCapable: true, fixedLabeled: true }
     }
     if (upper.includes('SWING_FIXED_RIGHT')) {
-        return { kind: 'fixed', hingeSide: 'right', swingCapable: true, fixedLabeled: true }
+        return { kind: 'fixed', hingeSide: 'right', fixedSide: 'left', swingCapable: true, fixedLabeled: true }
     }
     if (upper.includes('SINGLE_SWING_LEFT') || upper === 'SINGLE_SWING_LEFT') {
-        return { kind: 'swing', hingeSide: 'left', swingCapable: true, fixedLabeled: false }
+        return { kind: 'swing', hingeSide: 'left', fixedSide: null, swingCapable: true, fixedLabeled: false }
     }
     if (upper.includes('SINGLE_SWING_RIGHT') || upper === 'SINGLE_SWING_RIGHT') {
-        return { kind: 'swing', hingeSide: 'right', swingCapable: true, fixedLabeled: false }
+        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false }
     }
-    if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING')) {
-        return { kind: 'swing', hingeSide: 'both', swingCapable: true, fixedLabeled: false }
+    if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING') || upper === 'DOUBLE_SWING') {
+        return { kind: 'swing', hingeSide: 'both', fixedSide: null, swingCapable: true, fixedLabeled: false }
     }
     if (upper.includes('SLIDING') && !upper.includes('FOLDING')) {
-        return { kind: 'sliding', hingeSide: null, swingCapable: false, fixedLabeled: false }
+        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false }
     }
     if (upper.includes('FOLDING')) {
-        return { kind: 'folding', hingeSide: null, swingCapable: false, fixedLabeled: false }
+        return { kind: 'folding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false }
     }
     if (upper.includes('FIXED')) {
-        return { kind: 'fixed', hingeSide: null, swingCapable: false, fixedLabeled: true }
+        return { kind: 'fixed', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: true }
     }
     if (upper.includes('SWING')) {
-        return { kind: 'swing', hingeSide: 'right', swingCapable: true, fixedLabeled: false }
+        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false }
     }
-    return { kind: 'none', hingeSide: null, swingCapable: false, fixedLabeled: false }
+    return { kind: 'none', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false }
 }
 
 function resolveOperableLeaves(
@@ -314,6 +328,16 @@ function resolveOperableLeaves(
         return undefined
     }
 
+    const singleLeafHingeSide = operation.hingeSide === 'both' ? null : operation.hingeSide
+    const operableSpanWidth =
+        clearWidth !== null
+        && Number.isFinite(clearWidth)
+        && clearWidth > 0.01
+        && clearWidth < safeTotalWidth - 0.01
+            ? clearWidth
+            : safeTotalWidth
+    const fixedRemainder = Math.max(safeTotalWidth - operableSpanWidth, 0)
+
     const buildLeavesResult = (
         source: OperableDoorLeaves['source'],
         leaves: OperableDoorLeaf[]
@@ -328,42 +352,98 @@ function resolveOperableLeaves(
         }
     }
 
+    const getOpeningCenterOffset = (panelPosition?: string | null): number => {
+        if (operation.fixedSide === 'left') {
+            return fixedRemainder / 2
+        }
+        if (operation.fixedSide === 'right') {
+            return -fixedRemainder / 2
+        }
+        if (panelPosition === 'RIGHT') {
+            return fixedRemainder / 2
+        }
+        if (panelPosition === 'LEFT') {
+            return -fixedRemainder / 2
+        }
+        return 0
+    }
+
+    const buildSingleLeaf = (
+        source: OperableDoorLeaves['source'],
+        width: number,
+        panelPosition?: string | null,
+        openingSpanWidth = operableSpanWidth
+    ): OperableDoorLeaves | undefined => {
+        if (!singleLeafHingeSide) return undefined
+        const openingCenterOffset = getOpeningCenterOffset(panelPosition)
+        const openingLeftEdge = openingCenterOffset - openingSpanWidth / 2
+        const openingRightEdge = openingCenterOffset + openingSpanWidth / 2
+        return buildLeavesResult(source, [{
+            width: Math.min(width, openingSpanWidth),
+            hingeSide: singleLeafHingeSide,
+            hingeOffsetFromCenter: singleLeafHingeSide === 'left' ? openingLeftEdge : openingRightEdge,
+        }])
+    }
+
     const panels = (leafMetadata?.panels || []).filter((panel) => {
         if (!panel.operation) return true
         return !panel.operation.includes('FIXED')
     })
 
+    const getPanelWidth = (position?: string | null): number | null => {
+        const panel = panels.find((candidate) =>
+            (!position || candidate.position === position)
+            && candidate.widthRatio !== null
+            && candidate.widthRatio !== undefined
+            && candidate.widthRatio > 0.01
+            && candidate.widthRatio < 0.999
+        )
+        return panel?.widthRatio ? safeTotalWidth * panel.widthRatio : null
+    }
+
     if (operation.hingeSide === 'both') {
         const leftPanel = panels.find((panel) => panel.position === 'LEFT')
         const rightPanel = panels.find((panel) => panel.position === 'RIGHT')
         if (leftPanel?.widthRatio && rightPanel?.widthRatio) {
-            const leftWidth = safeTotalWidth * leftPanel.widthRatio
-            const rightWidth = safeTotalWidth * rightPanel.widthRatio
+            const totalRatio = leftPanel.widthRatio + rightPanel.widthRatio
+            const leftWidth = operableSpanWidth * (leftPanel.widthRatio / totalRatio)
+            const rightWidth = operableSpanWidth * (rightPanel.widthRatio / totalRatio)
             return buildLeavesResult('ifc-panels', [
-                { width: leftWidth, hingeSide: 'left', hingeOffsetFromCenter: -safeTotalWidth / 2 },
-                { width: rightWidth, hingeSide: 'right', hingeOffsetFromCenter: safeTotalWidth / 2 },
+                { width: leftWidth, hingeSide: 'left', hingeOffsetFromCenter: -operableSpanWidth / 2 },
+                { width: rightWidth, hingeSide: 'right', hingeOffsetFromCenter: operableSpanWidth / 2 },
             ])
         }
         return buildLeavesResult('cset-clear-width', [
-            { width: safeTotalWidth / 2, hingeSide: 'left', hingeOffsetFromCenter: -safeTotalWidth / 2 },
-            { width: safeTotalWidth / 2, hingeSide: 'right', hingeOffsetFromCenter: safeTotalWidth / 2 },
+            { width: operableSpanWidth / 2, hingeSide: 'left', hingeOffsetFromCenter: -operableSpanWidth / 2 },
+            { width: operableSpanWidth / 2, hingeSide: 'right', hingeOffsetFromCenter: operableSpanWidth / 2 },
         ])
     }
 
-    const preferredPanel = panels.find((panel) => panel.position === (operation.hingeSide === 'left' ? 'LEFT' : 'RIGHT'))
-        || panels.find((panel) => panel.widthRatio !== null && panel.widthRatio !== undefined && panel.widthRatio < 0.999)
-        || panels[0]
+    const preferredPanel = operation.fixedSide === 'left'
+        ? panels.find((panel) => panel.position === 'RIGHT')
+        : operation.fixedSide === 'right'
+            ? panels.find((panel) => panel.position === 'LEFT')
+            : panels.find((panel) => panel.position === 'MIDDLE')
+                || panels.find((panel) =>
+                    panel.position === (singleLeafHingeSide === 'left' ? 'LEFT' : 'RIGHT')
+                )
+                || panels.find((panel) =>
+                    panel.widthRatio !== null
+                    && panel.widthRatio !== undefined
+                    && panel.widthRatio > 0.01
+                    && panel.widthRatio < 0.999
+                )
+                || panels[0]
     const panelWidth = preferredPanel?.widthRatio !== null && preferredPanel?.widthRatio !== undefined
         ? safeTotalWidth * preferredPanel.widthRatio
         : null
+    const asymmetricPanelPosition = (
+        preferredPanel?.position === 'LEFT' || preferredPanel?.position === 'RIGHT'
+    ) && panelWidth && panelWidth < safeTotalWidth - 0.01
+        ? preferredPanel.position
+        : null
     if (panelWidth && panelWidth > 0.01 && panelWidth < safeTotalWidth - 0.01) {
-        return buildLeavesResult('ifc-panels', [
-            {
-                width: panelWidth,
-                hingeSide: operation.hingeSide,
-                hingeOffsetFromCenter: operation.hingeSide === 'left' ? -safeTotalWidth / 2 : safeTotalWidth / 2,
-            },
-        ])
+        return buildSingleLeaf('ifc-panels', panelWidth, asymmetricPanelPosition, panelWidth)
     }
 
     const upper = openingDirection?.toUpperCase() || ''
@@ -374,29 +454,13 @@ function resolveOperableLeaves(
         && (
             upper.includes('SWING_FIXED_LEFT')
             || upper.includes('SWING_FIXED_RIGHT')
-            || (upper.includes('SINGLE_SWING_LEFT') || upper.includes('SINGLE_SWING_RIGHT'))
+            || operation.fixedSide !== null
         )
     ) {
-        return buildLeavesResult('cset-clear-width', [
-            {
-                width: clearWidth,
-                hingeSide: operation.hingeSide,
-                hingeOffsetFromCenter: operation.hingeSide === 'left' ? -safeTotalWidth / 2 : safeTotalWidth / 2,
-            },
-        ])
+        return buildSingleLeaf('cset-clear-width', clearWidth, operation.fixedSide ? asymmetricPanelPosition : null, clearWidth)
     }
 
-    if (operation.fixedLabeled) {
-        return undefined
-    }
-
-    return buildLeavesResult('cset-clear-width', [
-        {
-            width: safeTotalWidth,
-            hingeSide: operation.hingeSide,
-            hingeOffsetFromCenter: operation.hingeSide === 'left' ? -safeTotalWidth / 2 : safeTotalWidth / 2,
-        },
-    ])
+    return buildSingleLeaf('cset-clear-width', safeTotalWidth, operation.fixedSide ? asymmetricPanelPosition : null, safeTotalWidth)
 }
 
 async function getDoorCsetStandardCH(
@@ -824,6 +888,136 @@ function measureBoxInFrame(
 
 function rangesOverlap(minA: number, maxA: number, minB: number, maxB: number): boolean {
     return Math.min(maxA, maxB) >= Math.max(minA, minB)
+}
+
+function measureBoxAlongAxis(box: THREE.Box3, axis: THREE.Vector3): { min: number; max: number } {
+    const corners = [
+        new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ]
+
+    let min = Infinity
+    let max = -Infinity
+    for (const corner of corners) {
+        const projection = corner.dot(axis)
+        min = Math.min(min, projection)
+        max = Math.max(max, projection)
+    }
+    return { min, max }
+}
+
+function getIntervalOverlapLength(
+    minA: number,
+    maxA: number,
+    minB: number,
+    maxB: number
+): number {
+    return Math.max(0, Math.min(maxA, maxB) - Math.max(minA, minB))
+}
+
+function classifyNearbyDeviceVisibility(
+    device: ElementInfo,
+    hostWall: ElementInfo | null,
+    viewFrame: DoorViewFrame
+): NearbyDeviceVisibility {
+    const fallback: NearbyDeviceVisibility = {
+        deviceExpressID: device.expressID,
+        side: 'unknown',
+        overlapScore: 0,
+        signedDepth: 0,
+        frontOverlapScore: 0,
+        backOverlapScore: 0,
+    }
+
+    const deviceBox = device.boundingBox
+    const wallBox = hostWall?.boundingBox
+    if (!deviceBox) {
+        return fallback
+    }
+
+    const facingAxis = viewFrame.semanticFacing.clone().normalize()
+    const deviceInterval = measureBoxAlongAxis(deviceBox, facingAxis)
+    const deviceMid = (deviceInterval.min + deviceInterval.max) / 2
+    const deviceDepth = Math.max(deviceInterval.max - deviceInterval.min, 0.02)
+
+    if (!wallBox) {
+        const signedDepth = deviceMid - viewFrame.origin.dot(facingAxis)
+        const depthDecisionThreshold = Math.max(0.02, Math.min(viewFrame.thickness, deviceDepth) * 0.25)
+        const side: DeviceVisibilitySide =
+            signedDepth > depthDecisionThreshold
+                ? 'front'
+                : signedDepth < -depthDecisionThreshold
+                    ? 'back'
+                    : 'unknown'
+
+        return {
+            deviceExpressID: device.expressID,
+            side,
+            overlapScore: 0,
+            signedDepth,
+            frontOverlapScore: 0,
+            backOverlapScore: 0,
+        }
+    }
+
+    const wallInterval = measureBoxAlongAxis(wallBox, facingAxis)
+    const wallDepth = wallInterval.max - wallInterval.min
+    if (!Number.isFinite(wallDepth) || wallDepth <= 1e-4) {
+        return fallback
+    }
+
+    const faceBandDepth = THREE.MathUtils.clamp(wallDepth * 0.35, 0.06, 0.18)
+    const frontBand = {
+        min: wallInterval.max - faceBandDepth,
+        max: wallInterval.max,
+    }
+    const backBand = {
+        min: wallInterval.min,
+        max: wallInterval.min + faceBandDepth,
+    }
+    const frontOverlapScore = getIntervalOverlapLength(
+        deviceInterval.min,
+        deviceInterval.max,
+        frontBand.min,
+        frontBand.max
+    )
+    const backOverlapScore = getIntervalOverlapLength(
+        deviceInterval.min,
+        deviceInterval.max,
+        backBand.min,
+        backBand.max
+    )
+
+    const wallMid = (wallInterval.min + wallInterval.max) / 2
+    const signedDepth = deviceMid - wallMid
+    const overlapScore = Math.max(frontOverlapScore, backOverlapScore)
+    const overlapDelta = Math.abs(frontOverlapScore - backOverlapScore)
+    const overlapDecisionThreshold = Math.max(0.015, faceBandDepth * 0.12)
+    const depthDecisionThreshold = Math.max(0.02, wallDepth * 0.08)
+
+    let side: DeviceVisibilitySide = 'unknown'
+    if (overlapScore > 0 && overlapDelta > overlapDecisionThreshold) {
+        side = frontOverlapScore > backOverlapScore ? 'front' : 'back'
+    } else if (signedDepth > depthDecisionThreshold) {
+        side = 'front'
+    } else if (signedDepth < -depthDecisionThreshold) {
+        side = 'back'
+    }
+
+    return {
+        deviceExpressID: device.expressID,
+        side,
+        overlapScore,
+        signedDepth,
+        frontOverlapScore,
+        backOverlapScore,
+    }
 }
 
 function measureMeshesInFrame(
@@ -1361,6 +1555,9 @@ export async function analyzeDoors(
         const semanticFacing = doorNormal.clone()
         const viewFrame = buildDoorViewFrame(door, semanticFacing)
         const nearbyDevices = findNearbyDevices(door, devices, geometricNormal, hostWall, viewFrame)
+        const nearbyDeviceVisibility = nearbyDevices.map((device) =>
+            classifyNearbyDeviceVisibility(device, hostWall, viewFrame)
+        )
 
         const center = door.boundingBox
             ? door.boundingBox.getCenter(new THREE.Vector3())
@@ -1391,6 +1588,7 @@ export async function analyzeDoors(
             wall: null, // Legacy field
             hostWall,
             nearbyDevices,
+            nearbyDeviceVisibility,
             geometricNormal,
             semanticFacing,
             viewFrame,
