@@ -1908,8 +1908,6 @@ function renderTitleBlock(
 
     let currentY = startY + padding + fontSize
     const leftX = padding
-    /** Left edge of the Typ/ID column — weiter Zeilen bündig darunter. */
-    const typeColumnX = leftX + 250
     /** Vertikaler Abstand zwischen aufeinanderfolgenden Textzeilen (eine Zeile = nächste Baseline). */
     const lineStep = fontSize * 1.5
 
@@ -1921,19 +1919,15 @@ function renderTitleBlock(
     }
     const localizedViewType = viewTypeMap[viewType] || viewType
 
-    // 1. View Title & Type Name (instead of ID)
+    // 1. View Title (Typ-/ID-Zeile bewusst weggelassen)
     if (showLabels) {
         content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="bold" fill="#000000">${localizedViewType}</text>`
-
-        const typeLabel = escapeSvgText(context.doorTypeName ? context.doorTypeName : context.doorId)
-        const labelPrefix = context.doorTypeName ? "Typ" : "ID"
-        content += `    <text x="${typeColumnX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${labelPrefix}: ${typeLabel}</text>`
         currentY += lineStep
 
-        // 2. Opening Direction (if valid) — bündig mit Typ-Spalte
+        // 2. Opening Direction (if valid) — links wie Anschriftstitel
         if (context.openingDirection && (viewType === 'Front' || viewType === 'Back')) {
             const dirText = escapeSvgText(formatOpeningDirection(context.openingDirection))
-            content += `    <text x="${typeColumnX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
+            content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
             currentY += lineStep
         }
     }
@@ -1944,8 +1938,8 @@ function renderTitleBlock(
     if (showLegend && (hasDevices || hasWall)) {
         currentY += showLabels ? lineStep * 0.15 : lineStep
 
-        // Nur Farbfelder + Bezeichnungen (ohne „LEGENDE:“-Titel), bündig Typ-Spalte
-        let legendX = typeColumnX
+        // Nur Farbfelder + Bezeichnungen (ohne „LEGENDE:“-Titel), links wie Anschriftstitel
+        let legendX = leftX
         const items = [
             { color: options.doorColor, text: 'Tür' },
         ]
