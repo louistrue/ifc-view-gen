@@ -69,6 +69,8 @@ interface ProjectedPolygon {
     layer: number
 }
 
+type PolygonCullMode = 'camera-facing' | 'none'
+
 interface AxisBounds {
     minA: number
     maxA: number
@@ -375,7 +377,8 @@ function extractPolygons(
     color: string,
     width: number,
     height: number,
-    layer: number = 0
+    layer: number = 0,
+    cullMode: PolygonCullMode = 'camera-facing'
 ): ProjectedPolygon[] {
     const polygons: ProjectedPolygon[] = []
 
@@ -415,10 +418,9 @@ function extractPolygons(
         const edge2 = p3.clone().sub(p1)
         const faceNormal = edge1.cross(edge2).normalize()
 
-        // Skip back-facing triangles
-        // NOTE: For cut views, backface culling might be tricky if we look 'inside' the mesh
-        // But for consistency with elevation, let's keep it for now.
-        if (faceNormal.dot(cameraDir) > 0.1) {
+        // Elevation fills should not disappear just because the camera flips to the
+        // opposite side of a thin or single-sided mesh (common for glazing panels).
+        if (cullMode === 'camera-facing' && faceNormal.dot(cameraDir) > 0.1) {
             return
         }
 
@@ -480,7 +482,8 @@ function collectProjectedGeometry(
     width: number,
     height: number,
     clipZ: boolean,
-    layer: number
+    layer: number,
+    polygonCullMode: PolygonCullMode = 'camera-facing'
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const edges: ProjectedEdge[] = []
     const polygons: ProjectedPolygon[] = []
@@ -495,7 +498,7 @@ function collectProjectedGeometry(
             edges.push(...extractEdges(mesh, camera, options.lineColor, width, height, clipZ, layer))
 
             if (options.showFills) {
-                polygons.push(...extractPolygons(mesh, camera, color, width, height, layer))
+                polygons.push(...extractPolygons(mesh, camera, color, width, height, layer, polygonCullMode))
             }
         } catch (error) {
             console.warn('Failed to extract geometry from mesh:', error)
@@ -1760,7 +1763,17 @@ function renderElevationFromMeshes(
     camera.updateProjectionMatrix()
     camera.updateMatrixWorld()
 
-    const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, width, height, false, 0)
+    const renderGeometry = collectProjectedGeometry(
+        renderMeshes,
+        context,
+        opts,
+        camera,
+        width,
+        height,
+        false,
+        0,
+        'none'
+    )
     const wallGeometry = createSemanticElevationWallGeometry(context, camera, width, height, opts)
     renderGeometry.edges.push(...wallGeometry.edges)
     renderGeometry.polygons.push(...wallGeometry.polygons)
@@ -2318,7 +2331,17 @@ function renderPlanFromMeshes(
     const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
 
     const wallGeometry = createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
-    const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, frustumWidth, frustumHeight, true, 0)
+    const renderGeometry = collectProjectedGeometry(
+        renderMeshes,
+        context,
+        opts,
+        camera,
+        frustumWidth,
+        frustumHeight,
+        true,
+        0,
+        'camera-facing'
+    )
     renderGeometry.edges.push(...wallGeometry.edges)
     renderGeometry.polygons.push(...wallGeometry.polygons)
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
