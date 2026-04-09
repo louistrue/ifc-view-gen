@@ -1372,7 +1372,8 @@ function getStoreyMarkerLabel(context: DoorContext | null, viewType: string): st
     }
 
     const label = context.storeyName?.trim()
-    return label ? label : null
+    if (!label) return null
+    return label.length > 4 ? label.slice(0, 4) : label
 }
 
 function renderStoreyMarkerSvg(
@@ -1385,7 +1386,8 @@ function renderStoreyMarkerSvg(
 ): string {
     const triangleWidth = Math.max(fontSize, 12)
     const triangleHeight = Math.max(fontSize * 0.9, 10)
-    const textY = anchorY + fontSize + 8
+    // Text oberhalb des nach unten zeigenden Dreiecks (oberhalb der oberen Kante)
+    const textY = anchorY - triangleHeight - 8
     const labelWidthEstimate = Math.max(label.length * fontSize * 0.58, triangleWidth)
     const safeHalfWidth = labelWidthEstimate / 2 + 6
     const minAnchorX = safeHalfWidth
