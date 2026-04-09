@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
 import * as WebIFC from 'web-ifc'
-import type { DoorCsetStandardCHData } from './ifc-loader'
+import type { DoorCsetStandardCHData, DoorLeafMetadata } from './ifc-loader'
 
 export interface DoorViewFrame {
     origin: THREE.Vector3
@@ -54,6 +54,10 @@ export interface DoorContext {
         gebaeude: string | null
         feuerwiderstand: string | null
         bauschalldaemmmass: string | null
+        festverglasung: string | null
+        /** Cset_StandardCH: "CFC / BKP / CCC / BCC" (normalized IFC name cfcbkpcccbcc) */
+        cfcBkpCccBcc: string | null
+        isExternal: string | null
     }
     operableLeaves?: OperableDoorLeaves
 
@@ -63,6 +67,14 @@ export interface DoorContext {
         wallMeshes: THREE.Mesh[]
         deviceMeshes: THREE.Mesh[]
     }
+}
+
+/** `Geschoss_Geometrietyp` für optionale Airtable-Spalten (z. B. „Geometry type“); nur wenn Geschoss und IFC-Geometrietyp gesetzt. */
+export function geschossGeometrietypForAirtable(door: DoorContext): string | undefined {
+    const g = door.csetStandardCH?.geometryType?.trim()
+    const s = door.storeyName?.trim()
+    if (s && g) return `${s}_${g}`
+    return undefined
 }
 
 function unwrapIfcValue(raw: unknown): unknown {
@@ -106,6 +118,9 @@ type CsetStandardCH = {
     gebaeude: string | null
     feuerwiderstand: string | null
     bauschalldaemmmass: string | null
+    festverglasung: string | null
+    cfcBkpCccBcc: string | null
+    isExternal: string | null
 }
 
 function emptyCsetStandardCH(): CsetStandardCH {
@@ -122,6 +137,9 @@ function emptyCsetStandardCH(): CsetStandardCH {
         gebaeude: null,
         feuerwiderstand: null,
         bauschalldaemmmass: null,
+        festverglasung: null,
+        cfcBkpCccBcc: null,
+        isExternal: null,
     }
 }
 
@@ -133,6 +151,27 @@ const CSET_PROP_ALIASES: Record<string, string> = {
     massrohebreite: 'rb',
     massrohhoehe: 'rh',
     massrohehoehe: 'rh',
+    isexterior: 'isexternal',
+}
+
+/** IFC-style boolean display (IsExternal etc.): TRUE / FALSE */
+function formatIfcBooleanLikeString(raw: unknown): string | null {
+    const v = unwrapIfcValue(raw)
+    if (v === true) return 'TRUE'
+    if (v === false) return 'FALSE'
+    if (typeof v === 'number' && Number.isFinite(v)) {
+        if (v === 1) return 'TRUE'
+        if (v === 0) return 'FALSE'
+    }
+    if (typeof v === 'string') {
+        const t = v.trim()
+        if (!t) return null
+        const lower = t.toLowerCase().replace(/\./g, '')
+        if (lower === 'true' || lower === 't' || lower === 'ja' || lower === 'yes' || lower === '1' || lower === 'wahr') return 'TRUE'
+        if (lower === 'false' || lower === 'f' || lower === 'nein' || lower === 'no' || lower === '0' || lower === 'falsch') return 'FALSE'
+        return t
+    }
+    return null
 }
 
 function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue: unknown) {
@@ -173,6 +212,19 @@ function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue:
     } else if (normalized === 'bauschalldammmass' || normalized === 'bauschalldaemmmass') {
         const value = unwrapIfcValue(rawValue)
         if (typeof value === 'string' && value.trim()) target.bauschalldaemmmass = value.trim()
+    } else if (normalized === 'festverglasung') {
+        const value = unwrapIfcValue(rawValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.festverglasung = s
+    } else if (normalized === 'cfcbkpcccbcc') {
+        const value = unwrapIfcValue(rawValue)
+        if (value == null || value === '') return
+        const s = typeof value === 'string' ? value.trim() : String(value).trim()
+        if (s) target.cfcBkpCccBcc = s
+    } else if (normalized === 'isexternal') {
+        const s = formatIfcBooleanLikeString(rawValue)
+        if (s) target.isExternal = s
     }
 }
 
@@ -189,6 +241,162 @@ function hasCsetValues(data: CsetStandardCH): boolean {
         || data.gebaeude !== null
         || data.feuerwiderstand !== null
         || data.bauschalldaemmmass !== null
+        || data.festverglasung !== null
+        || data.cfcBkpCccBcc !== null
+        || data.isExternal !== null
+}
+
+type DoorOperationInfo = {
+    kind: 'swing' | 'sliding' | 'folding' | 'fixed' | 'none'
+    hingeSide: 'left' | 'right' | 'both' | null
+    swingCapable: boolean
+    fixedLabeled: boolean
+}
+
+function parseDoorOperationType(operationType: string | null): DoorOperationInfo {
+    if (!operationType) {
+        return {
+            kind: 'none',
+            hingeSide: null,
+            swingCapable: false,
+            fixedLabeled: false,
+        }
+    }
+
+    const upper = operationType.toUpperCase()
+    if (upper.includes('SWING_FIXED_LEFT')) {
+        return { kind: 'fixed', hingeSide: 'left', swingCapable: true, fixedLabeled: true }
+    }
+    if (upper.includes('SWING_FIXED_RIGHT')) {
+        return { kind: 'fixed', hingeSide: 'right', swingCapable: true, fixedLabeled: true }
+    }
+    if (upper.includes('SINGLE_SWING_LEFT') || upper === 'SINGLE_SWING_LEFT') {
+        return { kind: 'swing', hingeSide: 'left', swingCapable: true, fixedLabeled: false }
+    }
+    if (upper.includes('SINGLE_SWING_RIGHT') || upper === 'SINGLE_SWING_RIGHT') {
+        return { kind: 'swing', hingeSide: 'right', swingCapable: true, fixedLabeled: false }
+    }
+    if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING')) {
+        return { kind: 'swing', hingeSide: 'both', swingCapable: true, fixedLabeled: false }
+    }
+    if (upper.includes('SLIDING') && !upper.includes('FOLDING')) {
+        return { kind: 'sliding', hingeSide: null, swingCapable: false, fixedLabeled: false }
+    }
+    if (upper.includes('FOLDING')) {
+        return { kind: 'folding', hingeSide: null, swingCapable: false, fixedLabeled: false }
+    }
+    if (upper.includes('FIXED')) {
+        return { kind: 'fixed', hingeSide: null, swingCapable: false, fixedLabeled: true }
+    }
+    if (upper.includes('SWING')) {
+        return { kind: 'swing', hingeSide: 'right', swingCapable: true, fixedLabeled: false }
+    }
+    return { kind: 'none', hingeSide: null, swingCapable: false, fixedLabeled: false }
+}
+
+function resolveOperableLeaves(
+    openingDirection: string | null,
+    csetStandardCH: CsetStandardCH | null,
+    leafMetadata: DoorLeafMetadata | undefined,
+    frameWidth: number
+): OperableDoorLeaves | undefined {
+    const operation = parseDoorOperationType(openingDirection)
+
+    const totalWidth =
+        leafMetadata?.overallWidth
+        ?? leafMetadata?.quantityWidth
+        ?? csetStandardCH?.massAussenrahmenBreite
+        ?? frameWidth
+    const safeTotalWidth = Number.isFinite(totalWidth) && totalWidth > 0 ? totalWidth : frameWidth
+    const clearWidth = csetStandardCH?.massDurchgangsbreite ?? null
+
+    if (!Number.isFinite(safeTotalWidth) || safeTotalWidth <= 0 || !operation.swingCapable || !operation.hingeSide) {
+        return undefined
+    }
+
+    const buildLeavesResult = (
+        source: OperableDoorLeaves['source'],
+        leaves: OperableDoorLeaf[]
+    ): OperableDoorLeaves | undefined => {
+        const filtered = leaves.filter((leaf) => Number.isFinite(leaf.width) && leaf.width > 0.01)
+        if (filtered.length === 0) return undefined
+        return {
+            source,
+            totalWidth: safeTotalWidth,
+            clearWidth,
+            leaves: filtered,
+        }
+    }
+
+    const panels = (leafMetadata?.panels || []).filter((panel) => {
+        if (!panel.operation) return true
+        return !panel.operation.includes('FIXED')
+    })
+
+    if (operation.hingeSide === 'both') {
+        const leftPanel = panels.find((panel) => panel.position === 'LEFT')
+        const rightPanel = panels.find((panel) => panel.position === 'RIGHT')
+        if (leftPanel?.widthRatio && rightPanel?.widthRatio) {
+            const leftWidth = safeTotalWidth * leftPanel.widthRatio
+            const rightWidth = safeTotalWidth * rightPanel.widthRatio
+            return buildLeavesResult('ifc-panels', [
+                { width: leftWidth, hingeSide: 'left', hingeOffsetFromCenter: -safeTotalWidth / 2 },
+                { width: rightWidth, hingeSide: 'right', hingeOffsetFromCenter: safeTotalWidth / 2 },
+            ])
+        }
+        return buildLeavesResult('cset-clear-width', [
+            { width: safeTotalWidth / 2, hingeSide: 'left', hingeOffsetFromCenter: -safeTotalWidth / 2 },
+            { width: safeTotalWidth / 2, hingeSide: 'right', hingeOffsetFromCenter: safeTotalWidth / 2 },
+        ])
+    }
+
+    const preferredPanel = panels.find((panel) => panel.position === (operation.hingeSide === 'left' ? 'LEFT' : 'RIGHT'))
+        || panels.find((panel) => panel.widthRatio !== null && panel.widthRatio !== undefined && panel.widthRatio < 0.999)
+        || panels[0]
+    const panelWidth = preferredPanel?.widthRatio !== null && preferredPanel?.widthRatio !== undefined
+        ? safeTotalWidth * preferredPanel.widthRatio
+        : null
+    if (panelWidth && panelWidth > 0.01 && panelWidth < safeTotalWidth - 0.01) {
+        return buildLeavesResult('ifc-panels', [
+            {
+                width: panelWidth,
+                hingeSide: operation.hingeSide,
+                hingeOffsetFromCenter: operation.hingeSide === 'left' ? -safeTotalWidth / 2 : safeTotalWidth / 2,
+            },
+        ])
+    }
+
+    const upper = openingDirection?.toUpperCase() || ''
+    if (
+        clearWidth !== null
+        && clearWidth > 0.01
+        && clearWidth < safeTotalWidth - 0.05
+        && (
+            upper.includes('SWING_FIXED_LEFT')
+            || upper.includes('SWING_FIXED_RIGHT')
+            || (upper.includes('SINGLE_SWING_LEFT') || upper.includes('SINGLE_SWING_RIGHT'))
+        )
+    ) {
+        return buildLeavesResult('cset-clear-width', [
+            {
+                width: clearWidth,
+                hingeSide: operation.hingeSide,
+                hingeOffsetFromCenter: operation.hingeSide === 'left' ? -safeTotalWidth / 2 : safeTotalWidth / 2,
+            },
+        ])
+    }
+
+    if (operation.fixedLabeled) {
+        return undefined
+    }
+
+    return buildLeavesResult('cset-clear-width', [
+        {
+            width: safeTotalWidth,
+            hingeSide: operation.hingeSide,
+            hingeOffsetFromCenter: operation.hingeSide === 'left' ? -safeTotalWidth / 2 : safeTotalWidth / 2,
+        },
+    ])
 }
 
 async function getDoorCsetStandardCH(
@@ -228,6 +436,7 @@ async function getDoorCsetStandardCH(
                     const normalizedPsetName = normalizeIfcPropName(psetName)
                     const isRelevantPset =
                         normalizedPsetName === 'csetstandardch'
+                        || normalizedPsetName === 'psetdoorcommon'
                         || normalizedPsetName.startsWith('al00')
                         || normalizedPsetName.startsWith('in01')
                     if (!isRelevantPset) continue
@@ -266,6 +475,7 @@ async function getDoorCsetStandardCH(
                 const normalizedPsetName = normalizeIfcPropName(psetName)
                 const isRelevantPset =
                     normalizedPsetName === 'csetstandardch'
+                    || normalizedPsetName === 'psetdoorcommon'
                     || normalizedPsetName.startsWith('al00')
                     || normalizedPsetName.startsWith('in01')
                 if (!isRelevantPset) continue
@@ -1079,7 +1289,8 @@ export async function analyzeDoors(
     secondaryModel?: LoadedIFCModel,
     spatialStructure?: any,
     operationTypeMap?: Map<number, string>,
-    csetStandardCHMap?: Map<number, DoorCsetStandardCHData>
+    csetStandardCHMap?: Map<number, DoorCsetStandardCHData>,
+    doorLeafMetadataMap?: Map<number, DoorLeafMetadata>
 ): Promise<DoorContext[]> {
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure)
@@ -1160,6 +1371,12 @@ export async function analyzeDoors(
         // Get opening direction and type name
         const { direction: openingDirection, typeName: baseDoorTypeName } = await getDoorTypeInfo(model, door.expressID, door, operationTypeMap)
         const csetStandardCH = csetStandardCHMap?.get(door.expressID) || await getDoorCsetStandardCH(model, door.expressID)
+        const operableLeaves = resolveOperableLeaves(
+            openingDirection,
+            csetStandardCH,
+            doorLeafMetadataMap?.get(door.expressID),
+            viewFrame.width
+        )
         // UI TYPE filter should use AL00_Tuernummer first.
         const doorTypeName =
             csetStandardCH?.alTuernummer
@@ -1184,6 +1401,7 @@ export async function analyzeDoors(
             doorTypeName,
             storeyName,
             csetStandardCH: csetStandardCH || undefined,
+            operableLeaves,
         })
     }
 

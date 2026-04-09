@@ -2,13 +2,18 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import type { Box3 } from 'three'
-import type { DoorContext } from '@/lib/door-analyzer'
-import { filterDoors } from '@/lib/door-analyzer'
+import { type DoorContext, geschossGeometrietypForAirtable } from '@/lib/door-analyzer'
 import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
 import type { NavigationManager } from '@/lib/navigation-manager'
 import JSZip from 'jszip'
-import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
-import type { SVGRenderOptions } from '@/lib/svg-renderer'
+import {
+  renderDoorViews,
+  renderDoorElevationSVG,
+  renderDoorPlanSVG,
+  DEFAULT_SVG_FONT_FAMILY,
+  type SVGRenderOptions,
+} from '@/lib/svg-renderer'
+import { svgStringToWebpDataUrl } from '@/lib/svg-to-webp'
 import { Settings, ExternalLink, LogOut, Link2, Loader2, Check, X, Download, Upload } from 'lucide-react'
 
 interface AirtableAuthStatus {
@@ -21,9 +26,11 @@ interface AirtableAuthStatus {
 
 interface DoorPanelProps {
   doorContexts: DoorContext[]
-  visibilityManager: ElementVisibilityManager | null
-  navigationManager: NavigationManager | null
+  visibilityManager?: ElementVisibilityManager | null
+  navigationManager?: NavigationManager | null
   resolveDoorBoundingBox?: (door: DoorContext) => Box3 | undefined
+  /** Checkbox selection in the bottom DoorListDock — drives ZIP / Airtable export. */
+  dockSelectedDoorIds?: Set<string>
   modelSource?: string
   onComplete?: () => void
   onShowSingleDoorReady?: (showSingleDoor: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => void
@@ -35,31 +42,12 @@ interface AirtableStatus {
 
 export default function DoorPanel({
   doorContexts,
-  visibilityManager,
-  navigationManager,
-  resolveDoorBoundingBox,
+  dockSelectedDoorIds = new Set<string>(),
   modelSource,
   onComplete,
   onShowSingleDoorReady,
 }: DoorPanelProps) {
-  // Filter state
-  const [searchQuery, setSearchQuery] = useState('')
-  const [selectedStoreys, setSelectedStoreys] = useState<Set<string>>(new Set())
-  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set())
-  const [isolateFiltered, setIsolateFiltered] = useState(false)
-  const [dimFiltered, setDimFiltered] = useState(false)
-
-  // Collapsible sections: TYPE expanded by default, STOREY collapsed
-  const [storeyExpanded, setStoreyExpanded] = useState(false)
-  const [typeExpanded, setTypeExpanded] = useState(true)
-
-  // Selection state
-  const [selectedDoorIds, setSelectedDoorIds] = useState<Set<string>>(new Set())
-  const [hoveredDoorId, setHoveredDoorId] = useState<string | null>(null)
-
   // UI state
-  const [showFilters, setShowFilters] = useState(true)
-  const [showStyleOptions, setShowStyleOptions] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -70,131 +58,33 @@ export default function DoorPanel({
   const [modalImage, setModalImage] = useState<{ svg: string; doorId: string; view: string } | null>(null)
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
-  const [sortField, setSortField] = useState<'door' | 'type' | 'storey'>('door')
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
-
-  // Refs
-  const listContainerRef = useRef<HTMLDivElement>(null)
-  const isControllingVisibilityRef = useRef(false)
-  const visibilitySyncRunIdRef = useRef(0)
-  const visibilityManagerRef = useRef(visibilityManager)
-  visibilityManagerRef.current = visibilityManager
 
   // SVG render options
   const [options, setOptions] = useState<SVGRenderOptions>({
     width: 1000,
     height: 1000,
     margin: 0.5,
-    doorColor: '#333333',
-    wallColor: '#5B7DB1',
-    deviceColor: '#CC0000',
+    doorColor: '#dedede',
+    wallColor: '#e3e3e3',
+    deviceColor: '#fcc647',
     lineWidth: 1.5,
     lineColor: '#000000',
     showFills: true,
     showLegend: true,
     showLabels: true,
-    fontSize: 14,
-    fontFamily: 'Arial',
+    fontSize: 22,
+    fontFamily: DEFAULT_SVG_FONT_FAMILY,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
   })
 
-  // Build additive facet counts: each facet is constrained by the other active facet(s).
-  const availableStoreys = useMemo(() => {
-    const doorsForStoreyFacet = filterDoors(doorContexts, {
-      doorTypes: Array.from(selectedTypes),
-    })
-    const storeys = new Map<string, number>()
-    doorsForStoreyFacet.forEach(door => {
-      if (door.storeyName) {
-        storeys.set(door.storeyName, (storeys.get(door.storeyName) || 0) + 1)
-      }
-    })
-    // Keep selected storeys visible even if they currently have 0 matching doors.
-    selectedStoreys.forEach(storey => {
-      if (!storeys.has(storey)) storeys.set(storey, 0)
-    })
-    return Array.from(storeys.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [doorContexts, selectedTypes, selectedStoreys])
-
-  const availableTypes = useMemo(() => {
-    const doorsForTypeFacet = filterDoors(doorContexts, {
-      storeys: Array.from(selectedStoreys),
-    })
-    const types = new Map<string, number>()
-    doorsForTypeFacet.forEach(door => {
-      if (door.doorTypeName) {
-        types.set(door.doorTypeName, (types.get(door.doorTypeName) || 0) + 1)
-      }
-    })
-    // Keep selected types visible even if they currently have 0 matching doors.
-    selectedTypes.forEach(type => {
-      if (!types.has(type)) types.set(type, 0)
-    })
-    return Array.from(types.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [doorContexts, selectedStoreys, selectedTypes])
-
-  // Apply filters
-  const filteredDoors = useMemo(() => {
-    let result = doorContexts
-
-    // Apply filter function
-    result = filterDoors(result, {
-      doorTypes: Array.from(selectedTypes),
-      storeys: Array.from(selectedStoreys),
-    })
-
-    // Apply search query
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase()
-      result = result.filter(door =>
-        door.doorId.toLowerCase().includes(query) ||
-        (door.door.name?.toLowerCase().includes(query)) ||
-        (door.doorTypeName?.toLowerCase().includes(query)) ||
-        (door.csetStandardCH?.alTuernummer?.toLowerCase().includes(query)) ||
-        (door.storeyName?.toLowerCase().includes(query))
-      )
-    }
-
-    return result
-  }, [doorContexts, selectedTypes, selectedStoreys, searchQuery])
-
-  // Doors to process (selected or filtered)
+  // Dock checkboxes when any; otherwise entire model door list (filter in bottom table)
   const doorsToProcess = useMemo(() => {
-    if (selectedDoorIds.size > 0) {
-      return filteredDoors.filter(d => selectedDoorIds.has(d.doorId))
+    if (dockSelectedDoorIds.size > 0) {
+      return doorContexts.filter(d => dockSelectedDoorIds.has(d.doorId))
     }
-    return filteredDoors
-  }, [filteredDoors, selectedDoorIds])
-
-  const getDoorLabel = useCallback((door: DoorContext) => {
-    return door.csetStandardCH?.alTuernummer
-      || door.door.name
-      || door.doorTypeName
-      || door.doorId
-  }, [])
-
-  const sortedDoors = useMemo(() => {
-    const doors = [...filteredDoors]
-    doors.sort((a, b) => {
-      const aValue =
-        sortField === 'door'
-          ? getDoorLabel(a)
-          : sortField === 'type'
-          ? (a.doorTypeName || '')
-          : (a.storeyName || '')
-      const bValue =
-        sortField === 'door'
-          ? getDoorLabel(b)
-          : sortField === 'type'
-          ? (b.doorTypeName || '')
-          : (b.storeyName || '')
-
-      const compared = aValue.localeCompare(bValue, undefined, { numeric: true, sensitivity: 'base' })
-      return sortDirection === 'asc' ? compared : -compared
-    })
-    return doors
-  }, [filteredDoors, sortField, sortDirection, getDoorLabel])
+    return doorContexts
+  }, [doorContexts, dockSelectedDoorIds])
 
   // Check Airtable OAuth auth status
   const checkAuthStatus = useCallback(() => {
@@ -246,146 +136,6 @@ export default function DoorPanel({
   }
 
   const isAirtableReady = authStatus?.isAuthenticated === true
-
-  // Sync filtered doors with 3D view
-  useEffect(() => {
-    if (!visibilityManager) return
-
-    visibilitySyncRunIdRef.current += 1
-    const runId = visibilitySyncRunIdRef.current
-
-    const run = async () => {
-      try {
-        if (isolateFiltered && filteredDoors.length > 0) {
-          const doorExpressIds = filteredDoors.map(d => d.door.expressID)
-          if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.isolateElements(doorExpressIds, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
-          if (runId !== visibilitySyncRunIdRef.current) return
-          isControllingVisibilityRef.current = true
-        } else if (dimFiltered && filteredDoors.length > 0) {
-          const doorExpressIds = filteredDoors.map(d => d.door.expressID)
-          if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.dimNonSelectedElements(doorExpressIds, 0.3, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
-          if (runId !== visibilitySyncRunIdRef.current) return
-          isControllingVisibilityRef.current = true
-        } else if (isControllingVisibilityRef.current) {
-          if (runId !== visibilitySyncRunIdRef.current) return
-          await visibilityManager.clearSelectionAndDimState()
-          if (runId !== visibilitySyncRunIdRef.current) return
-          isControllingVisibilityRef.current = false
-        }
-      } catch (err) {
-        console.error('[DoorPanel] Visibility sync error:', err)
-      }
-    }
-    run()
-
-    return () => {
-      visibilitySyncRunIdRef.current += 1
-    }
-  }, [filteredDoors, isolateFiltered, dimFiltered, visibilityManager])
-
-  // Unmount-only cleanup: reset visibility state when DoorPanel unmounts
-  useEffect(() => {
-    return () => {
-      const vm = visibilityManagerRef.current
-      if (vm) {
-        vm.clearSelectionAndDimState().catch(() => {})
-      }
-      isControllingVisibilityRef.current = false
-    }
-  }, [])
-
-  // Handle hover - highlight in 3D
-  const handleDoorHover = useCallback((doorId: string | null) => {
-    setHoveredDoorId(doorId)
-
-    if (!visibilityManager) return
-
-    if (doorId === null) {
-      visibilityManager.setHoveredElement(null)
-    } else {
-      const door = doorContexts.find(d => d.doorId === doorId)
-      if (door) {
-        visibilityManager.setHoveredElement(door.door.expressID)
-      }
-    }
-  }, [doorContexts, visibilityManager])
-
-  // Handle door click - zoom to door and highlight it
-  const handleDoorClick = useCallback((door: DoorContext) => {
-    const box = resolveDoorBoundingBox?.(door) ?? door.door.boundingBox
-    if (!navigationManager || !box) return
-
-
-    // Highlight the selected door in 3D
-    if (visibilityManager) {
-      visibilityManager.setSelectedElements([door.door.expressID])
-    }
-
-    // Zoom to door from the front view
-    navigationManager.zoomToElementFromNormal(
-      box,
-      door.normal,
-      2.5
-    )
-  }, [navigationManager, resolveDoorBoundingBox, visibilityManager])
-
-  // Toggle door selection
-  const toggleDoorSelection = useCallback((doorId: string) => {
-    setSelectedDoorIds(prev => {
-      const next = new Set(prev)
-      if (next.has(doorId)) {
-        next.delete(doorId)
-      } else {
-        next.add(doorId)
-      }
-      return next
-    })
-  }, [])
-
-  // Select all filtered doors
-  const selectAllFiltered = useCallback(() => {
-    setSelectedDoorIds(new Set(filteredDoors.map(d => d.doorId)))
-  }, [filteredDoors])
-
-  // Clear selection
-  const clearSelection = useCallback(() => {
-    setSelectedDoorIds(new Set())
-  }, [])
-
-  // Clear all filters
-  const clearFilters = useCallback(() => {
-    setSearchQuery('')
-    setSelectedStoreys(new Set())
-    setSelectedTypes(new Set())
-  }, [])
-
-  // Toggle storey filter
-  const toggleStorey = useCallback((storey: string) => {
-    setSelectedStoreys(prev => {
-      const next = new Set(prev)
-      if (next.has(storey)) {
-        next.delete(storey)
-      } else {
-        next.add(storey)
-      }
-      return next
-    })
-  }, [])
-
-  // Toggle type filter
-  const toggleType = useCallback((type: string) => {
-    setSelectedTypes(prev => {
-      const next = new Set(prev)
-      if (next.has(type)) {
-        next.delete(type)
-      } else {
-        next.add(type)
-      }
-      return next
-    })
-  }, [])
 
   // Show single door preview
   const showSingleDoor = useCallback(
@@ -510,8 +260,11 @@ export default function DoorPanel({
 
       try {
         const { front, back, plan } = await renderDoorViews(door, options)
-        const svgToDataUrl = (svg: string) =>
-          `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+        const [frontView, backView, topView] = await Promise.all([
+          svgStringToWebpDataUrl(front),
+          svgStringToWebpDataUrl(back),
+          svgStringToWebpDataUrl(plan),
+        ])
 
         const response = await fetch('/api/airtable', {
           method: 'POST',
@@ -522,7 +275,9 @@ export default function DoorPanel({
             alTuernummer: door.csetStandardCH?.alTuernummer ?? undefined,
             openingDirection: door.openingDirection || undefined,
             modelSource: modelSource || undefined,
-            geometryType: door.csetStandardCH?.geometryType ?? undefined,
+            geometryType: geschossGeometrietypForAirtable(door),
+            geometryTypeSync: door.csetStandardCH?.geometryType?.trim() || undefined,
+            geschossSync: door.storeyName?.trim() || undefined,
             massDurchgangsbreite: door.csetStandardCH?.massDurchgangsbreite ?? undefined,
             massDurchgangshoehe: door.csetStandardCH?.massDurchgangshoehe ?? undefined,
             massRohbreite: door.csetStandardCH?.massRohbreite ?? undefined,
@@ -531,9 +286,9 @@ export default function DoorPanel({
             massAussenrahmenHoehe: door.csetStandardCH?.massAussenrahmenHoehe ?? undefined,
             feuerwiderstand: door.csetStandardCH?.feuerwiderstand ?? undefined,
             bauschalldaemmmass: door.csetStandardCH?.bauschalldaemmmass ?? undefined,
-            frontView: svgToDataUrl(front),
-            backView: svgToDataUrl(back),
-            topView: svgToDataUrl(plan),
+            frontView,
+            backView,
+            topView,
           }),
         })
 
@@ -628,70 +383,15 @@ export default function DoorPanel({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [showSettings])
 
-  const hasActiveFilters = selectedStoreys.size > 0 || selectedTypes.size > 0 || searchQuery.trim().length > 0
-  const toggleSort = useCallback((field: 'door' | 'type' | 'storey') => {
-    if (sortField === field) {
-      setSortDirection(prevDirection => (prevDirection === 'asc' ? 'desc' : 'asc'))
-      return
-    }
-    setSortField(field)
-    setSortDirection('asc')
-  }, [sortField])
-
-  const sortIndicator = useCallback((field: 'door' | 'type' | 'storey') => {
-    if (sortField !== field) return '↕'
-    return sortDirection === 'asc' ? '↑' : '↓'
-  }, [sortDirection, sortField])
-
   return (
     <div className="door-panel">
       {/* Header */}
       <div className="panel-header">
         <div className="header-title">
           <h2>Doors</h2>
-          <span className="door-count-badge">{filteredDoors.length}</span>
+          <span className="door-count-badge">{doorContexts.length}</span>
         </div>
         <div className="header-actions">
-          <button
-            className={`icon-button ${isolateFiltered ? 'active' : ''}`}
-            aria-label={isolateFiltered ? 'Show all elements' : 'Isolate doors in 3D'}
-            aria-pressed={isolateFiltered}
-            onClick={() => {
-              setIsolateFiltered(prev => !prev)
-              if (!isolateFiltered) setDimFiltered(false)
-            }}
-            title={isolateFiltered ? 'Show all elements' : 'Isolate doors in 3D'}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <circle cx="12" cy="12" r="4" />
-            </svg>
-          </button>
-          <button
-            className={`icon-button ${dimFiltered ? 'active' : ''}`}
-            aria-label={dimFiltered ? 'Show all elements' : 'Dim non-matching elements'}
-            aria-pressed={dimFiltered}
-            onClick={() => {
-              setDimFiltered(prev => !prev)
-              if (!dimFiltered) setIsolateFiltered(false)
-            }}
-            title={dimFiltered ? 'Show all elements' : 'Dim non-matching elements'}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="3" width="18" height="18" rx="2" opacity="0.5" />
-              <rect x="7" y="7" width="10" height="10" rx="1" />
-            </svg>
-          </button>
-          <button
-            className={`icon-button ${showFilters ? 'active' : ''}`}
-            onClick={() => setShowFilters(!showFilters)}
-            title="Toggle filters"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-            </svg>
-            {hasActiveFilters && <span className="filter-badge" />}
-          </button>
           {/* Settings / Airtable button */}
           <div className="settings-wrapper" ref={settingsRef}>
             <button
@@ -755,277 +455,71 @@ export default function DoorPanel({
         </div>
       </div>
 
-      {/* Filter Section */}
-      {showFilters && (
-        <div className="filter-section">
-          {/* Search */}
-          <div className="search-container">
-            <svg className="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
-            <input
-              type="text"
-              placeholder="Search doors..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="search-input"
-            />
-            {searchQuery && (
-              <button className="clear-search" onClick={() => setSearchQuery('')}>×</button>
-            )}
-          </div>
-
-          {/* Storey Filter */}
-          {availableStoreys.length > 0 && (
-            <div className="filter-group">
-              <div
-                className="filter-label collapsible"
-                onClick={() => setStoreyExpanded(!storeyExpanded)}
-                style={{ cursor: 'pointer', userSelect: 'none' }}
-              >
-                <span style={{ marginRight: '6px' }}>
-                  {storeyExpanded ? '▼' : '▶'}
-                </span>
-                Storey
-              </div>
-              {storeyExpanded && (
-                <div className="filter-chips">
-                  {availableStoreys.map(([storey, count]) => (
-                    <button
-                      key={storey}
-                      className={`filter-chip ${selectedStoreys.has(storey) ? 'active' : ''}`}
-                      onClick={() => toggleStorey(storey)}
-                    >
-                      {storey}
-                      <span className="chip-count">{count}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Type Filter */}
-          {availableTypes.length > 0 && (
-            <div className="filter-group">
-              <div
-                className="filter-label collapsible"
-                onClick={() => setTypeExpanded(!typeExpanded)}
-                style={{ cursor: 'pointer', userSelect: 'none' }}
-              >
-                <span style={{ marginRight: '6px' }}>
-                  {typeExpanded ? '▼' : '▶'}
-                </span>
-                Type
-              </div>
-              {typeExpanded && (
-                <div className="filter-chips">
-                  {availableTypes.map(([type, count]) => (
-                    <button
-                      key={type}
-                      className={`filter-chip ${selectedTypes.has(type) ? 'active' : ''}`}
-                      onClick={() => toggleType(type)}
-                    >
-                      {type}
-                      <span className="chip-count">{count}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Clear Filters */}
-          {hasActiveFilters && (
-            <button className="clear-filters" onClick={clearFilters}>
-              Clear all filters
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Selection Controls */}
       <div className="selection-controls">
         <div className="selection-info">
-          {selectedDoorIds.size > 0 ? (
-            <span>{selectedDoorIds.size} selected</span>
+          {dockSelectedDoorIds.size > 0 ? (
+            <span>{dockSelectedDoorIds.size} selected for export</span>
           ) : (
-            <span>{filteredDoors.length} doors</span>
+            <span>{doorContexts.length} doors in model (export all)</span>
           )}
         </div>
-        <div className="selection-actions">
-          <button className="text-button" onClick={selectAllFiltered}>
-            Select all
-          </button>
-          {selectedDoorIds.size > 0 && (
-            <button className="text-button" onClick={clearSelection}>
-              Clear
-            </button>
-          )}
+        <div className="selection-hint">
+          Filter and sort in the bottom table. Use checkboxes to export only selected doors; with none checked, export includes every door above.
         </div>
-      </div>
-
-      {/* Door List */}
-      <div className="door-list" ref={listContainerRef}>
-        {filteredDoors.length === 0 ? (
-          <div className="empty-state">
-            <p>No doors match your filters</p>
-            {hasActiveFilters && (
-              <button className="text-button" onClick={clearFilters}>
-                Clear filters
-              </button>
-            )}
-          </div>
-        ) : (
-          <>
-            <div className="door-list-header">
-              <span />
-              <button className="list-header-button" onClick={() => toggleSort('door')}>
-                <span className="label-text">Door</span>
-                <span className="sort-indicator">{sortIndicator('door')}</span>
-              </button>
-              <button className="list-header-button" onClick={() => toggleSort('type')}>
-                <span className="label-text">Type</span>
-                <span className="sort-indicator">{sortIndicator('type')}</span>
-              </button>
-              <button className="list-header-button" onClick={() => toggleSort('storey')}>
-                <span className="label-text">Storey</span>
-                <span className="sort-indicator">{sortIndicator('storey')}</span>
-              </button>
-              <span>Views</span>
-            </div>
-
-            {sortedDoors.slice(0, 100).map((door) => (
-              <div
-                key={door.doorId}
-                className={`door-row ${selectedDoorIds.has(door.doorId) ? 'selected' : ''} ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
-                onMouseEnter={() => handleDoorHover(door.doorId)}
-                onMouseLeave={() => handleDoorHover(null)}
-              >
-                <label className="door-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={selectedDoorIds.has(door.doorId)}
-                    onChange={() => toggleDoorSelection(door.doorId)}
-                  />
-                  <span className="checkmark" />
-                </label>
-
-                <button className="door-name" onClick={() => handleDoorClick(door)} title={getDoorLabel(door)}>
-                  {getDoorLabel(door)}
-                </button>
-
-                <div className="door-cell muted" title={door.doorTypeName || ''}>
-                  {door.doorTypeName || '—'}
-                </div>
-
-                <div className="door-cell muted" title={door.storeyName || ''}>
-                  {door.storeyName || '—'}
-                </div>
-
-                <div className="door-actions">
-                  <button
-                    className="action-button compact"
-                    onClick={() => handleDoorClick(door)}
-                    title="Zoom to door"
-                  >
-                    +
-                  </button>
-                  <button
-                    className="action-button compact"
-                    onClick={() => showSingleDoor(door, 'front')}
-                    title="Front view"
-                  >
-                    F
-                  </button>
-                  <button
-                    className="action-button compact"
-                    onClick={() => showSingleDoor(door, 'back')}
-                    title="Back view"
-                  >
-                    B
-                  </button>
-                  <button
-                    className="action-button compact"
-                    onClick={() => showSingleDoor(door, 'plan')}
-                    title="Plan view"
-                  >
-                    P
-                  </button>
-                </div>
-              </div>
-            ))}
-          </>
-        )}
-        {sortedDoors.length > 100 && (
-          <div className="more-items">
-            +{sortedDoors.length - 100} more doors
-          </div>
-        )}
       </div>
 
       {/* Export Section */}
       <div className="export-section">
-        {/* Collapsible Style Options */}
-        <button
-          className="section-toggle"
-          onClick={() => setShowStyleOptions(!showStyleOptions)}
-        >
-          <span>Style Options</span>
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            style={{ transform: showStyleOptions ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}
-          >
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </button>
-
-        {showStyleOptions && (
-          <div className="style-options">
-            <div className="option-row">
-              <label>Door</label>
-              <input type="color" value={options.doorColor || '#333333'} onChange={(e) => setOptions({ ...options, doorColor: e.target.value })} />
-            </div>
-            <div className="option-row">
-              <label>Wall</label>
-              <input type="color" value={options.wallColor || '#5B7DB1'} onChange={(e) => setOptions({ ...options, wallColor: e.target.value })} />
-            </div>
-            <div className="option-row">
-              <label>Device</label>
-              <input type="color" value={options.deviceColor || '#CC0000'} onChange={(e) => setOptions({ ...options, deviceColor: e.target.value })} />
-            </div>
-            <div className="option-row">
-              <label>Line Width</label>
-              <input type="number" min="0.5" max="5" step="0.5" value={options.lineWidth || 1.5} onChange={(e) => setOptions({ ...options, lineWidth: parseFloat(e.target.value) })} />
-            </div>
-            <div className="option-row">
-              <label>Wall Sides %</label>
-              <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealSide ?? 0.12) * 100)} onChange={(e) => setOptions({ ...options, wallRevealSide: parseFloat(e.target.value) / 100 })} />
-            </div>
-            <div className="option-row">
-              <label>Wall Top %</label>
-              <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealTop ?? 0.04) * 100)} onChange={(e) => setOptions({ ...options, wallRevealTop: parseFloat(e.target.value) / 100 })} />
-            </div>
-            <div className="option-row checkbox">
-              <label>
-                <input type="checkbox" checked={options.showLegend} onChange={(e) => setOptions({ ...options, showLegend: e.target.checked })} />
-                Show Legend
-              </label>
-            </div>
-            <div className="option-row checkbox">
-              <label>
-                <input type="checkbox" checked={options.showLabels} onChange={(e) => setOptions({ ...options, showLabels: e.target.checked })} />
-                Show Labels
-              </label>
-            </div>
+        <h3 className="style-options-title">Style Options</h3>
+        <div className="style-options">
+          <div className="option-row">
+            <label>Door</label>
+            <input type="color" value={options.doorColor || '#333333'} onChange={(e) => setOptions({ ...options, doorColor: e.target.value })} />
           </div>
-        )}
+          <div className="option-row">
+            <label>Wall</label>
+            <input type="color" value={options.wallColor || '#5B7DB1'} onChange={(e) => setOptions({ ...options, wallColor: e.target.value })} />
+          </div>
+          <div className="option-row">
+            <label>Device</label>
+            <input type="color" value={options.deviceColor || '#CC0000'} onChange={(e) => setOptions({ ...options, deviceColor: e.target.value })} />
+          </div>
+          <div className="option-row">
+            <label>Line Width</label>
+            <input type="number" min="0.5" max="5" step="0.5" value={options.lineWidth || 1.5} onChange={(e) => setOptions({ ...options, lineWidth: parseFloat(e.target.value) })} />
+          </div>
+          <div className="option-row">
+            <label>Wall Sides %</label>
+            <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealSide ?? 0.12) * 100)} onChange={(e) => setOptions({ ...options, wallRevealSide: parseFloat(e.target.value) / 100 })} />
+          </div>
+          <div className="option-row">
+            <label>Wall Top %</label>
+            <input type="number" min="0" max="50" step="1" value={Math.round((options.wallRevealTop ?? 0.04) * 100)} onChange={(e) => setOptions({ ...options, wallRevealTop: parseFloat(e.target.value) / 100 })} />
+          </div>
+          <div className="option-row checkbox">
+            <label>
+              <input type="checkbox" checked={options.showLegend} onChange={(e) => setOptions({ ...options, showLegend: e.target.checked })} />
+              Show Legend
+            </label>
+          </div>
+          <div className="option-row checkbox">
+            <label>
+              <input type="checkbox" checked={options.showLabels} onChange={(e) => setOptions({ ...options, showLabels: e.target.checked })} />
+              Show Labels
+            </label>
+          </div>
+          <div className="option-row">
+            <label>Text px</label>
+            <input
+              type="number"
+              min={8}
+              max={48}
+              step={1}
+              value={options.fontSize ?? 22}
+              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value, 10) || 22 })}
+            />
+          </div>
+        </div>
 
         {/* Progress */}
         {isProcessing && (
@@ -1109,7 +603,7 @@ export default function DoorPanel({
               <button className="close-button" onClick={closeModal}>×</button>
             </div>
             <div className="image-modal-body">
-              <div dangerouslySetInnerHTML={{ __html: modalImage.svg }} />
+              <div className="image-modal-svg-wrap" dangerouslySetInnerHTML={{ __html: modalImage.svg }} />
             </div>
             <div className="image-modal-footer">
               <button className="download-button" onClick={downloadFromModal}>Download</button>
@@ -1124,7 +618,7 @@ export default function DoorPanel({
           display: flex;
           flex-direction: column;
           height: 100%;
-          background: #2a2a2a;
+          background: #1a1a1a;
           color: #fff;
           font-size: 13px;
         }
@@ -1134,8 +628,8 @@ export default function DoorPanel({
           justify-content: space-between;
           align-items: center;
           padding: 12px 16px;
-          border-bottom: 1px solid #444;
-          background: #333;
+          border-bottom: 1px solid #333;
+          background: #1a1a1a;
         }
 
         .header-title {
@@ -1151,8 +645,8 @@ export default function DoorPanel({
         }
 
         .door-count-badge {
-          background: #4ecdc4;
-          color: #1a1a1a;
+          background: #2563eb;
+          color: #fff;
           padding: 2px 8px;
           border-radius: 12px;
           font-size: 12px;
@@ -1190,414 +684,72 @@ export default function DoorPanel({
           color: #1a1a1a;
         }
 
-        .filter-badge {
-          position: absolute;
-          top: -2px;
-          right: -2px;
-          width: 8px;
-          height: 8px;
-          background: #f59e0b;
-          border-radius: 50%;
-        }
-
-        .filter-section {
-          padding: 12px 16px;
-          border-bottom: 1px solid #444;
+        .selection-controls {
           display: flex;
           flex-direction: column;
           gap: 12px;
-        }
-
-        .search-container {
-          position: relative;
-        }
-
-        .search-icon {
-          position: absolute;
-          left: 10px;
-          top: 50%;
-          transform: translateY(-50%);
-          color: #666;
-        }
-
-        .search-input {
-          width: 100%;
-          padding: 8px 32px;
+          padding: 12px 16px;
           background: #1a1a1a;
-          border: 1px solid #444;
-          border-radius: 6px;
-          color: #fff;
-          font-size: 13px;
-        }
-
-        .search-input:focus {
-          outline: none;
-          border-color: #4ecdc4;
-        }
-
-        .clear-search {
-          position: absolute;
-          right: 8px;
-          top: 50%;
-          transform: translateY(-50%);
-          background: none;
-          border: none;
-          color: #666;
-          cursor: pointer;
-          font-size: 16px;
-        }
-
-        .filter-group {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-
-        .filter-label {
           font-size: 11px;
-          text-transform: uppercase;
           color: #888;
-          letter-spacing: 0.5px;
-        }
-
-        .filter-label.collapsible {
-          display: flex;
-          align-items: center;
-          transition: color 0.2s ease;
-        }
-
-        .filter-label.collapsible:hover {
-          color: #aaa;
-        }
-
-        .filter-chips {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 6px;
-        }
-
-        .filter-chip {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          padding: 4px 10px;
-          background: #1a1a1a;
-          border: 1px solid #444;
-          border-radius: 16px;
-          color: #ccc;
-          font-size: 12px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-
-        .filter-chip:hover {
-          border-color: #666;
-        }
-
-        .filter-chip.active {
-          background: #4ecdc4;
-          border-color: #4ecdc4;
-          color: #1a1a1a;
-        }
-
-        .chip-count {
-          font-size: 10px;
-          opacity: 0.7;
-        }
-
-        .clear-filters {
-          background: none;
-          border: none;
-          color: #4ecdc4;
-          font-size: 12px;
-          cursor: pointer;
-          align-self: flex-start;
-          padding: 0;
-        }
-
-        .selection-controls {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 10px 12px;
-          background: #171717;
-          border-bottom: 1px solid #2d2d2d;
-          font-size: 12px;
         }
 
         .selection-info {
+          font-size: 11px;
           color: #888;
         }
 
-        .selection-actions {
-          display: flex;
-          gap: 10px;
-        }
-
-        .text-button {
-          background: #262626;
-          border: 1px solid #3c3c3c;
-          color: #d1d5db;
+        .selection-hint {
           font-size: 11px;
-          border-radius: 999px;
-          cursor: pointer;
-          padding: 4px 10px;
-        }
-
-        .text-button:hover {
-          background: #333;
-          color: #fff;
-        }
-
-        .door-list {
-          flex: 1;
-          overflow-y: auto;
-          padding: 0;
-        }
-
-        .empty-state {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          padding: 32px;
-          color: #666;
-          gap: 12px;
-        }
-
-        .door-list-header {
-          display: grid;
-          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
-          gap: 8px;
-          padding: 8px 12px;
-          background: #1d1d1d;
-          border-bottom: 1px solid #303030;
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          color: #7d7d7d;
-          position: sticky;
-          top: 0;
-          z-index: 5;
-        }
-
-        .door-list-header > span:last-child {
-          text-align: center;
-        }
-
-        .list-header-button {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          width: 100%;
-          min-width: 0;
-          background: none;
-          border: none;
-          color: inherit;
-          cursor: pointer;
-          padding: 0;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          font-size: inherit;
-          font-weight: 600;
-          text-align: left;
-          overflow: hidden;
-        }
-
-        .list-header-button:hover {
-          color: #cbd5e1;
-        }
-
-        .list-header-button .label-text {
-          min-width: 0;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .sort-indicator {
-          font-size: 10px;
-          line-height: 1;
-          color: #94a3b8;
-          flex-shrink: 0;
-          margin-left: 4px;
-        }
-
-        .door-row {
-          display: grid;
-          grid-template-columns: 24px minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
-          gap: 8px;
-          align-items: center;
-          min-height: 36px;
-          padding: 5px 12px;
-          border-bottom: 1px solid #2c2c2c;
-          transition: background 0.15s ease;
-        }
-
-        .door-row:hover, .door-row.hovered {
-          background: #242424;
-        }
-
-        .door-row.selected {
-          background: rgba(37, 99, 235, 0.14);
-        }
-
-        .door-checkbox {
-          position: relative;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .door-checkbox input {
-          width: 16px;
-          height: 16px;
-          opacity: 0;
-          position: absolute;
-          cursor: pointer;
-        }
-
-        .door-checkbox .checkmark {
-          width: 14px;
-          height: 14px;
-          border: 1px solid #606060;
-          border-radius: 4px;
-          background: #1a1a1a;
-          transition: all 0.15s ease;
-          position: relative;
-          display: inline-block;
-        }
-
-        .door-checkbox input:checked + .checkmark {
-          background: #2563eb;
-          border-color: #2563eb;
-        }
-
-        .door-checkbox input:checked + .checkmark::after {
-          content: '';
-          position: absolute;
-          left: 50%;
-          top: 48%;
-          width: 4px;
-          height: 7px;
-          border: solid #fff;
-          border-width: 0 2px 2px 0;
-          transform: translate(-50%, -50%) rotate(45deg);
-        }
-
-        .door-name {
-          border: none;
-          background: none;
-          color: #f3f4f6;
-          text-align: left;
-          font-size: 12px;
-          font-weight: 500;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          cursor: pointer;
-          padding: 0;
-        }
-
-        .door-name:hover {
-          color: #93c5fd;
-        }
-
-        .door-cell {
-          font-size: 11px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .door-cell.muted {
-          color: #9ca3af;
-        }
-
-        .door-actions {
-          display: grid;
-          grid-template-columns: repeat(2, 20px);
-          grid-template-rows: repeat(2, 20px);
-          place-content: center;
-          justify-content: center;
-          gap: 4px;
-        }
-
-        .action-button {
-          width: 20px;
-          height: 20px;
-          border: 1px solid #4b5563;
-          background: #2d2d2d;
-          border-radius: 5px;
-          color: #d1d5db;
-          font-size: 9px;
-          font-weight: 700;
-          line-height: 1;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          transition: all 0.15s ease;
-          padding: 0;
-        }
-
-        .action-button:hover {
-          background: #374151;
-          border-color: #6b7280;
-          color: #fff;
-        }
-
-        .action-button.compact {
-          min-width: 20px;
-        }
-
-        .more-items {
-          text-align: center;
-          padding: 12px;
-          color: #666;
-          font-size: 12px;
+          line-height: 1.5;
+          color: #888;
         }
 
         .export-section {
-          border-top: 1px solid #444;
+          border-top: 1px solid #333;
           padding: 12px 16px;
-          background: #333;
+          background: #1a1a1a;
         }
 
-        .section-toggle {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          width: 100%;
-          padding: 8px 0;
-          background: none;
-          border: none;
-          color: #aaa;
+        .style-options-title {
+          margin: 0 0 10px;
           font-size: 12px;
-          cursor: pointer;
-        }
-
-        .section-toggle:hover {
-          color: #fff;
+          font-weight: 600;
+          color: #aaa;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
         }
 
         .style-options {
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 8px;
-          padding: 12px 0;
+          gap: 11px 12px;
+          padding: 8px 0 12px;
         }
 
         .option-row {
           display: flex;
           align-items: center;
-          gap: 8px;
+          gap: 14px;
         }
 
-        .option-row label {
+        .option-row:not(.checkbox) {
+          width: 100%;
+          min-width: 0;
+        }
+
+        .option-row:not(.checkbox) label {
           font-size: 11px;
           color: #888;
-          min-width: 50px;
+          min-width: 0;
+          flex: 1;
+          text-align: left;
+        }
+
+        .option-row:not(.checkbox) input[type="color"],
+        .option-row:not(.checkbox) input[type="number"] {
+          flex-shrink: 0;
+          margin-left: auto;
         }
 
         .option-row input[type="color"] {
@@ -1609,13 +761,25 @@ export default function DoorPanel({
         }
 
         .option-row input[type="number"] {
-          width: 60px;
-          padding: 4px 6px;
+          width: 32px;
+          height: 24px;
+          padding: 0 1px;
           background: #1a1a1a;
           border: 1px solid #444;
           border-radius: 4px;
-          color: #fff;
-          font-size: 12px;
+          color: #888;
+          font-size: 9px;
+          font-weight: 500;
+          letter-spacing: 0;
+          text-align: center;
+          box-sizing: border-box;
+          -moz-appearance: textfield;
+        }
+
+        .option-row input[type="number"]::-webkit-outer-spin-button,
+        .option-row input[type="number"]::-webkit-inner-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
         }
 
         .option-row.checkbox {
@@ -1627,6 +791,8 @@ export default function DoorPanel({
           align-items: center;
           gap: 6px;
           min-width: auto;
+          font-size: 11px;
+          color: #888;
         }
 
         .progress-container {
@@ -1808,18 +974,29 @@ export default function DoorPanel({
         .image-modal {
           background: #1a1a1a;
           border-radius: 12px;
-          max-width: 90vw;
-          max-height: 90vh;
+          width: min(95vw, calc(100vw - 2rem));
+          height: min(92vh, calc(100vh - 2rem));
+          max-width: 95vw;
+          max-height: min(92vh, calc(100vh - 2rem));
           display: flex;
           flex-direction: column;
           overflow: hidden;
+          min-height: 0;
+        }
+
+        @supports (height: 100dvh) {
+          .image-modal {
+            height: min(92vh, calc(100dvh - 2rem));
+            max-height: min(92vh, calc(100dvh - 2rem));
+          }
         }
 
         .image-modal-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 16px 20px;
+          flex-shrink: 0;
+          padding: 10px 16px;
           border-bottom: 1px solid #333;
         }
 
@@ -1831,28 +1008,38 @@ export default function DoorPanel({
         .image-modal-body {
           flex: 1;
           min-height: 0;
+          min-width: 0;
           overflow: hidden;
-          padding: 20px;
+          padding: 10px 12px;
           background: #fff;
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .image-modal-svg-wrap {
+          flex: 1;
+          min-height: 0;
+          min-width: 0;
           display: flex;
           align-items: center;
           justify-content: center;
         }
 
-        .image-modal-body :global(svg) {
+        .image-modal-svg-wrap :global(svg) {
           display: block;
           max-width: 100%;
           max-height: 100%;
           width: auto;
           height: auto;
-          object-fit: contain;
         }
 
         .image-modal-footer {
           display: flex;
+          flex-shrink: 0;
           gap: 12px;
           justify-content: flex-end;
-          padding: 16px 20px;
+          padding: 10px 16px;
           border-top: 1px solid #333;
         }
 

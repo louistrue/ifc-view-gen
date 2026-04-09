@@ -6,6 +6,7 @@ import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { loadIFCModelWithMetadata } from '@/lib/ifc-loader'
 import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
+import type { DoorCsetStandardCHData, DoorLeafMetadata } from '@/lib/ifc-loader'
 import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
@@ -20,6 +21,21 @@ import SpatialHierarchyPanel from './SpatialHierarchyPanel'
 import TypeFilterPanel from './TypeFilterPanel'
 import IFCClassFilterPanel from './IFCClassFilterPanel'
 import DoorListDock from './DoorListDock'
+
+/** Skip viewer shortcuts while typing in form fields so keys like 1–7 don't change the camera. */
+function isKeyboardEventFromEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  const tag = target.tagName
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (tag === 'INPUT') {
+    const input = target as HTMLInputElement
+    if (input.disabled || input.readOnly) return false
+    const type = input.type
+    return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].includes(type)
+  }
+  return false
+}
 
 export default function IFCViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -50,7 +66,7 @@ export default function IFCViewer() {
   const [dockSelectedDoorIds, setDockSelectedDoorIds] = useState<Set<string>>(new Set()) // Store selected door IDs for DoorListDock
   const [scrollToDoorId, setScrollToDoorId] = useState<string | null>(null) // Scroll list to this door when selected from model
   const [dockHoveredDoorId, setDockHoveredDoorId] = useState<string | null>(null) // Hover (Highlight in 3D)
-  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
+  const [dockSortField, setDockSortField] = useState<'door'|'type'|'storey'|'brandschutz'|'schallschutz'|'festverglasung'|'cfcBkpCccBcc'|'isExternal'|'lb'|'lh'|'rb'|'rh'|'bram'|'hram'|'guid'>('door') // Sort field for DoorListDock
   const [dockSortDirection, setDockSortDirection] = useState<'asc'|'desc'>('asc') // Sort direction for DoorlistDock
   const DOCK_RIGHT_OFFSET_PX = 400
   const [dockHeightPx, setDockHeightPx] = useState(260)
@@ -79,13 +95,13 @@ export default function IFCViewer() {
     })
   }, [])
 
-  const setDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid', direction: 'asc' | 'desc') => {
+  const setDockSort = useCallback((field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid', direction: 'asc' | 'desc') => {
     setDockSortField(field)
     setDockSortDirection(direction)
   }, [])
 
   const dockSortIndicator = useCallback(
-    (field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
+    (field: 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'festverglasung' | 'cfcBkpCccBcc' | 'isExternal' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid') => {
       if (dockSortField !== field) return '↕'
       return dockSortDirection === 'asc' ? '↑' : '↓'
     },
@@ -99,6 +115,9 @@ export default function IFCViewer() {
       case 'storey': return door.storeyName || ''
       case 'brandschutz': return door.csetStandardCH?.feuerwiderstand || ''
       case 'schallschutz': return door.csetStandardCH?.bauschalldaemmmass || ''
+      case 'festverglasung': return door.csetStandardCH?.festverglasung || ''
+      case 'cfcBkpCccBcc': return door.csetStandardCH?.cfcBkpCccBcc || ''
+      case 'isExternal': return door.csetStandardCH?.isExternal || ''
       case 'lb': return door.csetStandardCH?.massDurchgangsbreite ?? -Infinity
       case 'lh': return door.csetStandardCH?.massDurchgangshoehe ?? -Infinity
       case 'rb': return door.csetStandardCH?.massRohbreite ?? -Infinity
@@ -548,6 +567,8 @@ export default function IFCViewer() {
 
     // Keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (isKeyboardEventFromEditableTarget(e.target)) return
+
       // View presets (1-7)
       if (e.key >= '1' && e.key <= '7' && navigationManagerRef.current) {
         const presets: Array<'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso'> = [
@@ -908,27 +929,16 @@ export default function IFCViewer() {
 
         // Extract OperationTypes from web-ifc for swing arc rendering
         let operationTypeMap: Map<number, string> | undefined
-        let csetStandardCHMap: Map<number, {
-          alTuernummer: string | null
-          geometryType: string | null
-          massDurchgangsbreite: number | null
-          massDurchgangshoehe: number | null
-          massRohbreite: number | null
-          massRohhoehe: number | null
-          massAussenrahmenBreite: number | null
-          massAussenrahmenHoehe: number | null
-          symbolFluchtweg: string | null
-          gebaeude: string | null
-          feuerwiderstand: string | null
-          bauschalldaemmmass: string | null
-        }> | undefined
+        let csetStandardCHMap: Map<number, DoorCsetStandardCHData> | undefined
+        let doorLeafMetadataMap: Map<number, DoorLeafMetadata> | undefined
         if (archFileRef.current) {
           try {
-            const { extractDoorOperationTypes, extractDoorCsetStandardCH } = await import('@/lib/ifc-loader')
+            const { extractDoorOperationTypes, extractDoorCsetStandardCH, extractDoorLeafMetadata } = await import('@/lib/ifc-loader')
             operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
             csetStandardCHMap = await extractDoorCsetStandardCH(archFileRef.current)
+            doorLeafMetadataMap = await extractDoorLeafMetadata(archFileRef.current)
           } catch (err) {
-            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH):', err)
+            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH/DoorLeafMetadata):', err)
           }
         }
 
@@ -938,7 +948,8 @@ export default function IFCViewer() {
           electricalAnalysisModelRef.current || electricalModelRef.current || undefined,
           spatialStructureRef.current,  // Use ref for immediate access
           operationTypeMap,  // Pass OperationType map for swing arc rendering
-          csetStandardCHMap
+          csetStandardCHMap,
+          doorLeafMetadataMap
         )
 
         if (process.env.NODE_ENV === 'development') {
@@ -1398,6 +1409,7 @@ Section:
               visibilityManager={visibilityManagerRef.current}
               navigationManager={navigationManagerRef.current}
               resolveDoorBoundingBox={getDisplayDoorBoundingBox}
+              dockSelectedDoorIds={dockSelectedDoorIds}
               onComplete={() => {
                 // Optional callback when export completes
               }}
@@ -1414,6 +1426,7 @@ Section:
             hoveredDoorId={dockHoveredDoorId}
             getDoorLabel={getDockDoorLabel}
             onToggleSelect={toggleDockDoorSelection}
+            onClearSelection={() => setDockSelectedDoorIds(new Set())}
             onDoorClick={handleDockDoorClick}
             onHoverDoorId={handleDockDoorHover}
             onShowSingleDoor={handleDockShowSingleDoor}
