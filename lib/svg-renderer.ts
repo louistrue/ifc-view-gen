@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { DoorContext, DoorViewFrame } from './door-analyzer'
-import { getDoorMeshes } from './door-analyzer'
+import { getDoorMeshes, getHostWallMeshes } from './door-analyzer'
 
 export interface SVGRenderOptions {
     width?: number
@@ -77,6 +77,8 @@ interface AxisBounds {
     minC: number
     maxC: number
 }
+
+const HOST_WALL_PERPENDICULAR_CROP_METERS = 1.0
 
 /**
  * Setup orthographic camera for door elevation view
@@ -542,6 +544,295 @@ function measureBoundingBoxInAxes(
     return { minA, maxA, minB, maxB, minC, maxC }
 }
 
+function measureMeshesInAxes(
+    meshes: THREE.Mesh[],
+    axisA: THREE.Vector3,
+    axisB: THREE.Vector3,
+    axisC: THREE.Vector3
+): AxisBounds | null {
+    let minA = Infinity
+    let maxA = -Infinity
+    let minB = Infinity
+    let maxB = -Infinity
+    let minC = Infinity
+    let maxC = -Infinity
+    const point = new THREE.Vector3()
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.getAttribute('position')
+        if (!geometry || !positions || positions.count === 0) continue
+
+        mesh.updateMatrixWorld(true)
+        const index = geometry.getIndex()
+        const projectVertex = (vertexIndex: number) => {
+            point
+                .set(positions.getX(vertexIndex), positions.getY(vertexIndex), positions.getZ(vertexIndex))
+                .applyMatrix4(mesh.matrixWorld)
+            const a = point.dot(axisA)
+            const b = point.dot(axisB)
+            const c = point.dot(axisC)
+            minA = Math.min(minA, a)
+            maxA = Math.max(maxA, a)
+            minB = Math.min(minB, b)
+            maxB = Math.max(maxB, b)
+            minC = Math.min(minC, c)
+            maxC = Math.max(maxC, c)
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i < index.count; i++) {
+                projectVertex(index.getX(i))
+            }
+        } else {
+            for (let i = 0; i < positions.count; i++) {
+                projectVertex(i)
+            }
+        }
+    }
+
+    if (minA === Infinity) return null
+    return { minA, maxA, minB, maxB, minC, maxC }
+}
+
+function getHostWallAxisBounds(
+    context: DoorContext,
+    axisA: THREE.Vector3,
+    axisB: THREE.Vector3,
+    axisC: THREE.Vector3
+): AxisBounds | null {
+    const wallMeshes = getHostWallMeshes(context)
+    const frame = context.viewFrame
+    const originDepth = frame.origin.dot(frame.semanticFacing)
+    const point = new THREE.Vector3()
+    let minA = Infinity
+    let maxA = -Infinity
+    let minB = Infinity
+    let maxB = -Infinity
+    let minC = Infinity
+    let maxC = -Infinity
+
+    const includePoint = (candidate: THREE.Vector3) => {
+        const localDepth = candidate.dot(frame.semanticFacing) - originDepth
+        if (Math.abs(localDepth) > HOST_WALL_PERPENDICULAR_CROP_METERS) {
+            return
+        }
+
+        const a = candidate.dot(axisA)
+        const b = candidate.dot(axisB)
+        const c = candidate.dot(axisC)
+        minA = Math.min(minA, a)
+        maxA = Math.max(maxA, a)
+        minB = Math.min(minB, b)
+        maxB = Math.max(maxB, b)
+        minC = Math.min(minC, c)
+        maxC = Math.max(maxC, c)
+    }
+
+    for (const mesh of wallMeshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.getAttribute('position')
+        if (!geometry || !positions || positions.count === 0) continue
+
+        mesh.updateMatrixWorld(true)
+        const index = geometry.getIndex()
+        const projectVertex = (vertexIndex: number) => {
+            point
+                .set(positions.getX(vertexIndex), positions.getY(vertexIndex), positions.getZ(vertexIndex))
+                .applyMatrix4(mesh.matrixWorld)
+            includePoint(point)
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i < index.count; i++) {
+                projectVertex(index.getX(i))
+            }
+        } else {
+            for (let i = 0; i < positions.count; i++) {
+                projectVertex(i)
+            }
+        }
+    }
+
+    const meshBounds = minA !== Infinity
+        ? { minA, maxA, minB, maxB, minC, maxC }
+        : (wallMeshes.length > 0 ? measureMeshesInAxes(wallMeshes, axisA, axisB, axisC) : null)
+    if (meshBounds) {
+        return meshBounds
+    }
+
+    const wallBox = context.hostWall?.boundingBox
+    return wallBox ? measureBoundingBoxInAxes(wallBox, axisA, axisB, axisC) : null
+}
+
+function getLocalHostWallPlanMetrics(context: DoorContext): { minDepth: number; maxDepth: number; thickness: number } | null {
+    const frame = context.viewFrame
+    const bounds = getHostWallAxisBounds(context, frame.widthAxis, frame.semanticFacing, frame.upAxis)
+    if (!bounds) return null
+
+    const originDepth = frame.origin.dot(frame.semanticFacing)
+    const minDepth = bounds.minB - originDepth
+    const maxDepth = bounds.maxB - originDepth
+    return {
+        minDepth,
+        maxDepth,
+        thickness: Math.max(maxDepth - minDepth, frame.thickness),
+    }
+}
+
+function getElevationTopBandGapMeters(context: DoorContext): number | null {
+    const wallMeshes = getHostWallMeshes(context)
+    if (wallMeshes.length === 0) return null
+
+    const frame = context.viewFrame
+    const originWidth = frame.origin.dot(frame.widthAxis)
+    const originUp = frame.origin.dot(frame.upAxis)
+    const halfDoorWidth = frame.width / 2 + 0.02
+    const doorTop = frame.height / 2
+    const pointA = new THREE.Vector3()
+    const pointB = new THREE.Vector3()
+    const pointC = new THREE.Vector3()
+    let minHeaderBottom = Infinity
+
+    for (const mesh of wallMeshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.getAttribute('position')
+        if (!geometry || !positions || positions.count === 0) continue
+
+        mesh.updateMatrixWorld(true)
+        const index = geometry.getIndex()
+        const processTriangle = (i1: number, i2: number, i3: number) => {
+            pointA.set(positions.getX(i1), positions.getY(i1), positions.getZ(i1)).applyMatrix4(mesh.matrixWorld)
+            pointB.set(positions.getX(i2), positions.getY(i2), positions.getZ(i2)).applyMatrix4(mesh.matrixWorld)
+            pointC.set(positions.getX(i3), positions.getY(i3), positions.getZ(i3)).applyMatrix4(mesh.matrixWorld)
+
+            const localDepths = [
+                pointA.dot(frame.semanticFacing) - frame.origin.dot(frame.semanticFacing),
+                pointB.dot(frame.semanticFacing) - frame.origin.dot(frame.semanticFacing),
+                pointC.dot(frame.semanticFacing) - frame.origin.dot(frame.semanticFacing),
+            ]
+            if (
+                Math.min(...localDepths) > HOST_WALL_PERPENDICULAR_CROP_METERS
+                || Math.max(...localDepths) < -HOST_WALL_PERPENDICULAR_CROP_METERS
+            ) {
+                return
+            }
+
+            const normal = pointB.clone().sub(pointA).cross(pointC.clone().sub(pointA)).normalize()
+            if (Math.abs(normal.dot(frame.upAxis)) < 0.9) return
+
+            const localWidthValues = [
+                pointA.dot(frame.widthAxis) - originWidth,
+                pointB.dot(frame.widthAxis) - originWidth,
+                pointC.dot(frame.widthAxis) - originWidth,
+            ]
+            const widthMin = Math.min(...localWidthValues)
+            const widthMax = Math.max(...localWidthValues)
+            if (widthMax < -halfDoorWidth || widthMin > halfDoorWidth) return
+
+            const localUpValues = [
+                pointA.dot(frame.upAxis) - originUp,
+                pointB.dot(frame.upAxis) - originUp,
+                pointC.dot(frame.upAxis) - originUp,
+            ]
+            const faceBottom = Math.min(...localUpValues)
+            if (faceBottom <= doorTop + 0.01) return
+
+            minHeaderBottom = Math.min(minHeaderBottom, faceBottom)
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i < index.count; i += 3) {
+                processTriangle(index.getX(i), index.getX(i + 1), index.getX(i + 2))
+            }
+        } else {
+            for (let i = 0; i < positions.count; i += 3) {
+                processTriangle(i, i + 1, i + 2)
+            }
+        }
+    }
+
+    if (!Number.isFinite(minHeaderBottom)) return null
+    return Math.max(0, minHeaderBottom - doorTop)
+}
+
+function hostWallHasMaterialInRect(
+    context: DoorContext,
+    axisA: THREE.Vector3,
+    axisB: THREE.Vector3,
+    rect: { minA: number; maxA: number; minB: number; maxB: number }
+): boolean {
+    const wallMeshes = getHostWallMeshes(context)
+    if (wallMeshes.length === 0) {
+        return Boolean(context.hostWall?.boundingBox)
+    }
+
+    const pointA = new THREE.Vector3()
+    const pointB = new THREE.Vector3()
+    const pointC = new THREE.Vector3()
+
+    const triangleOverlapsRect = (a1: number, a2: number, a3: number, b1: number, b2: number, b3: number): boolean => {
+        const triMinA = Math.min(a1, a2, a3)
+        const triMaxA = Math.max(a1, a2, a3)
+        const triMinB = Math.min(b1, b2, b3)
+        const triMaxB = Math.max(b1, b2, b3)
+        return triMaxA >= rect.minA && triMinA <= rect.maxA && triMaxB >= rect.minB && triMinB <= rect.maxB
+    }
+
+    for (const mesh of wallMeshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.getAttribute('position')
+        if (!geometry || !positions || positions.count === 0) continue
+
+        mesh.updateMatrixWorld(true)
+        const index = geometry.getIndex()
+
+        const processTriangle = (i1: number, i2: number, i3: number): boolean => {
+            pointA.set(positions.getX(i1), positions.getY(i1), positions.getZ(i1)).applyMatrix4(mesh.matrixWorld)
+            pointB.set(positions.getX(i2), positions.getY(i2), positions.getZ(i2)).applyMatrix4(mesh.matrixWorld)
+            pointC.set(positions.getX(i3), positions.getY(i3), positions.getZ(i3)).applyMatrix4(mesh.matrixWorld)
+
+            const originDepth = context.viewFrame.origin.dot(context.viewFrame.semanticFacing)
+            const localDepths = [
+                pointA.dot(context.viewFrame.semanticFacing) - originDepth,
+                pointB.dot(context.viewFrame.semanticFacing) - originDepth,
+                pointC.dot(context.viewFrame.semanticFacing) - originDepth,
+            ]
+            if (
+                Math.min(...localDepths) > HOST_WALL_PERPENDICULAR_CROP_METERS
+                || Math.max(...localDepths) < -HOST_WALL_PERPENDICULAR_CROP_METERS
+            ) {
+                return false
+            }
+
+            return triangleOverlapsRect(
+                pointA.dot(axisA),
+                pointB.dot(axisA),
+                pointC.dot(axisA),
+                pointA.dot(axisB),
+                pointB.dot(axisB),
+                pointC.dot(axisB)
+            )
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i < index.count; i += 3) {
+                if (processTriangle(index.getX(i), index.getX(i + 1), index.getX(i + 2))) {
+                    return true
+                }
+            }
+        } else {
+            for (let i = 0; i < positions.count; i += 3) {
+                if (processTriangle(i, i + 1, i + 2)) {
+                    return true
+                }
+            }
+        }
+    }
+
+    return false
+}
+
 function createRectPoints3D(
     origin: THREE.Vector3,
     axisX: THREE.Vector3,
@@ -602,24 +893,45 @@ function createSemanticElevationWallGeometry(
     options: Required<SVGRenderOptions>
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
-    const wallBox = context.hostWall?.boundingBox
-    if (!wallBox) return geometry
 
     const frame = context.viewFrame
-    const wallBounds = measureBoundingBoxInAxes(wallBox, frame.widthAxis, frame.upAxis, frame.semanticFacing)
+    const wallBounds = getHostWallAxisBounds(context, frame.widthAxis, frame.upAxis, frame.semanticFacing)
+    if (!wallBounds) return geometry
+
     const wallThickness = Math.max(wallBounds.maxC - wallBounds.minC, frame.thickness)
     const sideReveal = THREE.MathUtils.clamp(wallThickness * 0.75, 0.08, 0.18)
     const topReveal = THREE.MathUtils.clamp(wallThickness * 0.75, 0.08, 0.18)
     const halfDoorWidth = frame.width / 2
     const bottom = -frame.height / 2
-    const top = frame.height / 2
+    const topGap = getElevationTopBandGapMeters(context) ?? 0
+    const top = frame.height / 2 + topGap
     const outerTop = top + topReveal
 
-    const rects = [
-        createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, -halfDoorWidth - sideReveal, -halfDoorWidth, bottom, outerTop),
-        createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, halfDoorWidth, halfDoorWidth + sideReveal, bottom, outerTop),
-        createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, -halfDoorWidth, halfDoorWidth, top, outerTop),
-    ]
+    const rects: THREE.Vector3[][] = []
+    if (hostWallHasMaterialInRect(context, frame.widthAxis, frame.upAxis, {
+        minA: frame.origin.dot(frame.widthAxis) - halfDoorWidth - sideReveal,
+        maxA: frame.origin.dot(frame.widthAxis) - halfDoorWidth + 0.01,
+        minB: frame.origin.dot(frame.upAxis) + bottom,
+        maxB: frame.origin.dot(frame.upAxis) + top,
+    })) {
+        rects.push(createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, -halfDoorWidth - sideReveal, -halfDoorWidth, bottom, outerTop))
+    }
+    if (hostWallHasMaterialInRect(context, frame.widthAxis, frame.upAxis, {
+        minA: frame.origin.dot(frame.widthAxis) + halfDoorWidth - 0.01,
+        maxA: frame.origin.dot(frame.widthAxis) + halfDoorWidth + sideReveal,
+        minB: frame.origin.dot(frame.upAxis) + bottom,
+        maxB: frame.origin.dot(frame.upAxis) + top,
+    })) {
+        rects.push(createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, halfDoorWidth, halfDoorWidth + sideReveal, bottom, outerTop))
+    }
+    if (hostWallHasMaterialInRect(context, frame.widthAxis, frame.upAxis, {
+        minA: frame.origin.dot(frame.widthAxis) - halfDoorWidth,
+        maxA: frame.origin.dot(frame.widthAxis) + halfDoorWidth,
+        minB: frame.origin.dot(frame.upAxis) + top - 0.01,
+        maxB: frame.origin.dot(frame.upAxis) + outerTop,
+    })) {
+        rects.push(createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, -halfDoorWidth, halfDoorWidth, top, outerTop))
+    }
 
     for (const rect of rects) {
         appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1)
@@ -636,20 +948,32 @@ function createSemanticPlanWallGeometry(
     options: Required<SVGRenderOptions>
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
-    const wallBox = context.hostWall?.boundingBox
-    if (!wallBox) return geometry
 
     const frame = context.viewFrame
-    const wallBounds = measureBoundingBoxInAxes(wallBox, frame.widthAxis, frame.semanticFacing, frame.upAxis)
-    const wallThickness = Math.max(wallBounds.maxB - wallBounds.minB, frame.thickness)
+    const wallMetrics = getLocalHostWallPlanMetrics(context)
+    if (!wallMetrics) return geometry
+
+    const wallThickness = wallMetrics.thickness
     const sideContext = THREE.MathUtils.clamp(wallThickness * 0.6, 0.1, 0.18)
     const halfDoorWidth = frame.width / 2
-    const halfWallThickness = wallThickness / 2
 
-    const rects = [
-        createRectPoints3D(frame.origin, frame.widthAxis, frame.semanticFacing, -halfDoorWidth - sideContext, -halfDoorWidth, -halfWallThickness, halfWallThickness),
-        createRectPoints3D(frame.origin, frame.widthAxis, frame.semanticFacing, halfDoorWidth, halfDoorWidth + sideContext, -halfWallThickness, halfWallThickness),
-    ]
+    const rects: THREE.Vector3[][] = []
+    if (hostWallHasMaterialInRect(context, frame.widthAxis, frame.semanticFacing, {
+        minA: frame.origin.dot(frame.widthAxis) - halfDoorWidth - sideContext,
+        maxA: frame.origin.dot(frame.widthAxis) - halfDoorWidth + 0.01,
+        minB: frame.origin.dot(frame.semanticFacing) + wallMetrics.minDepth,
+        maxB: frame.origin.dot(frame.semanticFacing) + wallMetrics.maxDepth,
+    })) {
+        rects.push(createRectPoints3D(frame.origin, frame.widthAxis, frame.semanticFacing, -halfDoorWidth - sideContext, -halfDoorWidth, wallMetrics.minDepth, wallMetrics.maxDepth))
+    }
+    if (hostWallHasMaterialInRect(context, frame.widthAxis, frame.semanticFacing, {
+        minA: frame.origin.dot(frame.widthAxis) + halfDoorWidth - 0.01,
+        maxA: frame.origin.dot(frame.widthAxis) + halfDoorWidth + sideContext,
+        minB: frame.origin.dot(frame.semanticFacing) + wallMetrics.minDepth,
+        maxB: frame.origin.dot(frame.semanticFacing) + wallMetrics.maxDepth,
+    })) {
+        rects.push(createRectPoints3D(frame.origin, frame.widthAxis, frame.semanticFacing, halfDoorWidth, halfDoorWidth + sideContext, wallMetrics.minDepth, wallMetrics.maxDepth))
+    }
 
     for (const rect of rects) {
         appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1)
@@ -887,6 +1211,7 @@ interface RenderMeta {
     context: DoorContext | null
     viewType: string
     planArcFlip: boolean
+    suppressSyntheticWallBands?: boolean
 }
 
 interface WallRevealRect {
@@ -916,6 +1241,9 @@ function getWallRevealRects(params: {
     viewType: string
     wallThicknessPx?: number
     planArcFlip?: boolean
+    planBandY?: number
+    planBandHeight?: number
+    topBandBottomY?: number
 }): WallRevealRect[] {
     const {
         bounds,
@@ -928,6 +1256,9 @@ function getWallRevealRects(params: {
         viewType,
         wallThicknessPx,
         planArcFlip = false,
+        planBandY,
+        planBandHeight,
+        topBandBottomY,
     } = params
 
     const bandW = getRevealBandSize(scaledWidth, wallRevealSide, 10)
@@ -940,14 +1271,16 @@ function getWallRevealRects(params: {
     const rects: WallRevealRect[] = []
 
     if (viewType !== 'Plan') {
+        const topBandBottom = topBandBottomY ?? offsetY
+        const actualTopY = Math.max(bounds.minY, topBandBottom - bandH)
         if (offsetX - leftX > 0.5) {
-            rects.push({ x: leftX, y: topY, width: offsetX - leftX, height: bottomY - topY })
+            rects.push({ x: leftX, y: actualTopY, width: offsetX - leftX, height: bottomY - actualTopY })
         }
         if (rightXEnd - rightXStart > 0.5) {
-            rects.push({ x: rightXStart, y: topY, width: rightXEnd - rightXStart, height: bottomY - topY })
+            rects.push({ x: rightXStart, y: actualTopY, width: rightXEnd - rightXStart, height: bottomY - actualTopY })
         }
-        if (bandH > 0 && offsetY - topY > 0.5) {
-            rects.push({ x: leftX, y: topY, width: rightXEnd - leftX, height: offsetY - topY })
+        if (bandH > 0 && topBandBottom - actualTopY > 0.5) {
+            rects.push({ x: leftX, y: actualTopY, width: rightXEnd - leftX, height: topBandBottom - actualTopY })
         }
         return rects
     }
@@ -957,19 +1290,19 @@ function getWallRevealRects(params: {
     }
 
     const wallThickness = wallThicknessPx ?? Math.max(scaledHeight * 0.08, 12)
-    const planBandH = Math.min(
+    const computedPlanBandH = Math.min(
         wallThickness * (1 + THREE.MathUtils.clamp(wallRevealSide, 0, 0.5)),
-        scaledHeight
+        Math.max(scaledHeight, wallThickness)
     )
-    const planBandY = planArcFlip
-        ? offsetY + scaledHeight - planBandH
-        : offsetY
+    const actualPlanBandH = planBandHeight ?? computedPlanBandH
+    const actualPlanBandY = planBandY
+        ?? (planArcFlip ? offsetY + scaledHeight - actualPlanBandH : offsetY)
 
     if (offsetX - leftX > 0.5) {
-        rects.push({ x: leftX, y: planBandY, width: offsetX - leftX, height: planBandH })
+        rects.push({ x: leftX, y: actualPlanBandY, width: offsetX - leftX, height: actualPlanBandH })
     }
     if (rightXEnd - rightXStart > 0.5) {
-        rects.push({ x: rightXStart, y: planBandY, width: rightXEnd - rightXStart, height: planBandH })
+        rects.push({ x: rightXStart, y: actualPlanBandY, width: rightXEnd - rightXStart, height: actualPlanBandH })
     }
 
     return rects
@@ -1098,7 +1431,7 @@ function generateSVGString(
     // These are placed relative to offsetX/offsetY/scaledWidth/scaledHeight which come from
     // the ACTUAL projected door bounds (fitBounds), so they are guaranteed to sit just outside
     // the door geometry and can never be covered by door fills.
-    const wallBandsSvg = showFills && hasWall
+    const wallBandsSvg = showFills && hasWall && !renderMeta.suppressSyntheticWallBands
         ? renderWallRevealSvg(
             getWallRevealRects({
                 bounds: { minX: 0, maxX: width, minY: 0, maxY: viewHeight },
@@ -1428,6 +1761,9 @@ function renderElevationFromMeshes(
     camera.updateMatrixWorld()
 
     const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, width, height, false, 0)
+    const wallGeometry = createSemanticElevationWallGeometry(context, camera, width, height, opts)
+    renderGeometry.edges.push(...wallGeometry.edges)
+    renderGeometry.polygons.push(...wallGeometry.polygons)
     const deviceGeometry = createSemanticElevationDeviceGeometry(context, camera, width, height, opts)
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
@@ -1445,6 +1781,7 @@ function renderElevationFromMeshes(
             context,
             viewType: isBackView ? 'Back' : 'Front',
             planArcFlip: false,
+            suppressSyntheticWallBands: true,
         }
     )
 }
@@ -1477,6 +1814,8 @@ function renderElevationFromBoundingBox(
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledHeight) / 2
     const hasWall = Boolean(context.hostWall?.boundingBox)
+    const scalePxPerMeter = scaledHeight / Math.max(doorHeight, 1e-6)
+    const slabGapPx = (getElevationTopBandGapMeters(context) ?? 0) * scalePxPerMeter
     const wallRevealSvg = hasWall
         ? renderWallRevealSvg(
             getWallRevealRects({
@@ -1493,6 +1832,7 @@ function renderElevationFromBoundingBox(
                 wallRevealSide: opts.wallRevealSide,
                 wallRevealTop: opts.wallRevealTop,
                 viewType: isBackView ? 'Back' : 'Front',
+                topBandBottomY: offsetY - slabGapPx,
             }),
             wallColor,
             lineColor,
@@ -1977,7 +2317,10 @@ function renderPlanFromMeshes(
     const showPlanSwing = shouldRenderPlanSwing(frame)
     const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
 
+    const wallGeometry = createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
     const renderGeometry = collectProjectedGeometry(renderMeshes, context, opts, camera, frustumWidth, frustumHeight, true, 0)
+    renderGeometry.edges.push(...wallGeometry.edges)
+    renderGeometry.polygons.push(...wallGeometry.polygons)
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
@@ -2005,6 +2348,7 @@ function renderPlanFromMeshes(
 
     const fitGeometry = {
         edges: [
+            ...wallGeometry.edges,
             // Door outline corners (back and front)
             fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
             fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
@@ -2015,7 +2359,7 @@ function renderPlanFromMeshes(
             fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
             ...deviceGeometry.edges,
         ],
-        polygons: [...deviceGeometry.polygons],
+        polygons: [...wallGeometry.polygons, ...deviceGeometry.polygons],
     }
 
     return generateSVGString(
@@ -2027,6 +2371,7 @@ function renderPlanFromMeshes(
             context,
             viewType: 'Plan',
             planArcFlip: flipArc,
+            suppressSyntheticWallBands: true,
         }
     )
 }
@@ -2059,6 +2404,15 @@ function renderPlanFromBoundingBox(
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledThickness) / 2
     const hasWall = Boolean(context.hostWall?.boundingBox)
+    const planWallMetrics = getLocalHostWallPlanMetrics(context)
+    const scalePxPerMeter = scaledThickness / Math.max(doorThickness, 1e-6)
+    const wallThicknessPx = planWallMetrics
+        ? Math.max(planWallMetrics.thickness * scalePxPerMeter, 12)
+        : Math.max(scaledThickness, 12)
+    const doorMinDepth = -doorThickness / 2
+    const planBandY = planWallMetrics
+        ? offsetY + (planWallMetrics.minDepth - doorMinDepth) * scalePxPerMeter
+        : offsetY
     const wallRevealSvg = hasWall
         ? renderWallRevealSvg(
             getWallRevealRects({
@@ -2075,7 +2429,9 @@ function renderPlanFromBoundingBox(
                 wallRevealSide: opts.wallRevealSide,
                 wallRevealTop: opts.wallRevealTop,
                 viewType: 'Plan',
-                wallThicknessPx: Math.max(scaledThickness, 12),
+                wallThicknessPx,
+                planBandY,
+                planBandHeight: wallThicknessPx,
                 planArcFlip: false,
             }),
             wallColor,
