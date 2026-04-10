@@ -168,30 +168,10 @@ function setupDoorCamera(
 
 
 /**
- * Combined world-space size of meshes (for glazing heuristic vs. overall door scale).
- */
-function computeMeshesReferenceSize(meshes: THREE.Mesh[]): THREE.Vector3 {
-    const box = new THREE.Box3()
-    for (const mesh of meshes) {
-        mesh.updateMatrixWorld()
-        const geom = mesh.geometry
-        if (!geom.boundingBox) geom.computeBoundingBox()
-        const bb = geom.boundingBox!.clone()
-        bb.applyMatrix4(mesh.matrixWorld)
-        box.union(bb)
-    }
-    const size = new THREE.Vector3()
-    if (!box.isEmpty()) {
-        box.getSize(size)
-    }
-    return size
-}
-
-/**
  * True if the mesh looks like a thin in-plane sheet (typical glazing) vs. frame/solid leaf.
- * Uses axis-aligned bounds in world space; smallest extent must be ≤ 0.5 cm; larger two extents vs. door scale.
+ * Uses axis-aligned bounds in world space; smallest extent must be ≤ 0.5 cm.
  */
-function isLikelyGlazingPanelMesh(mesh: THREE.Mesh, referenceSize: THREE.Vector3): boolean {
+function isLikelyGlazingPanelMesh(mesh: THREE.Mesh): boolean {
     mesh.updateMatrixWorld()
     const geom = mesh.geometry
     if (!geom.boundingBox) geom.computeBoundingBox()
@@ -199,15 +179,9 @@ function isLikelyGlazingPanelMesh(mesh: THREE.Mesh, referenceSize: THREE.Vector3
     bb.applyMatrix4(mesh.matrixWorld)
     const size = new THREE.Vector3()
     bb.getSize(size)
-    const dims = [size.x, size.y, size.z].sort((a, b) => a - b)
-    const [dMin, dMid, dMax] = dims
-    const doorScale = Math.max(referenceSize.x, referenceSize.y, referenceSize.z)
-    if (doorScale < 1e-6) return false
-
+    const dMin = Math.min(size.x, size.y, size.z)
     const maxThickness = 0.005 // 0.5 cm — smallest AABB extent must not exceed this to count as glazing
-    const thinEnough = dMin <= maxThickness
-    const bothFacesLarge = dMid > doorScale * 0.14 && dMax > doorScale * 0.22
-    return thinEnough && bothFacesLarge
+    return dMin <= maxThickness
 }
 
 /**
@@ -219,11 +193,10 @@ function getMeshPolygonStyle(
     expressID: number,
     context: DoorContext,
     options: Required<SVGRenderOptions>,
-    referenceSize: THREE.Vector3,
     useGlassStyling: boolean
 ): { color: string; fillOpacity?: number } {
     if (expressID === context.door.expressID) {
-        if (useGlassStyling && isLikelyGlazingPanelMesh(mesh, referenceSize)) {
+        if (useGlassStyling && isLikelyGlazingPanelMesh(mesh)) {
             return { color: options.glassColor, fillOpacity: options.glassFillOpacity }
         }
         return { color: options.doorColor }
@@ -591,9 +564,6 @@ function collectProjectedGeometry(
     const edges: ProjectedEdge[] = []
     const polygons: ProjectedPolygon[] = []
 
-    const doorMeshes = meshes.filter((m) => m.userData.expressID === context.door.expressID)
-    const referenceSize = computeMeshesReferenceSize(doorMeshes.length > 0 ? doorMeshes : meshes)
-
     for (const mesh of meshes) {
         try {
             const expressID = mesh.userData.expressID
@@ -602,7 +572,6 @@ function collectProjectedGeometry(
                 expressID,
                 context,
                 options,
-                referenceSize,
                 useGlassStyling
             )
             const posCount = mesh.geometry?.attributes?.position?.count || 0
