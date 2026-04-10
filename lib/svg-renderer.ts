@@ -189,7 +189,7 @@ function computeMeshesReferenceSize(meshes: THREE.Mesh[]): THREE.Vector3 {
 
 /**
  * True if the mesh looks like a thin in-plane sheet (typical glazing) vs. frame/solid leaf.
- * Uses axis-aligned bounds in world space; tuned for IFC door aggregates.
+ * Uses axis-aligned bounds in world space; smallest extent must be ≤ 0.5 cm; larger two extents vs. door scale.
  */
 function isLikelyGlazingPanelMesh(mesh: THREE.Mesh, referenceSize: THREE.Vector3): boolean {
     mesh.updateMatrixWorld()
@@ -204,7 +204,7 @@ function isLikelyGlazingPanelMesh(mesh: THREE.Mesh, referenceSize: THREE.Vector3
     const doorScale = Math.max(referenceSize.x, referenceSize.y, referenceSize.z)
     if (doorScale < 1e-6) return false
 
-    const maxThickness = Math.max(0.03, doorScale * 0.04)
+    const maxThickness = 0.005 // 0.5 cm — smallest AABB extent must not exceed this to count as glazing
     const thinEnough = dMin <= maxThickness
     const bothFacesLarge = dMid > doorScale * 0.14 && dMax > doorScale * 0.22
     return thinEnough && bothFacesLarge
