@@ -151,6 +151,7 @@ async function buildContext(options?: {
     context.detailedGeometry = {
         doorMeshes: [doorMesh],
         wallMeshes: includeWall ? [wallMesh] : [],
+        slabMeshes: [],
         deviceMeshes: [deviceMesh],
     }
 
