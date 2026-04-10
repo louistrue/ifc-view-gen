@@ -931,14 +931,18 @@ export default function IFCViewer() {
         let operationTypeMap: Map<number, string> | undefined
         let csetStandardCHMap: Map<number, DoorCsetStandardCHData> | undefined
         let doorLeafMetadataMap: Map<number, DoorLeafMetadata> | undefined
+        let hostRelationshipMap: Map<number, number> | undefined
+        let slabAggregatePartMap: Map<number, number> | undefined
         if (archFileRef.current) {
           try {
-            const { extractDoorOperationTypes, extractDoorCsetStandardCH, extractDoorLeafMetadata } = await import('@/lib/ifc-loader')
+            const { extractDoorOperationTypes, extractDoorCsetStandardCH, extractDoorLeafMetadata, extractDoorHostRelationships, extractSlabAggregateParts } = await import('@/lib/ifc-loader')
             operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
             csetStandardCHMap = await extractDoorCsetStandardCH(archFileRef.current)
             doorLeafMetadataMap = await extractDoorLeafMetadata(archFileRef.current)
+            hostRelationshipMap = await extractDoorHostRelationships(archFileRef.current)
+            slabAggregatePartMap = await extractSlabAggregateParts(archFileRef.current)
           } catch (err) {
-            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH/DoorLeafMetadata):', err)
+            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH/DoorLeafMetadata/HostRelationships/SlabAggregateParts):', err)
           }
         }
 
@@ -949,7 +953,9 @@ export default function IFCViewer() {
           spatialStructureRef.current,  // Use ref for immediate access
           operationTypeMap,  // Pass OperationType map for swing arc rendering
           csetStandardCHMap,
-          doorLeafMetadataMap
+          doorLeafMetadataMap,
+          hostRelationshipMap,
+          slabAggregatePartMap
         )
 
         if (process.env.NODE_ENV === 'development') {

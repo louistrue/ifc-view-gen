@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { DoorContext, DoorViewFrame } from './door-analyzer'
-import { getDoorMeshes, getHostWallMeshes } from './door-analyzer'
+import { getDoorMeshes, getHostSlabMeshes, getHostWallMeshes } from './door-analyzer'
 import {
     INTER_WOFF2_LATIN_400_BASE64,
     INTER_WOFF2_LATIN_600_BASE64,
@@ -13,6 +13,7 @@ export interface SVGRenderOptions {
     margin?: number // meters
     doorColor?: string
     wallColor?: string
+    floorSlabColor?: string
     deviceColor?: string
     /** Fill color for glazing in Vorder-/Rückansicht only; Grundriss uses `doorColor` for those meshes. */
     glassColor?: string
@@ -79,6 +80,7 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     margin: 0.5,
     doorColor: '#dedede',
     wallColor: '#e3e3e3',
+    floorSlabColor: '#e3e3e3',
     deviceColor: '#fcc647',
     glassColor: '#b8d4e8',
     glassFillOpacity: 0.32,
@@ -94,6 +96,14 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     wallRevealTop: 0.04,
 }
 
+function normalizeRenderOptions(options: SVGRenderOptions = {}): Required<SVGRenderOptions> {
+    const merged = { ...DEFAULT_OPTIONS, ...options }
+    return {
+        ...merged,
+        floorSlabColor: options.floorSlabColor ?? merged.wallColor,
+    }
+}
+
 interface ProjectedEdge {
     x1: number
     y1: number
@@ -103,6 +113,7 @@ interface ProjectedEdge {
     depth: number
     layer: number
     skipClip?: boolean
+    strokeWidthFactor?: number
     isDashed?: boolean  // For door swing arcs (dashed line style)
 }
 
@@ -127,6 +138,13 @@ interface AxisBounds {
 }
 
 const HOST_WALL_PERPENDICULAR_CROP_METERS = 1.0
+const DOOR_EDGE_STROKE_FACTOR = 0.85
+const WALL_EDGE_STROKE_FACTOR = 1.15
+const DEVICE_EDGE_STROKE_FACTOR = 1.0
+const CONTEXT_DOOR_EDGE_STROKE_FACTOR = 0.55
+const CONTEXT_DOOR_FILL_COLOR = '#d1d5db'
+const CONTEXT_DOOR_LINE_COLOR = '#6b7280'
+const CONTEXT_DOOR_FILL_OPACITY = 0.32
 
 /**
  * Setup orthographic camera for door elevation view
@@ -195,11 +213,17 @@ function getMeshPolygonStyle(
     options: Required<SVGRenderOptions>,
     useGlassStyling: boolean
 ): { color: string; fillOpacity?: number } {
+    const isHostSlab =
+        context.hostSlabsBelow.some((slab) => slab.expressID === expressID)
+        || context.hostSlabsAbove.some((slab) => slab.expressID === expressID)
     if (expressID === context.door.expressID) {
         if (useGlassStyling && isLikelyGlazingPanelMesh(mesh)) {
             return { color: options.glassColor, fillOpacity: options.glassFillOpacity }
         }
         return { color: options.doorColor }
+    }
+    if (isHostSlab) {
+        return { color: options.floorSlabColor }
     }
     if (
         (context.hostWall && expressID === context.hostWall.expressID)
@@ -208,6 +232,16 @@ function getMeshPolygonStyle(
         return { color: options.wallColor }
     }
     return { color: options.deviceColor }
+}
+
+function hasVisibleSlabsForView(
+    context: DoorContext | null,
+    viewType: 'Front' | 'Back' | 'Plan' | ''
+): boolean {
+    if (!context || viewType === 'Plan') {
+        return false
+    }
+    return context.hostSlabsBelow.length > 0 || context.hostSlabsAbove.length > 0
 }
 
 /**
@@ -288,7 +322,8 @@ function extractEdges(
     width: number,
     height: number,
     clipZ: boolean = false,
-    layer: number = 0
+    layer: number = 0,
+    strokeWidthFactor: number = 1
 ): ProjectedEdge[] {
     const edges: ProjectedEdge[] = []
 
@@ -414,7 +449,8 @@ function extractEdges(
                     y2: clipped.p2.y,
                     color,
                     depth,
-                    layer
+                    layer,
+                    strokeWidthFactor,
                 })
             }
         } else {
@@ -429,7 +465,8 @@ function extractEdges(
                 y2: proj2.y,
                 color,
                 depth,
-                layer
+                layer,
+                strokeWidthFactor,
             })
         }
     }
@@ -559,7 +596,8 @@ function collectProjectedGeometry(
     layer: number,
     polygonCullMode: PolygonCullMode = 'camera-facing',
     /** Grundriss: false (Glas = Türfarbe); Vorder-/Rückansicht: true */
-    useGlassStyling: boolean = true
+    useGlassStyling: boolean = true,
+    edgeStrokeWidthFactor: number = 1
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const edges: ProjectedEdge[] = []
     const polygons: ProjectedPolygon[] = []
@@ -577,7 +615,7 @@ function collectProjectedGeometry(
             const posCount = mesh.geometry?.attributes?.position?.count || 0
             if (posCount === 0) continue
 
-            edges.push(...extractEdges(mesh, camera, options.lineColor, width, height, clipZ, layer))
+            edges.push(...extractEdges(mesh, camera, options.lineColor, width, height, clipZ, layer, edgeStrokeWidthFactor))
 
             if (options.showFills) {
                 polygons.push(...extractPolygons(mesh, camera, color, width, height, layer, polygonCullMode, fillOpacity))
@@ -588,6 +626,13 @@ function collectProjectedGeometry(
     }
 
     return { edges, polygons }
+}
+
+function getHostContextMeshes(context: DoorContext): THREE.Mesh[] {
+    return [
+        ...getHostWallMeshes(context),
+        ...getHostSlabMeshes(context),
+    ]
 }
 
 function measureBoundingBoxInAxes(
@@ -841,6 +886,80 @@ function getElevationTopBandGapMeters(context: DoorContext): number | null {
     return Math.max(0, minHeaderBottom - doorTop)
 }
 
+function getElevationTopContextGapMeters(context: DoorContext): number {
+    const gaps: number[] = []
+    const wallGap = getElevationTopBandGapMeters(context)
+    if (wallGap !== null) {
+        gaps.push(wallGap)
+    }
+
+    for (const slab of context.hostSlabsAbove) {
+        const slabAboveBox = slab.boundingBox
+        if (!slabAboveBox) continue
+        const frame = context.viewFrame
+        const slabBounds = measureBoundingBoxInAxes(
+            slabAboveBox,
+            frame.widthAxis,
+            frame.upAxis,
+            frame.semanticFacing
+        )
+        const doorTop = frame.origin.dot(frame.upAxis) + frame.height / 2
+        const slabGap = slabBounds.minB - doorTop
+        if (Number.isFinite(slabGap) && slabGap >= 0) {
+            gaps.push(slabGap)
+        }
+    }
+
+    return gaps.length > 0 ? Math.min(...gaps) : 0
+}
+
+function getElevationBottomContextGapMeters(context: DoorContext): number {
+    const frame = context.viewFrame
+    const doorBottom = frame.origin.dot(frame.upAxis) - frame.height / 2
+    const slabBoundsBelow: Array<{ minB: number; maxB: number }> = []
+
+    for (const slab of context.hostSlabsBelow) {
+        const slabBelowBox = slab.boundingBox
+        if (!slabBelowBox) continue
+        const slabBounds = measureBoundingBoxInAxes(
+            slabBelowBox,
+            frame.widthAxis,
+            frame.upAxis,
+            frame.semanticFacing
+        )
+        if (!Number.isFinite(slabBounds.minB) || !Number.isFinite(slabBounds.maxB)) continue
+        if (slabBounds.maxB <= doorBottom + 1e-4) {
+            slabBoundsBelow.push(slabBounds)
+        }
+    }
+
+    if (slabBoundsBelow.length === 0) return 0
+
+    const STACK_TOLERANCE_METERS = 0.03
+    const closestTop = Math.max(...slabBoundsBelow.map((bounds) => bounds.maxB))
+    let stackBottom = doorBottom
+    let cursorTop = closestTop
+
+    while (true) {
+        const contiguousLayer = slabBoundsBelow.filter(
+            (bounds) => Math.abs(bounds.maxB - cursorTop) <= STACK_TOLERANCE_METERS
+        )
+        if (contiguousLayer.length === 0) {
+            break
+        }
+
+        const nextBottom = Math.min(...contiguousLayer.map((bounds) => bounds.minB))
+        if (nextBottom >= stackBottom - 1e-4) {
+            break
+        }
+
+        stackBottom = nextBottom
+        cursorTop = nextBottom
+    }
+
+    return Math.max(0, doorBottom - stackBottom)
+}
+
 function hostWallHasMaterialInRect(
     context: DoorContext,
     axisA: THREE.Vector3,
@@ -935,6 +1054,70 @@ function createRectPoints3D(
     ]
 }
 
+type AxisRect = {
+    minA: number
+    maxA: number
+    minB: number
+    maxB: number
+}
+
+function rangesOverlapOrTouch(
+    minA: number,
+    maxA: number,
+    minB: number,
+    maxB: number,
+    tolerance: number = 0
+): boolean {
+    return Math.min(maxA, maxB) >= Math.max(minA, minB) - tolerance
+}
+
+function appendProjectedFillPolygon(
+    geometry: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
+    points3D: THREE.Vector3[],
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    fillColor: string,
+    layer: number,
+    fillOpacity: number = 1
+): void {
+    const projected = points3D.map((point) => projectPoint(point, camera, width, height))
+    const depth = projected.reduce((sum, point) => sum + point.z, 0) / projected.length
+
+    geometry.polygons.push({
+        points: projected.map((point) => ({ x: point.x, y: point.y })),
+        color: fillColor,
+        depth,
+        layer,
+        fillOpacity,
+    })
+}
+
+function appendProjectedEdge(
+    geometry: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
+    start: THREE.Vector3,
+    end: THREE.Vector3,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    color: string,
+    layer: number,
+    strokeWidthFactor: number = 1
+): void {
+    const projectedStart = projectPoint(start, camera, width, height)
+    const projectedEnd = projectPoint(end, camera, width, height)
+    geometry.edges.push({
+        x1: projectedStart.x,
+        y1: projectedStart.y,
+        x2: projectedEnd.x,
+        y2: projectedEnd.y,
+        color,
+        depth: (projectedStart.z + projectedEnd.z) / 2,
+        layer,
+        strokeWidthFactor,
+    })
+}
+
 function appendProjectedPolygon(
     geometry: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
     points3D: THREE.Vector3[],
@@ -944,7 +1127,8 @@ function appendProjectedPolygon(
     fillColor: string,
     strokeColor: string,
     layer: number,
-    fillOpacity: number = 1
+    fillOpacity: number = 1,
+    strokeWidthFactor: number = 1
 ): void {
     const projected = points3D.map((point) => projectPoint(point, camera, width, height))
     const depth = projected.reduce((sum, point) => sum + point.z, 0) / projected.length
@@ -968,6 +1152,7 @@ function appendProjectedPolygon(
             color: strokeColor,
             depth,
             layer,
+            strokeWidthFactor,
         })
     }
 }
@@ -1021,7 +1206,218 @@ function createSemanticElevationWallGeometry(
     }
 
     for (const rect of rects) {
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1)
+        appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1, 1, WALL_EDGE_STROKE_FACTOR)
+    }
+
+    return geometry
+}
+
+function createSemanticElevationSlabGeometry(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    options: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
+    const frame = context.viewFrame
+    const seenSlabIDs = new Set<number>()
+    const slabRects: AxisRect[] = []
+    const BAND_TOLERANCE_METERS = 0.01
+    const SPAN_TOLERANCE_METERS = 0.02
+
+    for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
+        if (seenSlabIDs.has(slab.expressID)) continue
+        seenSlabIDs.add(slab.expressID)
+
+        const slabBox = slab.boundingBox
+        if (!slabBox) continue
+
+        const slabBounds = measureBoundingBoxInAxes(
+            slabBox,
+            frame.widthAxis,
+            frame.upAxis,
+            frame.semanticFacing
+        )
+        if (
+            !Number.isFinite(slabBounds.minA)
+            || !Number.isFinite(slabBounds.maxA)
+            || !Number.isFinite(slabBounds.minB)
+            || !Number.isFinite(slabBounds.maxB)
+            || slabBounds.maxA <= slabBounds.minA
+            || slabBounds.maxB <= slabBounds.minB
+        ) {
+            continue
+        }
+
+        slabRects.push({
+            minA: slabBounds.minA,
+            maxA: slabBounds.maxA,
+            minB: slabBounds.minB,
+            maxB: slabBounds.maxB,
+        })
+    }
+
+    const mergedRects = slabRects
+        .map((rect) => ({ ...rect }))
+        .sort((a, b) => a.minB - b.minB || a.maxB - b.maxB || a.minA - b.minA)
+
+    let changed = true
+    while (changed) {
+        changed = false
+        for (let i = 0; i < mergedRects.length; i++) {
+            for (let j = i + 1; j < mergedRects.length; j++) {
+                const current = mergedRects[i]
+                const candidate = mergedRects[j]
+                const sameBand =
+                    Math.abs(current.minB - candidate.minB) <= BAND_TOLERANCE_METERS
+                    && Math.abs(current.maxB - candidate.maxB) <= BAND_TOLERANCE_METERS
+                const touchingSpan = rangesOverlapOrTouch(
+                    current.minA,
+                    current.maxA,
+                    candidate.minA,
+                    candidate.maxA,
+                    SPAN_TOLERANCE_METERS
+                )
+                if (!sameBand || !touchingSpan) continue
+
+                current.minA = Math.min(current.minA, candidate.minA)
+                current.maxA = Math.max(current.maxA, candidate.maxA)
+                current.minB = Math.min(current.minB, candidate.minB)
+                current.maxB = Math.max(current.maxB, candidate.maxB)
+                mergedRects.splice(j, 1)
+                changed = true
+                break
+            }
+            if (changed) break
+        }
+    }
+
+    const originA = frame.origin.dot(frame.widthAxis)
+    const originB = frame.origin.dot(frame.upAxis)
+    for (const rect of mergedRects) {
+        const corners = createRectPoints3D(
+            frame.origin,
+            frame.widthAxis,
+            frame.upAxis,
+            rect.minA - originA,
+            rect.maxA - originA,
+            rect.minB - originB,
+            rect.maxB - originB
+        )
+
+        appendProjectedFillPolygon(
+            geometry,
+            corners,
+            camera,
+            width,
+            height,
+            options.floorSlabColor,
+            -1,
+            1
+        )
+
+        appendProjectedEdge(geometry, corners[3], corners[2], camera, width, height, options.lineColor, -1, WALL_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, corners[0], corners[1], camera, width, height, options.lineColor, -1, WALL_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, corners[0], corners[3], camera, width, height, options.lineColor, -1, WALL_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, corners[1], corners[2], camera, width, height, options.lineColor, -1, WALL_EDGE_STROKE_FACTOR)
+    }
+
+    return geometry
+}
+
+function getNearbyDoorAxisRects(context: DoorContext): AxisRect[] {
+    const frame = context.viewFrame
+    const originA = frame.origin.dot(frame.widthAxis)
+    const originB = frame.origin.dot(frame.upAxis)
+    const seenDoorIDs = new Set<number>()
+    const rects: AxisRect[] = []
+
+    for (const nearbyDoor of context.nearbyDoors || []) {
+        if (seenDoorIDs.has(nearbyDoor.expressID) || !nearbyDoor.boundingBox) {
+            continue
+        }
+        seenDoorIDs.add(nearbyDoor.expressID)
+
+        const bounds = measureBoundingBoxInAxes(
+            nearbyDoor.boundingBox,
+            frame.widthAxis,
+            frame.upAxis,
+            frame.semanticFacing
+        )
+        if (
+            !Number.isFinite(bounds.minA)
+            || !Number.isFinite(bounds.maxA)
+            || !Number.isFinite(bounds.minB)
+            || !Number.isFinite(bounds.maxB)
+            || bounds.maxA <= bounds.minA
+            || bounds.maxB <= bounds.minB
+        ) {
+            continue
+        }
+
+        rects.push({
+            minA: bounds.minA - originA,
+            maxA: bounds.maxA - originA,
+            minB: bounds.minB - originB,
+            maxB: bounds.maxB - originB,
+        })
+    }
+
+    return rects
+}
+
+function createSemanticElevationNearbyDoorGeometry(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
+    const frame = context.viewFrame
+
+    for (const rect of getNearbyDoorAxisRects(context)) {
+        const outer = createRectPoints3D(
+            frame.origin,
+            frame.widthAxis,
+            frame.upAxis,
+            rect.minA,
+            rect.maxA,
+            rect.minB,
+            rect.maxB
+        )
+        appendProjectedFillPolygon(
+            geometry,
+            outer,
+            camera,
+            width,
+            height,
+            CONTEXT_DOOR_FILL_COLOR,
+            -0.25,
+            CONTEXT_DOOR_FILL_OPACITY
+        )
+        appendProjectedEdge(geometry, outer[0], outer[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[1], outer[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[2], outer[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[3], outer[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+
+        const insetX = THREE.MathUtils.clamp((rect.maxA - rect.minA) * 0.08, 0.025, 0.06)
+        const insetY = THREE.MathUtils.clamp((rect.maxB - rect.minB) * 0.05, 0.03, 0.08)
+        if (rect.maxA - rect.minA > insetX * 2 && rect.maxB - rect.minB > insetY * 2) {
+            const inner = createRectPoints3D(
+                frame.origin,
+                frame.widthAxis,
+                frame.upAxis,
+                rect.minA + insetX,
+                rect.maxA - insetX,
+                rect.minB + insetY,
+                rect.maxB - insetY
+            )
+            appendProjectedEdge(geometry, inner[0], inner[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+            appendProjectedEdge(geometry, inner[1], inner[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+            appendProjectedEdge(geometry, inner[2], inner[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+            appendProjectedEdge(geometry, inner[3], inner[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
+        }
     }
 
     return geometry
@@ -1041,7 +1437,7 @@ function createSemanticPlanWallGeometry(
     if (!wallMetrics) return geometry
 
     const wallThickness = wallMetrics.thickness
-    const sideContext = THREE.MathUtils.clamp(wallThickness * 0.6, 0.1, 0.18)
+    const sideContext = Math.max(Math.max(options.margin, 0.25), wallThickness * 0.6)
     const halfDoorWidth = frame.width / 2
 
     const rects: THREE.Vector3[][] = []
@@ -1063,7 +1459,7 @@ function createSemanticPlanWallGeometry(
     }
 
     for (const rect of rects) {
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1)
+        appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1, 1, WALL_EDGE_STROKE_FACTOR)
     }
 
     return geometry
@@ -1192,7 +1588,7 @@ function createSemanticElevationDeviceGeometry(
             -rectHeight / 2,
             rectHeight / 2
         )
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 1, 1)
+        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 1, 1, DEVICE_EDGE_STROKE_FACTOR)
         const lastPolygon = geometry.polygons[geometry.polygons.length - 1]
         if (lastPolygon) {
             lastPolygon.skipClip = true
@@ -1242,7 +1638,7 @@ function createSemanticPlanDeviceGeometry(
             -rectDepth / 2,
             rectDepth / 2
         )
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 0)
+        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 0, 1, DEVICE_EDGE_STROKE_FACTOR)
     }
 
     return geometry
@@ -1253,6 +1649,24 @@ interface ProjectedBounds {
     maxX: number
     minY: number
     maxY: number
+}
+
+function boundsToFitGeometry(bounds: ProjectedBounds): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    return {
+        edges: [],
+        polygons: [{
+            points: [
+                { x: bounds.minX, y: bounds.minY },
+                { x: bounds.maxX, y: bounds.minY },
+                { x: bounds.maxX, y: bounds.maxY },
+                { x: bounds.minX, y: bounds.maxY },
+            ],
+            color: 'none',
+            depth: 0,
+            layer: 0,
+            fillOpacity: 0,
+        }],
+    }
 }
 
 function getBoundsFromProjectedGeometry(
@@ -1403,6 +1817,144 @@ interface RenderMeta {
     sharedDrawingScale?: number
     planDoorBounds?: ProjectedBounds
     planWallBandBounds?: { minY: number; maxY: number }
+    storeyMarkerProjectedY?: number
+}
+
+function resolveSvgViewTransform(
+    fitBounds: ProjectedBounds,
+    options: Required<SVGRenderOptions>,
+    context: DoorContext | null,
+    sharedDrawingScale?: number
+): {
+    scale: number
+    offsetX: number
+    offsetY: number
+    viewHeight: number
+} {
+    const { viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(options, context)
+    const contentWidth = fitBounds.maxX - fitBounds.minX
+    const contentHeight = fitBounds.maxY - fitBounds.minY
+    const naturalScale = Math.min(
+        availWidth / (contentWidth || 1),
+        availHeight / (contentHeight || 1)
+    )
+    const scale = sharedDrawingScale ?? naturalScale
+    const scaledWidth = contentWidth * scale
+    const scaledHeight = contentHeight * scale
+    const offsetX = padding + (availWidth - scaledWidth) / 2
+    const offsetY = padding + (availHeight - scaledHeight) / 2
+    return { scale, offsetX, offsetY, viewHeight }
+}
+
+function getViewportClipBounds(
+    fitGeometry: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
+    options: Required<SVGRenderOptions>,
+    context: DoorContext | null,
+    sharedDrawingScale?: number
+): ProjectedBounds | null {
+    const fitBounds = getBoundsFromProjectedGeometry(fitGeometry.edges, fitGeometry.polygons)
+    if (!fitBounds) return null
+
+    const { scale, offsetX, offsetY, viewHeight } = resolveSvgViewTransform(
+        fitBounds,
+        options,
+        context,
+        sharedDrawingScale
+    )
+
+    return {
+        minX: fitBounds.minX - offsetX / scale,
+        maxX: fitBounds.minX + (options.width - offsetX) / scale,
+        minY: fitBounds.minY - offsetY / scale,
+        maxY: fitBounds.minY + (viewHeight - offsetY) / scale,
+    }
+}
+
+function clipProjectedGeometryToBounds(
+    geometry: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
+    bounds: ProjectedBounds | null
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    if (!bounds) {
+        return {
+            edges: geometry.edges.map((edge) => ({ ...edge, skipClip: true })),
+            polygons: geometry.polygons.map((polygon) => ({ ...polygon, skipClip: true })),
+        }
+    }
+
+    const edges: ProjectedEdge[] = []
+    for (const edge of geometry.edges) {
+        const clippedEdge = clipEdgeToBounds(edge, bounds)
+        if (clippedEdge) {
+            edges.push({ ...clippedEdge, skipClip: true })
+        }
+    }
+
+    const polygons: ProjectedPolygon[] = []
+    for (const polygon of geometry.polygons) {
+        const clippedPoints = clipPolygonToBounds(polygon.points, bounds)
+        if (clippedPoints.length >= 3) {
+            polygons.push({ ...polygon, points: clippedPoints, skipClip: true })
+        }
+    }
+
+    return { edges, polygons }
+}
+
+function getElevationHostClipBounds(
+    context: DoorContext,
+    fitGeometry: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
+    options: Required<SVGRenderOptions>,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number
+): ProjectedBounds | null {
+    const bounds = getViewportClipBounds(fitGeometry, options, context)
+    if (!bounds) return null
+
+    const frame = context.viewFrame
+    const topGap = getElevationTopContextGapMeters(context)
+    const topReveal = THREE.MathUtils.clamp(frame.thickness * 0.75, 0.08, 0.18)
+    const topPoint = frame.origin.clone().add(
+        frame.upAxis.clone().multiplyScalar(frame.height / 2 + topGap + topReveal)
+    )
+    const projectedTop = projectPoint(topPoint, camera, width, height)
+    bounds.minY = Math.min(bounds.minY, projectedTop.y)
+    const bottomGap = getElevationBottomContextGapMeters(context)
+    const bottomReveal = THREE.MathUtils.clamp(frame.thickness * 0.75, 0.08, 0.18)
+    const bottomPoint = frame.origin.clone().add(
+        frame.upAxis.clone().multiplyScalar(-frame.height / 2 - bottomGap - bottomReveal)
+    )
+    const projectedBottom = projectPoint(bottomPoint, camera, width, height)
+    bounds.maxY = Math.max(bounds.maxY, projectedBottom.y)
+    return bounds
+}
+
+function projectElevationDoorBounds(
+    frame: DoorViewFrame,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number
+): ProjectedBounds {
+    const halfW = frame.width / 2
+    const halfH = frame.height / 2
+    const corners = [
+        frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-halfW)).add(frame.upAxis.clone().multiplyScalar(-halfH)),
+        frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.upAxis.clone().multiplyScalar(-halfH)),
+        frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.upAxis.clone().multiplyScalar(halfH)),
+        frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-halfW)).add(frame.upAxis.clone().multiplyScalar(halfH)),
+    ]
+    let minX = Infinity
+    let maxX = -Infinity
+    let minY = Infinity
+    let maxY = -Infinity
+    for (const corner of corners) {
+        const projected = projectPoint(corner, camera, width, height)
+        minX = Math.min(minX, projected.x)
+        maxX = Math.max(maxX, projected.x)
+        minY = Math.min(minY, projected.y)
+        maxY = Math.max(maxY, projected.y)
+    }
+    return { minX, maxX, minY, maxY }
 }
 
 function getStoreyMarkerLabel(context: DoorContext | null, viewType: string): string | null {
@@ -1413,6 +1965,43 @@ function getStoreyMarkerLabel(context: DoorContext | null, viewType: string): st
     const label = context.storeyName?.trim()
     if (!label) return null
     return label.length > 4 ? label.slice(0, 4) : label
+}
+
+function getStoreyMarkerLevelOffsetMeters(context: DoorContext): number {
+    const frame = context.viewFrame
+    const originB = frame.origin.dot(frame.upAxis)
+    let topmostBelowSlab = -Infinity
+
+    for (const slab of context.hostSlabsBelow) {
+        if (!slab.boundingBox) continue
+        const slabBounds = measureBoundingBoxInAxes(
+            slab.boundingBox,
+            frame.widthAxis,
+            frame.upAxis,
+            frame.semanticFacing
+        )
+        if (Number.isFinite(slabBounds.maxB)) {
+            topmostBelowSlab = Math.max(topmostBelowSlab, slabBounds.maxB - originB)
+        }
+    }
+
+    if (topmostBelowSlab > -Infinity) {
+        return topmostBelowSlab
+    }
+
+    return -frame.height / 2
+}
+
+function projectStoreyMarkerLevelY(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number
+): number {
+    const markerPoint = context.viewFrame.origin.clone().add(
+        context.viewFrame.upAxis.clone().multiplyScalar(getStoreyMarkerLevelOffsetMeters(context))
+    )
+    return projectPoint(markerPoint, camera, width, height).y
 }
 
 function renderStoreyMarkerSvg(
@@ -1446,6 +2035,30 @@ function renderStoreyMarkerSvg(
   </g>`
 }
 
+function resolveStoreyMarkerPlacement(
+    contentLeft: number,
+    contentRight: number,
+    contentTop: number,
+    contentBottom: number,
+    canvasWidth: number,
+    viewHeight: number,
+    fontSize: number
+): { x: number; y: number } {
+    const leftSpace = Math.max(contentLeft, 0)
+    const rightSpace = Math.max(canvasWidth - contentRight, 0)
+    const preferRight = rightSpace >= leftSpace
+    const sidePadding = Math.max(fontSize * 1.6, 28)
+    const x = preferRight
+        ? contentRight + Math.max(rightSpace / 2, sidePadding)
+        : contentLeft - Math.max(leftSpace / 2, sidePadding)
+    const y = THREE.MathUtils.clamp(
+        contentTop + (contentBottom - contentTop) * 0.72,
+        fontSize + 28,
+        viewHeight - (fontSize + 18)
+    )
+    return { x, y }
+}
+
 function getSvgViewportMetrics(
     options: Required<SVGRenderOptions>,
     context: DoorContext | null,
@@ -1459,7 +2072,8 @@ function getSvgViewportMetrics(
 } {
     const hasDevices = hasVisibleDevicesForView(context, viewType)
     const hasWall = context ? Boolean(context.hostWall || context.wall) : false
-    const showLegendActual = options.showLegend && (hasDevices || hasWall)
+    const hasSlabs = hasVisibleSlabsForView(context, viewType)
+    const showLegendActual = options.showLegend && (hasDevices || hasWall || hasSlabs)
     const lineStep = options.fontSize * 1.5
     const labelLines = options.showLabels ? 2 : 0
     const legendLines = showLegendActual ? 1 : 0
@@ -1679,7 +2293,7 @@ function renderWallRevealSvg(
     }
 
     const opacity = 1
-    const strokeWidth = (lineWidth * 0.75).toFixed(2)
+    const strokeWidth = (lineWidth * WALL_EDGE_STROKE_FACTOR).toFixed(2)
 
     return rects.map((rect) => {
         if (asPaths) {
@@ -1736,9 +2350,11 @@ function generateSVGString(
         wallRevealTop,
     } = options
 
-    const hasDevices = hasVisibleDevicesForView(renderMeta.context, renderMeta.viewType as 'Front' | 'Back' | 'Plan' | '')
+    const currentViewType = renderMeta.viewType as 'Front' | 'Back' | 'Plan' | ''
+    const hasDevices = hasVisibleDevicesForView(renderMeta.context, currentViewType)
     const hasWall = renderMeta.context ? Boolean(renderMeta.context.hostWall || renderMeta.context.wall) : false
-    const showLegendActual = showLegend && (hasDevices || hasWall)
+    const hasSlabs = hasVisibleSlabsForView(renderMeta.context, currentViewType)
+    const showLegendActual = showLegend && (hasDevices || hasWall || hasSlabs)
 
     const { titleBlockHeight, viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(
         options,
@@ -1855,10 +2471,16 @@ function generateSVGString(
         : ''
 
     const fontDefs = svgWebFontDefs(options.fontFamily)
+    const drawingClipDefs = `  <defs>
+    <clipPath id="drawing-clip">
+      <rect x="0" y="0" width="${width}" height="${viewHeight}"/>
+    </clipPath>
+  </defs>
+`
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-${fontDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
-  <g id="fills">
+${fontDefs}${drawingClipDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
+  <g id="fills" clip-path="url(#drawing-clip)">
 ${wallBandsSvg}
 `
 
@@ -1874,7 +2496,7 @@ ${wallBandsSvg}
     }
 
     svg += `  </g>
-  <g id="edges">
+  <g id="edges" clip-path="url(#drawing-clip)">
 `
 
     // Draw edges with transformed coordinates
@@ -1886,7 +2508,8 @@ ${wallBandsSvg}
         const y2 = transformY(edge.y2)
         const dashAttr = edge.isDashed ? ' stroke-dasharray="4,2"' : ''
         if (edge.isDashed) dashedCount++
-        svg += `    <line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${edge.color}" stroke-width="${lineWidth * (edge.isDashed ? 0.75 : 1)}" stroke-linecap="round"${dashAttr} opacity="${edge.isDashed ? 0.7 : 1}"/>\n`
+        const strokeWidth = lineWidth * (edge.strokeWidthFactor ?? (edge.isDashed ? 0.75 : 1))
+        svg += `    <line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${edge.color}" stroke-width="${strokeWidth}" stroke-linecap="round"${dashAttr} opacity="${edge.isDashed ? 0.7 : 1}"/>\n`
     }
 
 
@@ -1896,11 +2519,17 @@ ${wallBandsSvg}
 
     const storeyMarkerLabel = getStoreyMarkerLabel(renderMeta.context, renderMeta.viewType)
     if (storeyMarkerLabel) {
-        const markerOffset = getRevealBandSize(scaledWidth, wallRevealSide, 10) + 20
-        const markerX = Math.min(offsetX + scaledWidth + markerOffset, width - 90)
-        const markerY = Math.min(
-            Math.max(offsetY + scaledHeight - 8, fontSize + 28),
-            viewHeight - (fontSize + 18)
+        const markerLevelY = renderMeta.storeyMarkerProjectedY !== undefined
+            ? transformY(renderMeta.storeyMarkerProjectedY)
+            : undefined
+        const { x: markerX, y: markerY } = resolveStoreyMarkerPlacement(
+            offsetX,
+            offsetX + scaledWidth,
+            markerLevelY ?? offsetY,
+            markerLevelY ?? (offsetY + scaledHeight),
+            width,
+            viewHeight,
+            fontSize
         )
         svg += renderStoreyMarkerSvg(markerX, markerY, storeyMarkerLabel, fontSize, options.fontFamily, width)
     }
@@ -1977,8 +2606,9 @@ function renderTitleBlock(
 
     const hasDevices = hasVisibleDevicesForView(context, viewType as 'Front' | 'Back' | 'Plan')
     const hasWall = Boolean(context.hostWall || context.wall)
+    const hasSlabs = hasVisibleSlabsForView(context, viewType as 'Front' | 'Back' | 'Plan')
 
-    if (showLegend && (hasDevices || hasWall)) {
+    if (showLegend && (hasDevices || hasWall || hasSlabs)) {
         currentY += showLabels ? lineStep * 0.15 : lineStep
 
         // Nur Farbfelder + Bezeichnungen (ohne „LEGENDE:“-Titel), links wie Anschriftstitel
@@ -1992,6 +2622,9 @@ function renderTitleBlock(
 
         if (hasWall) {
             items.push({ color: options.wallColor, text: 'Wand' })
+        }
+        if (hasSlabs && (!hasWall || options.floorSlabColor !== options.wallColor)) {
+            items.push({ color: options.floorSlabColor, text: 'Decke' })
         }
 
         if (hasDevices) {
@@ -2131,7 +2764,7 @@ export async function renderDoorElevationSVG(
     isBackView: boolean = false,
     options: SVGRenderOptions = {}
 ): Promise<string> {
-    const opts = { ...DEFAULT_OPTIONS, ...options }
+    const opts = normalizeRenderOptions(options)
     const { width: doorWidth, height: doorHeight } = context.viewFrame
 
     // Check if we have detailed geometry
@@ -2153,8 +2786,8 @@ function renderElevationFromMeshes(
     isBackView: boolean,
     opts: Required<SVGRenderOptions>
 ): string {
-    const renderMeshes = getDoorMeshes(context)
-    if (renderMeshes.length === 0) {
+    const doorMeshes = getDoorMeshes(context)
+    if (doorMeshes.length === 0) {
         throw new Error('No meshes available for rendering')
     }
 
@@ -2163,7 +2796,7 @@ function renderElevationFromMeshes(
     const { camera, frustumWidth, frustumHeight } = createElevationOrthographicCamera(frame, margin, isBackView)
 
     const renderGeometry = collectProjectedGeometry(
-        renderMeshes,
+        doorMeshes,
         context,
         opts,
         camera,
@@ -2172,12 +2805,56 @@ function renderElevationFromMeshes(
         false,
         0,
         'none',
-        true
+        true,
+        DOOR_EDGE_STROKE_FACTOR
     )
-    const fitGeometry = {
-        edges: [...renderGeometry.edges],
-        polygons: [...renderGeometry.polygons],
-    }
+    const fitGeometry = boundsToFitGeometry(
+        projectElevationDoorBounds(frame, camera, frustumWidth, frustumHeight)
+    )
+    const fitBounds = getBoundsFromProjectedGeometry(fitGeometry.edges, fitGeometry.polygons)
+    const nearbyDoorGeometry = createSemanticElevationNearbyDoorGeometry(
+        context,
+        camera,
+        frustumWidth,
+        frustumHeight
+    )
+    const elevationHostClipBounds = getElevationHostClipBounds(context, fitGeometry, opts, camera, frustumWidth, frustumHeight)
+    const sharedDrawingScale = fitBounds
+        ? resolveSvgViewTransform(fitBounds, opts, context).scale
+        : undefined
+    const wallMeshes = getHostWallMeshes(context)
+    const wallGeometry = wallMeshes.length > 0
+        ? clipProjectedGeometryToBounds(
+            collectProjectedGeometry(
+                wallMeshes,
+                context,
+                opts,
+                camera,
+                frustumWidth,
+                frustumHeight,
+                false,
+                -1,
+                'none',
+                true,
+                WALL_EDGE_STROKE_FACTOR
+            ),
+            elevationHostClipBounds
+        )
+        : { edges: [], polygons: [] }
+    renderGeometry.edges.push(...wallGeometry.edges)
+    renderGeometry.polygons.push(...wallGeometry.polygons)
+    const slabGeometry = clipProjectedGeometryToBounds(
+        createSemanticElevationSlabGeometry(context, camera, frustumWidth, frustumHeight, opts),
+        elevationHostClipBounds
+    )
+    renderGeometry.edges.push(...slabGeometry.edges)
+    renderGeometry.polygons.push(...slabGeometry.polygons)
+    const clippedNearbyDoorGeometry = clipProjectedGeometryToBounds(
+        nearbyDoorGeometry,
+        elevationHostClipBounds
+    )
+    renderGeometry.edges.push(...clippedNearbyDoorGeometry.edges)
+    renderGeometry.polygons.push(...clippedNearbyDoorGeometry.polygons)
     const deviceGeometry = createSemanticElevationDeviceGeometry(
         context,
         camera,
@@ -2193,13 +2870,34 @@ function renderElevationFromMeshes(
         renderGeometry.edges,
         renderGeometry.polygons,
         opts,
-        fitGeometry,
+        elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry,
         {
             context,
             viewType: isBackView ? 'Back' : 'Front',
             planArcFlip: false,
+            suppressSyntheticWallBands: wallMeshes.length > 0,
+            storeyMarkerProjectedY: projectStoreyMarkerLevelY(context, camera, frustumWidth, frustumHeight),
+            ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
         }
     )
+}
+
+function renderFallbackContextDoorSvg(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    lineWidth: number
+): string {
+    const insetX = Math.min(width * 0.08, 14)
+    const insetY = Math.min(height * 0.05, 14)
+    return `
+  <rect x="${x}" y="${y}" width="${width}" height="${height}"
+        fill="${CONTEXT_DOOR_FILL_COLOR}" fill-opacity="${CONTEXT_DOOR_FILL_OPACITY}"
+        stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR}"/>
+  <rect x="${x + insetX}" y="${y + insetY}"
+        width="${Math.max(0, width - insetX * 2)}" height="${Math.max(0, height - insetY * 2)}"
+        fill="none" stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${Math.max(0.8, lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR)}"/>`
 }
 
 /**
@@ -2220,6 +2918,11 @@ function renderElevationFromBoundingBox(
     const availableHeight = svgHeight - padding * 2 - labelHeight
 
     const marginMeters = Math.max(opts.margin, 0.25)
+    const nearbyDoorRects = getNearbyDoorAxisRects(context)
+    const contentMinA = -doorWidth / 2
+    const contentMaxA = doorWidth / 2
+    const contentMinB = -doorHeight / 2
+    const contentMaxB = doorHeight / 2
     const totalWidth = doorWidth + marginMeters * 2
     const totalHeight = doorHeight + marginMeters * 2
 
@@ -2227,8 +2930,10 @@ function renderElevationFromBoundingBox(
 
     const scaledWidth = doorWidth * scale
     const scaledHeight = doorHeight * scale
-    const offsetX = (svgWidth - scaledWidth) / 2
-    const offsetY = padding + (availableHeight - scaledHeight) / 2
+    const contentOffsetX = padding + (availableWidth - doorWidth * scale) / 2
+    const contentOffsetY = padding + (availableHeight - doorHeight * scale) / 2
+    const offsetX = contentOffsetX
+    const offsetY = contentOffsetY
     const hasWall = Boolean(context.hostWall?.boundingBox)
     const wallRevealSvg = hasWall
         ? renderWallRevealSvg(
@@ -2255,14 +2960,35 @@ function renderElevationFromBoundingBox(
         )
         : ''
 
+    const nearbyDoorsSvg = nearbyDoorRects
+        .map((rect) => {
+            const rectX = contentOffsetX + (rect.minA - contentMinA) * scale
+            const rectY = contentOffsetY + (contentMaxB - rect.maxB) * scale
+            const rectWidth = (rect.maxA - rect.minA) * scale
+            const rectHeight = (rect.maxB - rect.minB) * scale
+            if (rectX + rectWidth < padding || rectX > svgWidth - padding || rectY + rectHeight < padding || rectY > padding + availableHeight) {
+                return ''
+            }
+            return renderFallbackContextDoorSvg(
+                rectX,
+                rectY,
+                rectWidth,
+                rectHeight,
+                lineWidth
+            )
+        })
+        .filter(Boolean)
+        .join('\n')
+
     const fontDefs = svgWebFontDefs(opts.fontFamily)
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
 ${fontDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
-${wallRevealSvg}  
+${wallRevealSvg}
+${nearbyDoorsSvg}
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledHeight}" 
-        fill="${doorColor}" fill-opacity="1" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
+        fill="${doorColor}" fill-opacity="1" stroke="${lineColor}" stroke-width="${lineWidth * DOOR_EDGE_STROKE_FACTOR}"/>
   
   <!-- Door panel detail -->
   <rect x="${offsetX + scaledWidth * 0.08}" y="${offsetY + scaledHeight * 0.05}" 
@@ -2278,10 +3004,15 @@ ${wallRevealSvg}
 
     const storeyMarkerLabel = getStoreyMarkerLabel(context, isBackView ? 'Back' : 'Front')
     if (storeyMarkerLabel) {
-        const markerX = Math.min(offsetX + scaledWidth + 18, svgWidth - 140)
-        const markerY = Math.min(
-            Math.max(offsetY + scaledHeight - 8, fontSize + 28),
-            svgHeight - labelHeight - 18
+        const markerLevelY = contentOffsetY + (contentMaxB - getStoreyMarkerLevelOffsetMeters(context)) * scale
+        const { x: markerX, y: markerY } = resolveStoreyMarkerPlacement(
+            offsetX,
+            offsetX + scaledWidth,
+            markerLevelY,
+            markerLevelY,
+            svgWidth,
+            svgHeight - labelHeight,
+            fontSize
         )
         svg += renderStoreyMarkerSvg(markerX, markerY, storeyMarkerLabel, fontSize, fontFamily, svgWidth)
     }
@@ -2316,7 +3047,7 @@ export async function renderDoorPlanSVG(
     /** When rendering with `renderDoorViews`, pass front elevation scale so plan matches Vorderansicht. */
     sharedScaleFromFront?: number
 ): Promise<string> {
-    const merged = { ...DEFAULT_OPTIONS, ...options }
+    const merged = normalizeRenderOptions(options)
     const opts: Required<SVGRenderOptions> = {
         ...merged,
         height: planSvgCanvasHeight(merged.width),
@@ -2572,13 +3303,14 @@ function generateSingleLeafArc(
             color,
             depth: (proj1.z + proj2.z) / 2,
             layer: 0,
-            isDashed: false
+            isDashed: false,
+            strokeWidthFactor: DOOR_EDGE_STROKE_FACTOR,
         })
     }
 
     const hingeProj = projectPoint(pivot3D, camera, width, height)
 
-    // Add dashed line showing door in OPEN position (plan swing angle)
+    // Add a line showing the door in OPEN position (plan swing angle)
     const openDoorEnd = arcPoints[arcPoints.length - 1] // Last arc point = open position
     const openDoorProj = projectPoint(openDoorEnd, camera, width, height)
 
@@ -2590,7 +3322,8 @@ function generateSingleLeafArc(
         color: '#666666', // Same color as arc
         depth: (hingeProj.z + openDoorProj.z) / 2,
         layer: 0,
-        isDashed: false
+        isDashed: false,
+        strokeWidthFactor: DOOR_EDGE_STROKE_FACTOR,
     })
 
     return edges
@@ -2695,15 +3428,13 @@ function renderSwingArcSVGForBoundingBox(
         return `
     <path d="M ${startX},${startY} A ${radius},${radius} 0 0,${sweepFlag} ${endX},${endY}" 
           stroke="${lineColor}" 
-          stroke-width="${lineWidth * 0.75}" 
-          stroke-dasharray="4,2" 
+          stroke-width="${lineWidth * DOOR_EDGE_STROKE_FACTOR}" 
           fill="none"
           opacity="0.7"/>
     <line x1="${hingeX}" y1="${hingeY}" 
           x2="${endX}" y2="${endY}" 
           stroke="${lineColor}" 
-          stroke-width="${lineWidth * 0.75}" 
-          stroke-dasharray="4,2"
+          stroke-width="${lineWidth * DOOR_EDGE_STROKE_FACTOR}" 
           opacity="0.7"/>`
     }).join('\n')
 
@@ -2742,7 +3473,7 @@ function buildDoorCrossSectionEdges(
     for (let i = 0; i < 4; i++) {
         const a = projectPoint(corners[i], camera, frustumWidth, frustumHeight)
         const b = projectPoint(corners[(i + 1) % 4], camera, frustumWidth, frustumHeight)
-        edges.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, color: opts.doorColor, depth: 0, layer: 0 })
+        edges.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, color: opts.doorColor, depth: 0, layer: 0, strokeWidthFactor: DOOR_EDGE_STROKE_FACTOR })
     }
     return edges
 }
@@ -2788,8 +3519,8 @@ function renderPlanFromMeshes(
     opts: Required<SVGRenderOptions>,
     sharedDrawingScale?: number
 ): string {
-    const renderMeshes = getDoorMeshes(context)
-    if (renderMeshes.length === 0) {
+    const doorMeshes = getDoorMeshes(context)
+    if (doorMeshes.length === 0) {
         throw new Error('No meshes available for rendering')
     }
 
@@ -2839,7 +3570,7 @@ function renderPlanFromMeshes(
     }
 
     const renderGeometry = collectProjectedGeometry(
-        renderMeshes,
+        doorMeshes,
         context,
         opts,
         camera,
@@ -2848,7 +3579,8 @@ function renderPlanFromMeshes(
         true,
         0,
         'camera-facing',
-        false
+        false,
+        DOOR_EDGE_STROKE_FACTOR
     )
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
     renderGeometry.edges.push(...deviceGeometry.edges)
@@ -2895,6 +3627,16 @@ function renderPlanFromMeshes(
         ],
         polygons: [...deviceGeometry.polygons],
     }
+    const semanticPlanWallGeometry = createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
+    const hostGeometry = (semanticPlanWallGeometry.edges.length > 0 || semanticPlanWallGeometry.polygons.length > 0)
+        ? clipProjectedGeometryToBounds(
+            semanticPlanWallGeometry,
+            getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale)
+        )
+        : { edges: [], polygons: [] }
+    renderGeometry.edges.push(...hostGeometry.edges)
+    renderGeometry.polygons.push(...hostGeometry.polygons)
+    const hasPlanWallGeometry = hostGeometry.edges.length > 0 || hostGeometry.polygons.length > 0
 
     return generateSVGString(
         renderGeometry.edges,
@@ -2905,6 +3647,7 @@ function renderPlanFromMeshes(
             context,
             viewType: 'Plan',
             planArcFlip: flipArc,
+            suppressSyntheticWallBands: hasPlanWallGeometry,
             planDoorBounds,
             planWallBandBounds: { minY: planWallBandBounds.minY, maxY: planWallBandBounds.maxY },
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
@@ -2987,7 +3730,7 @@ ${wallRevealSvg}
 
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 
-        fill="${doorColor}" fill-opacity="1" stroke="${lineColor}" stroke-width="${lineWidth * 1.5}"/>
+        fill="${doorColor}" fill-opacity="1" stroke="${lineColor}" stroke-width="${lineWidth * DOOR_EDGE_STROKE_FACTOR}"/>
   
   ${renderSwingArcSVGForBoundingBox(
       context,
@@ -3036,7 +3779,7 @@ export async function renderDoorViews(
     context: DoorContext,
     options: SVGRenderOptions = {}
 ): Promise<{ front: string; back: string; plan: string }> {
-    const opts = { ...DEFAULT_OPTIONS, ...options }
+    const opts = normalizeRenderOptions(options)
     const sharedScaleFromFront =
         context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
             ? computeFrontElevationScale(context, opts)

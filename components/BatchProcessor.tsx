@@ -60,6 +60,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     margin: 0.5,
     doorColor: '#dedede',
     wallColor: '#e3e3e3',
+    floorSlabColor: '#e3e3e3',
     deviceColor: '#fcc647',
     glassColor: '#b8d4e8',
     glassFillOpacity: 0.32,
@@ -497,6 +498,14 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               type="color"
               value={options.wallColor || '#5B7DB1'}
               onChange={(e) => setOptions({ ...options, wallColor: e.target.value })}
+            />
+          </div>
+          <div className="control-group">
+            <label>Floor Slab Color</label>
+            <input
+              type="color"
+              value={options.floorSlabColor || '#e3e3e3'}
+              onChange={(e) => setOptions({ ...options, floorSlabColor: e.target.value })}
             />
           </div>
           <div className="control-group">

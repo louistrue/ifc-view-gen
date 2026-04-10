@@ -209,6 +209,118 @@ export async function extractDoorOperationTypes(file: File): Promise<Map<number,
     }
 }
 
+/**
+ * Extract a direct door -> host building element map by joining
+ * IfcRelFillsElement (door -> opening) with IfcRelVoidsElement (opening -> host).
+ */
+export async function extractDoorHostRelationships(file: File): Promise<Map<number, number>> {
+    const api = await initializeIFCAPI()
+    const result = new Map<number, number>()
+
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for door host extraction')
+        return result
+    }
+
+    try {
+        const relFillsType = (WebIFC as any).IFCRELFILLSELEMENT
+        const relVoidsType = (WebIFC as any).IFCRELVOIDSELEMENT
+        if (typeof relFillsType !== 'number' || typeof relVoidsType !== 'number') {
+            return result
+        }
+
+        const openingToDoor = new Map<number, number>()
+        const relFillsIds = api.GetLineIDsWithType(modelID, relFillsType)
+        for (let i = 0; i < relFillsIds.size(); i++) {
+            const rel = api.GetLine(modelID, relFillsIds.get(i))
+            const openingId = rel?.RelatingOpeningElement?.value
+            const doorId = rel?.RelatedBuildingElement?.value
+            if (typeof openingId !== 'number' || typeof doorId !== 'number') continue
+
+            const filledElement = api.GetLine(modelID, doorId)
+            if (filledElement?.type !== IFCDOOR) continue
+            openingToDoor.set(openingId, doorId)
+        }
+
+        const relVoidsIds = api.GetLineIDsWithType(modelID, relVoidsType)
+        for (let i = 0; i < relVoidsIds.size(); i++) {
+            const rel = api.GetLine(modelID, relVoidsIds.get(i))
+            const openingId = rel?.RelatedOpeningElement?.value
+            const hostId = rel?.RelatingBuildingElement?.value
+            if (typeof openingId !== 'number' || typeof hostId !== 'number') continue
+
+            const doorId = openingToDoor.get(openingId)
+            if (typeof doorId !== 'number') continue
+            result.set(doorId, hostId)
+        }
+
+        return result
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+/**
+ * Extract a child element -> parent slab map for aggregated slab geometry carriers.
+ * Some authored slabs (e.g. floor build-ups / Unterlagsboden) have no own representation
+ * and expose their visible geometry only through aggregated IfcBuildingElementPart children.
+ */
+export async function extractSlabAggregateParts(file: File): Promise<Map<number, number>> {
+    const api = await initializeIFCAPI()
+    const result = new Map<number, number>()
+
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for slab aggregate extraction')
+        return result
+    }
+
+    try {
+        const relAggregatesType = (WebIFC as any).IFCRELAGGREGATES
+        const ifcSlabType = (WebIFC as any).IFCSLAB
+        const ifcBuildingElementPartType = (WebIFC as any).IFCBUILDINGELEMENTPART
+        if (
+            typeof relAggregatesType !== 'number'
+            || typeof ifcSlabType !== 'number'
+            || typeof ifcBuildingElementPartType !== 'number'
+        ) {
+            return result
+        }
+
+        const relAggregateIds = api.GetLineIDsWithType(modelID, relAggregatesType)
+        for (let i = 0; i < relAggregateIds.size(); i++) {
+            const rel = api.GetLine(modelID, relAggregateIds.get(i))
+            const parentId = rel?.RelatingObject?.value
+            const children = Array.isArray(rel?.RelatedObjects) ? rel.RelatedObjects : []
+            if (typeof parentId !== 'number' || children.length === 0) continue
+
+            const parent = api.GetLine(modelID, parentId)
+            if (parent?.type !== ifcSlabType) continue
+
+            for (const childRef of children) {
+                const childId = childRef?.value
+                if (typeof childId !== 'number') continue
+
+                const child = api.GetLine(modelID, childId)
+                if (child?.type === ifcBuildingElementPartType) {
+                    result.set(childId, parentId)
+                }
+            }
+        }
+
+        return result
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
 export interface DoorCsetStandardCHData {
     alTuernummer: string | null
     geometryType: string | null

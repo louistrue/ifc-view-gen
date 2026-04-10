@@ -163,6 +163,7 @@ const DOOR_SVG_CATEGORIES = new Set([
   'IFCCURTAINWALL',
   // Context
   'IFCSLAB',
+  'IFCBUILDINGELEMENTPART',
   // Electrical devices (all types)
   'IFCFLOWTERMINAL',
   'IFCLIGHTFIXTURE',
