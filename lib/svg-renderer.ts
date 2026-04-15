@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { DoorContext, DoorViewFrame } from './door-analyzer'
-import { getDoorMeshes, getHostSlabMeshes, getHostWallMeshes } from './door-analyzer'
+import { getDoorMeshes, getDoorOperationInfo, getHostSlabMeshes, getHostWallMeshes } from './door-analyzer'
 import {
     INTER_WOFF2_LATIN_400_BASE64,
     INTER_WOFF2_LATIN_600_BASE64,
@@ -1989,6 +1989,18 @@ function getStoreyMarkerLevelOffsetMeters(context: DoorContext): number {
         return topmostBelowSlab
     }
 
+    if (context.hostWall?.boundingBox) {
+        const wallBounds = measureBoundingBoxInAxes(
+            context.hostWall.boundingBox,
+            frame.widthAxis,
+            frame.upAxis,
+            frame.semanticFacing
+        )
+        if (Number.isFinite(wallBounds.minB)) {
+            return Math.min(wallBounds.minB - originB, -frame.height / 2)
+        }
+    }
+
     return -frame.height / 2
 }
 
@@ -2115,14 +2127,21 @@ function collectFrontElevationFitGeometry(
     context: DoorContext,
     opts: Required<SVGRenderOptions>
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } | null {
-    const fitMeshes = getDoorMeshes(context)
-    if (fitMeshes.length === 0) {
-        return null
-    }
     const frame = context.viewFrame
     const margin = Math.max(opts.margin, 0.25)
     const { camera, frustumWidth, frustumHeight } = createElevationOrthographicCamera(frame, margin, false)
-    return collectProjectedGeometry(fitMeshes, context, opts, camera, frustumWidth, frustumHeight, false, 0, 'camera-facing', true)
+    const fitGeometry = boundsToFitGeometry(
+        projectElevationDoorBounds(frame, camera, frustumWidth, frustumHeight)
+    )
+    const elevationHostClipBounds = getElevationHostClipBounds(
+        context,
+        fitGeometry,
+        opts,
+        camera,
+        frustumWidth,
+        frustumHeight
+    )
+    return elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry
 }
 
 function computeFrontElevationScale(context: DoorContext, opts: Required<SVGRenderOptions>): number | undefined {
@@ -2226,13 +2245,16 @@ function getWallRevealRects(params: {
     const rects: WallRevealRect[] = []
 
     if (viewType !== 'Plan') {
-        const topBandBottom = topBandBottomY ?? offsetY
+        const topBandBottom = THREE.MathUtils.clamp(topBandBottomY ?? offsetY, bounds.minY, bounds.maxY)
         const actualTopY = bounds.minY
-        if (includeLeft && offsetX - leftX > 0.5) {
-            rects.push({ x: leftX, y: actualTopY, width: offsetX - leftX, height: bottomY - actualTopY })
+        const clampedOffsetX = THREE.MathUtils.clamp(offsetX, bounds.minX, bounds.maxX)
+        const clampedRightXStart = THREE.MathUtils.clamp(rightXStart, bounds.minX, bounds.maxX)
+        const clampedBottomY = THREE.MathUtils.clamp(bottomY, bounds.minY, bounds.maxY)
+        if (includeLeft && clampedOffsetX - leftX > 0.5 && clampedBottomY - actualTopY > 0.5) {
+            rects.push({ x: leftX, y: actualTopY, width: clampedOffsetX - leftX, height: clampedBottomY - actualTopY })
         }
-        if (includeRight && rightXEnd - rightXStart > 0.5) {
-            rects.push({ x: rightXStart, y: actualTopY, width: rightXEnd - rightXStart, height: bottomY - actualTopY })
+        if (includeRight && rightXEnd - clampedRightXStart > 0.5 && clampedBottomY - actualTopY > 0.5) {
+            rects.push({ x: clampedRightXStart, y: actualTopY, width: rightXEnd - clampedRightXStart, height: clampedBottomY - actualTopY })
         }
         if (includeTop && bandH > 0 && topBandBottom - actualTopY > 0.5) {
             rects.push({ x: leftX, y: actualTopY, width: rightXEnd - leftX, height: topBandBottom - actualTopY })
@@ -2250,8 +2272,13 @@ function getWallRevealRects(params: {
         Math.max(scaledHeight, wallThickness)
     )
     const actualPlanBandH = planBandHeight ?? computedPlanBandH
-    const actualPlanBandY = planBandY
+    const unclampedPlanBandY = planBandY
         ?? (planArcFlip ? offsetY + scaledHeight - actualPlanBandH : offsetY)
+    const actualPlanBandY = THREE.MathUtils.clamp(
+        unclampedPlanBandY,
+        bounds.minY,
+        Math.max(bounds.minY, bounds.maxY - actualPlanBandH)
+    )
 
     if (offsetX - leftX > 0.5) {
         rects.push({
@@ -2480,7 +2507,8 @@ function generateSVGString(
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
 ${fontDefs}${drawingClipDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
-  <g id="fills" clip-path="url(#drawing-clip)">
+  <g id="fills">
+  <g clip-path="url(#drawing-clip)">
 ${wallBandsSvg}
 `
 
@@ -2496,7 +2524,9 @@ ${wallBandsSvg}
     }
 
     svg += `  </g>
-  <g id="edges" clip-path="url(#drawing-clip)">
+  </g>
+  <g id="edges">
+  <g clip-path="url(#drawing-clip)">
 `
 
     // Draw edges with transformed coordinates
@@ -2513,7 +2543,8 @@ ${wallBandsSvg}
     }
 
 
-    svg += `  </g>`
+    svg += `  </g>
+  </g>`
 
     // "Vorderansicht" arrow intentionally omitted – not needed on generated pictures
 
@@ -2819,8 +2850,10 @@ function renderElevationFromMeshes(
         frustumHeight
     )
     const elevationHostClipBounds = getElevationHostClipBounds(context, fitGeometry, opts, camera, frustumWidth, frustumHeight)
-    const sharedDrawingScale = fitBounds
-        ? resolveSvgViewTransform(fitBounds, opts, context).scale
+    const scaleFitGeometry = elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry
+    const scaleFitBounds = getBoundsFromProjectedGeometry(scaleFitGeometry.edges, scaleFitGeometry.polygons)
+    const sharedDrawingScale = scaleFitBounds
+        ? resolveSvgViewTransform(scaleFitBounds, opts, context).scale
         : undefined
     const wallMeshes = getHostWallMeshes(context)
     const wallGeometry = wallMeshes.length > 0
@@ -2841,8 +2874,19 @@ function renderElevationFromMeshes(
             elevationHostClipBounds
         )
         : { edges: [], polygons: [] }
+    const semanticWallGeometry = clipProjectedGeometryToBounds(
+        createSemanticElevationWallGeometry(context, camera, frustumWidth, frustumHeight, opts),
+        elevationHostClipBounds
+    )
     renderGeometry.edges.push(...wallGeometry.edges)
     renderGeometry.polygons.push(...wallGeometry.polygons)
+    // Always merge semantic wall bands. They keep host context readable even when mesh projection
+    // exists but collapses into extremely small fills or misses reveals near the opening.
+    renderGeometry.edges.push(...semanticWallGeometry.edges)
+    renderGeometry.polygons.push(...semanticWallGeometry.polygons)
+    const hasElevationWallGeometry =
+        wallGeometry.polygons.some((polygon) => polygon.color === opts.wallColor)
+        || semanticWallGeometry.polygons.some((polygon) => polygon.color === opts.wallColor)
     const slabGeometry = clipProjectedGeometryToBounds(
         createSemanticElevationSlabGeometry(context, camera, frustumWidth, frustumHeight, opts),
         elevationHostClipBounds
@@ -2875,7 +2919,7 @@ function renderElevationFromMeshes(
             context,
             viewType: isBackView ? 'Back' : 'Front',
             planArcFlip: false,
-            suppressSyntheticWallBands: wallMeshes.length > 0,
+            suppressSyntheticWallBands: hasElevationWallGeometry,
             storeyMarkerProjectedY: projectStoreyMarkerLevelY(context, camera, frustumWidth, frustumHeight),
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
         }
@@ -3106,54 +3150,16 @@ function mirrorResolvedSwingLeaves(leaves: ResolvedSwingLeaf[]): ResolvedSwingLe
 const PLAN_SWING_OPEN_RAD = (15 * Math.PI) / 180
 
 function parseOperationType(operationType: string | null): SwingArcParams {
-    if (!operationType) {
-        return { type: 'none' }
+    const info = getDoorOperationInfo(operationType)
+    if (info.kind === 'swing' || info.kind === 'fixed') {
+        return info.hingeSide ? { type: 'swing', hingeSide: info.hingeSide } : { type: 'none' }
     }
-
-    const upper = operationType.toUpperCase()
-
-    if (upper.includes('SWING_FIXED_LEFT')) {
-        return { type: 'swing', hingeSide: 'left' }
+    if (info.kind === 'sliding') {
+        return { type: 'sliding', slideDirection: info.slideDirection ?? 'right' }
     }
-    if (upper.includes('SWING_FIXED_RIGHT')) {
-        return { type: 'swing', hingeSide: 'right' }
-    }
-
-    // Single swing doors
-    if (upper.includes('SINGLE_SWING_LEFT') || upper === 'SINGLE_SWING_LEFT') {
-        return { type: 'swing', hingeSide: 'left' }
-    }
-    if (upper.includes('SINGLE_SWING_RIGHT') || upper === 'SINGLE_SWING_RIGHT') {
-        return { type: 'swing', hingeSide: 'right' }
-    }
-
-    // Double doors
-    if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING') || upper === 'DOUBLE_SWING') {
-        return { type: 'swing', hingeSide: 'both' }
-    }
-
-    // Sliding doors
-    if (upper.includes('SLIDING_TO_LEFT')) {
-        return { type: 'sliding', slideDirection: 'left' }
-    }
-    if (upper.includes('SLIDING_TO_RIGHT')) {
-        return { type: 'sliding', slideDirection: 'right' }
-    }
-    if (upper.includes('SLIDING') && !upper.includes('FOLDING')) {
-        // Generic sliding door
-        return { type: 'sliding', slideDirection: 'right' }
-    }
-
-    // Folding doors
-    if (upper.includes('FOLDING')) {
+    if (info.kind === 'folding') {
         return { type: 'folding' }
     }
-
-    // Default: assume swing if unknown
-    if (upper.includes('SWING')) {
-        return { type: 'swing', hingeSide: 'right' }
-    }
-
     return { type: 'none' }
 }
 
@@ -3322,7 +3328,7 @@ function generateSingleLeafArc(
         color: '#666666', // Same color as arc
         depth: (hingeProj.z + openDoorProj.z) / 2,
         layer: 0,
-        isDashed: false,
+        isDashed: true,
         strokeWidthFactor: DOOR_EDGE_STROKE_FACTOR,
     })
 
@@ -3435,6 +3441,7 @@ function renderSwingArcSVGForBoundingBox(
           x2="${endX}" y2="${endY}" 
           stroke="${lineColor}" 
           stroke-width="${lineWidth * DOOR_EDGE_STROKE_FACTOR}" 
+          stroke-dasharray="4,2"
           opacity="0.7"/>`
     }).join('\n')
 
