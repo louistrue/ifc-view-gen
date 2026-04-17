@@ -38,6 +38,21 @@ export interface NearbyDeviceVisibility {
     backOverlapScore: number
 }
 
+export type DoorContextHostSource = 'ifc-relation' | 'bbox-fallback' | 'none'
+export type DoorContextViewFrameSource = 'analyze-door-geometry'
+
+export interface DoorContextDiagnostics {
+    hostSource: DoorContextHostSource
+    relationHostExpressID: number | null
+    resolvedHostExpressID: number | null
+    viewFrameSource: DoorContextViewFrameSource
+    detailedDoorMeshCount?: number
+    detailedWallMeshCount?: number
+    detailedSlabMeshCount?: number
+    detailedDeviceMeshCount?: number
+    detailedViewFrame?: DoorViewFrame
+}
+
 export interface DoorContext {
     door: ElementInfo
     wall: ElementInfo | null
@@ -77,6 +92,7 @@ export interface DoorContext {
         isExternal: string | null
     }
     operableLeaves?: OperableDoorLeaves
+    diagnostics?: DoorContextDiagnostics
 
     // Detailed geometry from web-ifc (for high-quality SVG rendering)
     detailedGeometry?: {
@@ -270,9 +286,10 @@ type DoorOperationInfo = {
     fixedSide: 'left' | 'right' | null
     swingCapable: boolean
     fixedLabeled: boolean
+    slideDirection: 'left' | 'right' | null
 }
 
-function parseDoorOperationType(operationType: string | null): DoorOperationInfo {
+export function getDoorOperationInfo(operationType: string | null): DoorOperationInfo {
     if (!operationType) {
         return {
             kind: 'none',
@@ -280,38 +297,45 @@ function parseDoorOperationType(operationType: string | null): DoorOperationInfo
             fixedSide: null,
             swingCapable: false,
             fixedLabeled: false,
+            slideDirection: null,
         }
     }
 
     const upper = operationType.toUpperCase()
     if (upper.includes('SWING_FIXED_LEFT')) {
-        return { kind: 'fixed', hingeSide: 'left', fixedSide: 'right', swingCapable: true, fixedLabeled: true }
+        return { kind: 'fixed', hingeSide: 'left', fixedSide: 'right', swingCapable: true, fixedLabeled: true, slideDirection: null }
     }
     if (upper.includes('SWING_FIXED_RIGHT')) {
-        return { kind: 'fixed', hingeSide: 'right', fixedSide: 'left', swingCapable: true, fixedLabeled: true }
+        return { kind: 'fixed', hingeSide: 'right', fixedSide: 'left', swingCapable: true, fixedLabeled: true, slideDirection: null }
     }
     if (upper.includes('SINGLE_SWING_LEFT') || upper === 'SINGLE_SWING_LEFT') {
-        return { kind: 'swing', hingeSide: 'left', fixedSide: null, swingCapable: true, fixedLabeled: false }
+        return { kind: 'swing', hingeSide: 'left', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
     }
     if (upper.includes('SINGLE_SWING_RIGHT') || upper === 'SINGLE_SWING_RIGHT') {
-        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false }
+        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
     }
     if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING') || upper === 'DOUBLE_SWING') {
-        return { kind: 'swing', hingeSide: 'both', fixedSide: null, swingCapable: true, fixedLabeled: false }
+        return { kind: 'swing', hingeSide: 'both', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
+    }
+    if (upper.includes('SLIDING_TO_LEFT')) {
+        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: 'left' }
+    }
+    if (upper.includes('SLIDING_TO_RIGHT')) {
+        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: 'right' }
     }
     if (upper.includes('SLIDING') && !upper.includes('FOLDING')) {
-        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false }
+        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: 'right' }
     }
     if (upper.includes('FOLDING')) {
-        return { kind: 'folding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false }
+        return { kind: 'folding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: null }
     }
     if (upper.includes('FIXED')) {
-        return { kind: 'fixed', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: true }
+        return { kind: 'fixed', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: true, slideDirection: null }
     }
     if (upper.includes('SWING')) {
-        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false }
+        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
     }
-    return { kind: 'none', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false }
+    return { kind: 'none', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: null }
 }
 
 function resolveOperableLeaves(
@@ -320,7 +344,7 @@ function resolveOperableLeaves(
     leafMetadata: DoorLeafMetadata | undefined,
     frameWidth: number
 ): OperableDoorLeaves | undefined {
-    const operation = parseDoorOperationType(openingDirection)
+    const operation = getDoorOperationInfo(openingDirection)
 
     const totalWidth =
         leafMetadata?.overallWidth
@@ -649,17 +673,21 @@ function isDoorType(typeName: string, ifcType?: number): boolean {
  */
 function isWallType(typeName: string, ifcType?: number): boolean {
     const lower = typeName.toLowerCase()
+    const ifcCurtainWall = (WebIFC as any).IFCCURTAINWALL
+    const matchesIfcType = ifcType !== undefined && (
+        ifcType === WebIFC.IFCWALL
+        || ifcType === WebIFC.IFCWALLSTANDARDCASE
+        || ifcType === 65
+        || (typeof ifcCurtainWall === 'number' && ifcType === ifcCurtainWall)
+    )
     return (
         lower.includes('wall') ||
+        lower.includes('curtainwall') ||
         typeName === 'IFCWALL' ||
         typeName === 'IFCWALLSTANDARDCASE' ||
+        typeName === 'IFCCURTAINWALL' ||
         typeName.startsWith('IFCWALL') ||
-        // Check regular type code
-        (ifcType !== undefined && (
-            ifcType === WebIFC.IFCWALL ||
-            ifcType === WebIFC.IFCWALLSTANDARDCASE ||
-            ifcType === 65
-        ))
+        matchesIfcType
     )
 }
 
@@ -684,6 +712,11 @@ function isElectricalDeviceType(typeName: string): boolean {
     return (
         lower.includes('electrical') ||
         lower.includes('electric') ||
+        lower.includes('cable') ||
+        lower.includes('conduit') ||
+        lower.includes('carrier') ||
+        lower.includes('junction') ||
+        lower.includes('distributionflow') ||
         lower.includes('switch') ||
         lower.includes('outlet') ||
         lower.includes('socket') ||
@@ -691,6 +724,18 @@ function isElectricalDeviceType(typeName: string): boolean {
         lower.includes('fixture') ||
         lower.includes('panel') ||
         lower.includes('distribution') ||
+        typeName === 'IFCFLOWTERMINAL' ||
+        typeName === 'IFCSWITCHINGDEVICE' ||
+        typeName === 'IFCOUTLET' ||
+        typeName === 'IFCLIGHTFIXTURE' ||
+        typeName === 'IFCFLOWSEGMENT' ||
+        typeName === 'IFCFLOWCONTROLLER' ||
+        typeName === 'IFCDISTRIBUTIONCONTROLELEMENT' ||
+        typeName === 'IFCDISTRIBUTIONFLOWELEMENT' ||
+        typeName === 'IFCELECTRICDISTRIBUTIONBOARD' ||
+        typeName === 'IFCJUNCTIONBOX' ||
+        typeName === 'IFCCABLECARRIERSEGMENT' ||
+        typeName === 'IFCCABLESEGMENT' ||
         typeName === 'IFCELECTRICAPPLIANCE' ||
         typeName.startsWith('IFCELECTRICAPPLIANCE')
     )
@@ -1159,6 +1204,50 @@ function buildDoorViewFrame(door: ElementInfo, semanticFacing: THREE.Vector3): D
 }
 
 /**
+ * Decide whether the measurement-based frame should replace the original `viewFrame`.
+ *
+ * We promote when:
+ *  - The detailed measurement is finite and positive on all axes, AND
+ *  - The door width, height, or thickness from the ElementInfo bounding box differs by more
+ *    than a small relative tolerance from the measured geometry.
+ *
+ * Real doors rarely exceed ~1.5 m wide or ~3 m tall, so an inflated fragment bbox (e.g. 18 m)
+ * will trip this by a wide margin. A tight fallback bbox that happens to coincide with the
+ * measurement (same size) is left alone so existing snapshots do not shift.
+ */
+function shouldPromoteDetailedFrame(current: DoorViewFrame, detailed: DoorViewFrame): boolean {
+    if (!Number.isFinite(detailed.width) || !Number.isFinite(detailed.height) || !Number.isFinite(detailed.thickness)) {
+        return false
+    }
+    if (detailed.width <= 1e-4 || detailed.height <= 1e-4 || detailed.thickness <= 1e-6) {
+        return false
+    }
+    const relDiff = (a: number, b: number): number => {
+        const denom = Math.max(Math.abs(a), Math.abs(b), 1e-6)
+        return Math.abs(a - b) / denom
+    }
+    const widthDiff = relDiff(current.width, detailed.width)
+    const heightDiff = relDiff(current.height, detailed.height)
+    const thicknessDiff = relDiff(current.thickness, detailed.thickness)
+    // Promote if any dimension changes by more than 5%. This catches bay-spanning inflated
+    // boxes (hundreds of percent) without churn on tight-matching frames.
+    return widthDiff > 0.05 || heightDiff > 0.05 || thicknessDiff > 0.05
+}
+
+function cloneDoorViewFrame(frame: DoorViewFrame): DoorViewFrame {
+    return {
+        origin: frame.origin.clone(),
+        widthAxis: frame.widthAxis.clone(),
+        depthAxis: frame.depthAxis.clone(),
+        upAxis: frame.upAxis.clone(),
+        semanticFacing: frame.semanticFacing.clone(),
+        width: frame.width,
+        height: frame.height,
+        thickness: frame.thickness,
+    }
+}
+
+/**
  * Find the host wall for a door by checking if door bounding box intersects wall
  */
 function findHostWall(
@@ -1244,8 +1333,8 @@ function findHostSlabs(
             min: originDepth - Math.max(viewFrame.thickness / 2, 0.12),
             max: originDepth + Math.max(viewFrame.thickness / 2, 0.12),
         }
-    const widthPadding = Math.max(viewFrame.width * 0.08, 0.05)
-    const depthPadding = 0.04
+    const widthPadding = Math.max(viewFrame.width * 0.12, 0.08)
+    const depthPadding = Math.max(viewFrame.thickness * 0.2, 0.08)
 
     type Candidate = { element: ElementInfo; gap: number; overlapScore: number }
     const belowCandidates: Candidate[] = []
@@ -1273,7 +1362,7 @@ function findHostSlabs(
             doorWidth.min - widthPadding,
             doorWidth.max + widthPadding
         )
-        if (widthOverlap <= 0.05) continue
+        if (widthOverlap <= 0.02) continue
 
         const depthOverlap = getIntervalOverlapLength(
             slabDepth.min,
@@ -1281,7 +1370,7 @@ function findHostSlabs(
             hostDepth.min - depthPadding,
             hostDepth.max + depthPadding
         )
-        if (depthOverlap <= 0.01) continue
+        if (depthOverlap <= 0.005) continue
 
         const overlapScore = widthOverlap + depthOverlap
         const belowGap = doorHeight.min - slabHeight.max
@@ -1333,7 +1422,7 @@ function findNearbyDevices(
     const doorCenterA = (doorBoundsInFrame.minA + doorBoundsInFrame.maxA) / 2
     const expandedDoorVerticalMin = doorBoundsInFrame.minB - 0.15
     const expandedDoorVerticalMax = doorBoundsInFrame.maxB + 0.15
-    const edgeBandThreshold = Math.max(viewFrame.width * 0.12, 0.18)
+    const edgeBandThreshold = Math.max(viewFrame.width * 0.18, 0.24)
 
     const filtered = devices
         .filter((device) => device.boundingBox)
@@ -1365,10 +1454,11 @@ function findNearbyDevices(
             const intersectsHostWall = Boolean(hostWallBox?.intersectsBox(candidateBox))
             const inSameWallPlane = planeGap <= Math.max(0.6, halfDepthOnNormal + 0.2)
             const nearDoorJamb = distanceToNearestJamb <= edgeBandThreshold
+            const withinExtendedDoorBand = Math.abs(candidateCenterA - doorCenterA) <= Math.max(viewFrame.width * 0.6, 0.5)
             const shouldKeep =
                 overlapsDoorVerticalBand && (
-                    (bboxGap <= radius && inSameWallPlane && nearDoorJamb)
-                    || (intersectsHostWall && nearDoorJamb && bboxGap <= Math.max(radius * 1.5, 2.0) && planeGap <= Math.max(0.8, halfDepthOnNormal + 0.35))
+                    (bboxGap <= radius && inSameWallPlane && (nearDoorJamb || intersectsHostWall || withinExtendedDoorBand))
+                    || (intersectsHostWall && (nearDoorJamb || withinExtendedDoorBand) && bboxGap <= Math.max(radius * 1.5, 2.0) && planeGap <= Math.max(0.8, halfDepthOnNormal + 0.35))
                 )
 
             return {
@@ -1743,8 +1833,14 @@ export async function analyzeDoors(
         const doorNormal = calculateElementNormal(door)
         let geometricNormal = doorNormal.clone()
         const relationHostID = hostRelationshipMap?.get(door.expressID)
-        const hostWall = (typeof relationHostID === 'number' ? wallByExpressID.get(relationHostID) ?? null : null)
-            ?? findHostWall(door, walls, 0.3)
+        const relationHostWall = typeof relationHostID === 'number' ? wallByExpressID.get(relationHostID) ?? null : null
+        const fallbackHostWall = relationHostWall ? null : findHostWall(door, walls, 0.3)
+        const hostWall = relationHostWall ?? fallbackHostWall
+        const hostSource: DoorContextHostSource = relationHostWall
+            ? 'ifc-relation'
+            : fallbackHostWall
+                ? 'bbox-fallback'
+                : 'none'
 
         if (hostWall) {
             const wallNormal = calculateElementNormal(hostWall)
@@ -1816,6 +1912,12 @@ export async function analyzeDoors(
             storeyName,
             csetStandardCH: csetStandardCH || undefined,
             operableLeaves,
+            diagnostics: {
+                hostSource,
+                relationHostExpressID: typeof relationHostID === 'number' ? relationHostID : null,
+                resolvedHostExpressID: hostWall?.expressID ?? null,
+                viewFrameSource: 'analyze-door-geometry',
+            },
         })
     }
 
@@ -1881,7 +1983,10 @@ export function getDoorMeshes(
 
 export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
     return getDoorMeshes(context, { includeHostWall: true }).filter(
-        (mesh) => mesh.userData.expressID === context.hostWall?.expressID
+        (mesh) => (
+            mesh.userData.expressID === context.hostWall?.expressID
+            || mesh.userData.elementInfo?.expressID === context.hostWall?.expressID
+        )
     )
 }
 
@@ -2028,10 +2133,33 @@ export async function loadDetailedGeometry(
             deviceMeshes,
         }
 
+        const baseDiagnostics = context.diagnostics ?? {
+            hostSource: 'none' as const,
+            relationHostExpressID: null,
+            resolvedHostExpressID: null,
+            viewFrameSource: 'analyze-door-geometry' as const,
+        }
+        context.diagnostics = {
+            ...baseDiagnostics,
+            detailedDoorMeshCount: doorMeshes.length,
+            detailedWallMeshCount: wallMeshes.length,
+            detailedSlabMeshCount: slabMeshes.length,
+            detailedDeviceMeshCount: deviceMeshes.length,
+        }
         if (doorMeshes.length > 0) {
             const fallbackBox = context.door.boundingBox ?? new THREE.Box3().setFromObject(context.door.mesh)
-            context.viewFrame = buildViewFrameFromGeometry(doorMeshes, fallbackBox, context.semanticFacing)
-            context.center = context.viewFrame.origin.clone()
+            const detailedFrame = buildViewFrameFromGeometry(doorMeshes, fallbackBox, context.semanticFacing)
+            context.diagnostics.detailedViewFrame = cloneDoorViewFrame(detailedFrame)
+
+            // Promote the geometry-measured frame to the authoritative viewFrame whenever the
+            // detailed measurement differs meaningfully from the original frame. The original
+            // frame is built from the door ElementInfo's bounding box, which in the fragments-based
+            // browser pipeline can be inflated (e.g. a fixed-glass door's box spans the entire
+            // glazed bay). The detailed frame is measured from real web-ifc vertex positions of
+            // the door meshes themselves and is therefore always tight to the door geometry.
+            if (shouldPromoteDetailedFrame(context.viewFrame, detailedFrame)) {
+                context.viewFrame = cloneDoorViewFrame(detailedFrame)
+            }
         }
     }
 
