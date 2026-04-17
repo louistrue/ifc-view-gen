@@ -2102,8 +2102,14 @@ export async function loadDetailedGeometry(
             deviceMeshes,
         }
 
+        const baseDiagnostics = context.diagnostics ?? {
+            hostSource: 'none' as const,
+            relationHostExpressID: null,
+            resolvedHostExpressID: null,
+            viewFrameSource: 'analyze-door-geometry' as const,
+        }
         context.diagnostics = {
-            ...context.diagnostics,
+            ...baseDiagnostics,
             detailedDoorMeshCount: doorMeshes.length,
             detailedWallMeshCount: wallMeshes.length,
             detailedSlabMeshCount: slabMeshes.length,
