@@ -1203,6 +1203,37 @@ function buildDoorViewFrame(door: ElementInfo, semanticFacing: THREE.Vector3): D
     return buildViewFrameFromGeometry(collectMeshesFromElement(door), fallbackBox, semanticFacing)
 }
 
+/**
+ * Decide whether the measurement-based frame should replace the original `viewFrame`.
+ *
+ * We promote when:
+ *  - The detailed measurement is finite and positive on all axes, AND
+ *  - The door width, height, or thickness from the ElementInfo bounding box differs by more
+ *    than a small relative tolerance from the measured geometry.
+ *
+ * Real doors rarely exceed ~1.5 m wide or ~3 m tall, so an inflated fragment bbox (e.g. 18 m)
+ * will trip this by a wide margin. A tight fallback bbox that happens to coincide with the
+ * measurement (same size) is left alone so existing snapshots do not shift.
+ */
+function shouldPromoteDetailedFrame(current: DoorViewFrame, detailed: DoorViewFrame): boolean {
+    if (!Number.isFinite(detailed.width) || !Number.isFinite(detailed.height) || !Number.isFinite(detailed.thickness)) {
+        return false
+    }
+    if (detailed.width <= 1e-4 || detailed.height <= 1e-4 || detailed.thickness <= 1e-6) {
+        return false
+    }
+    const relDiff = (a: number, b: number): number => {
+        const denom = Math.max(Math.abs(a), Math.abs(b), 1e-6)
+        return Math.abs(a - b) / denom
+    }
+    const widthDiff = relDiff(current.width, detailed.width)
+    const heightDiff = relDiff(current.height, detailed.height)
+    const thicknessDiff = relDiff(current.thickness, detailed.thickness)
+    // Promote if any dimension changes by more than 5%. This catches bay-spanning inflated
+    // boxes (hundreds of percent) without churn on tight-matching frames.
+    return widthDiff > 0.05 || heightDiff > 0.05 || thicknessDiff > 0.05
+}
+
 function cloneDoorViewFrame(frame: DoorViewFrame): DoorViewFrame {
     return {
         origin: frame.origin.clone(),
@@ -2117,9 +2148,18 @@ export async function loadDetailedGeometry(
         }
         if (doorMeshes.length > 0) {
             const fallbackBox = context.door.boundingBox ?? new THREE.Box3().setFromObject(context.door.mesh)
-            context.diagnostics.detailedViewFrame = cloneDoorViewFrame(
-                buildViewFrameFromGeometry(doorMeshes, fallbackBox, context.semanticFacing)
-            )
+            const detailedFrame = buildViewFrameFromGeometry(doorMeshes, fallbackBox, context.semanticFacing)
+            context.diagnostics.detailedViewFrame = cloneDoorViewFrame(detailedFrame)
+
+            // Promote the geometry-measured frame to the authoritative viewFrame whenever the
+            // detailed measurement differs meaningfully from the original frame. The original
+            // frame is built from the door ElementInfo's bounding box, which in the fragments-based
+            // browser pipeline can be inflated (e.g. a fixed-glass door's box spans the entire
+            // glazed bay). The detailed frame is measured from real web-ifc vertex positions of
+            // the door meshes themselves and is therefore always tight to the door geometry.
+            if (shouldPromoteDetailedFrame(context.viewFrame, detailedFrame)) {
+                context.viewFrame = cloneDoorViewFrame(detailedFrame)
+            }
         }
     }
 
