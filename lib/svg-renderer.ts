@@ -4120,7 +4120,79 @@ function shouldRenderPlanSwing(frame: DoorViewFrame): boolean {
     return axisAligned(frame.widthAxis) && axisAligned(frame.semanticFacing)
 }
 
-function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): ResolvedSwingLeaf[] {
+function detectLeafCenterFromMeshes(
+    context: DoorContext,
+    frame: DoorViewFrame,
+    expectedLeafWidth: number
+): { centerOffset: number; width: number } | null {
+    const meshes = context.detailedGeometry?.doorMeshes
+    if (!meshes || meshes.length === 0) return null
+    if (!Number.isFinite(expectedLeafWidth) || expectedLeafWidth <= 0.05) return null
+
+    const widthAxis = frame.widthAxis.clone().normalize()
+    const origin = frame.origin
+    const halfFrame = frame.width / 2 + 0.05
+
+    type Candidate = { centerOffset: number; width: number; score: number }
+    const candidates: Candidate[] = []
+
+    for (const mesh of meshes) {
+        mesh.updateMatrixWorld()
+        const geo = (mesh as any).geometry as THREE.BufferGeometry | undefined
+        if (!geo) continue
+        geo.computeBoundingBox()
+        const bbox = geo.boundingBox
+        if (!bbox) continue
+
+        let minAxis = Infinity
+        let maxAxis = -Infinity
+        const corners = [
+            new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z),
+            new THREE.Vector3(bbox.max.x, bbox.min.y, bbox.min.z),
+            new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.min.z),
+            new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.min.z),
+            new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z),
+            new THREE.Vector3(bbox.max.x, bbox.min.y, bbox.max.z),
+            new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z),
+            new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z),
+        ]
+        for (const corner of corners) {
+            corner.applyMatrix4(mesh.matrixWorld)
+            const offset = corner.clone().sub(origin).dot(widthAxis)
+            if (offset < minAxis) minAxis = offset
+            if (offset > maxAxis) maxAxis = offset
+        }
+        if (!Number.isFinite(minAxis) || !Number.isFinite(maxAxis)) continue
+        const width = maxAxis - minAxis
+        const centerOffset = (minAxis + maxAxis) / 2
+        if (width <= 0.1 || width > halfFrame * 2) continue
+        if (Math.abs(centerOffset) > halfFrame) continue
+
+        const widthDelta = Math.abs(width - expectedLeafWidth)
+        if (widthDelta > expectedLeafWidth * 0.35) continue
+        candidates.push({ centerOffset, width, score: widthDelta })
+    }
+
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => a.score - b.score)
+
+    const grouped: { centerOffset: number; width: number; count: number }[] = []
+    for (const c of candidates) {
+        const match = grouped.find(
+            (g) => Math.abs(g.centerOffset - c.centerOffset) < 0.1 && Math.abs(g.width - c.width) < 0.1
+        )
+        if (match) {
+            match.count += 1
+        } else {
+            grouped.push({ centerOffset: c.centerOffset, width: c.width, count: 1 })
+        }
+    }
+    grouped.sort((a, b) => b.count - a.count)
+    const best = grouped[0]
+    return { centerOffset: best.centerOffset, width: best.width }
+}
+
+function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number, frame?: DoorViewFrame): ResolvedSwingLeaf[] {
     const params = parseOperationType(context.openingDirection)
     if (params.type !== 'swing' || !params.hingeSide || totalWidth <= 0) {
         return []
@@ -4129,7 +4201,7 @@ function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): R
     const operableLeaves = context.operableLeaves
     if (operableLeaves?.leaves.length) {
         const scale = operableLeaves.totalWidth > 1e-6 ? totalWidth / operableLeaves.totalWidth : 1
-        const leaves = operableLeaves.leaves
+        let leaves = operableLeaves.leaves
             .map((leaf) => ({
                 width: leaf.width * scale,
                 swingRadius: leaf.width * scale,
@@ -4137,6 +4209,48 @@ function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): R
                 hingeOffsetFromCenter: leaf.hingeOffsetFromCenter * scale,
             }))
             .filter((leaf) => Number.isFinite(leaf.width) && leaf.width > 0.01)
+
+        // If the door has a fixed panel (clearWidth < totalWidth) and we have a single-leaf
+        // result, the IFC cset-clear-width metadata cannot reveal which side the fixed panel
+        // is on and defaults to a centered opening. In that case, detect the leaf position
+        // directly from the door mesh geometry (which is already in the renderer's widthAxis
+        // frame, so the IFC→renderer handedness mirror is NOT applied to the detected offset).
+        const usingScaledFrame = operableLeaves.totalWidth > 1e-6
+            && Math.abs(operableLeaves.totalWidth - totalWidth) < 0.2
+        const clearWidth = operableLeaves.clearWidth
+        const hasSignificantFixedPanel = clearWidth !== null
+            && Number.isFinite(clearWidth)
+            && clearWidth > 0.3
+            && clearWidth < operableLeaves.totalWidth - 0.1
+        if (
+            frame
+            && usingScaledFrame
+            && hasSignificantFixedPanel
+            && leaves.length === 1
+            && operableLeaves.source === 'cset-clear-width'
+        ) {
+            const detected = detectLeafCenterFromMeshes(context, frame, clearWidth as number)
+            if (detected) {
+                const originalLeaf = operableLeaves.leaves[0]
+                const scaleFactor = operableLeaves.totalWidth > 1e-6 ? totalWidth / operableLeaves.totalWidth : 1
+                const leafWidth = detected.width * scaleFactor
+                const detectedCenter = detected.centerOffset * scaleFactor
+                const mirror = shouldMirrorSwingForHandedness(context)
+                const effectiveHingeSide: 'left' | 'right' = mirror
+                    ? (originalLeaf.hingeSide === 'left' ? 'right' : 'left')
+                    : originalLeaf.hingeSide
+                const hingeOffsetFromCenter = effectiveHingeSide === 'left'
+                    ? detectedCenter - leafWidth / 2
+                    : detectedCenter + leafWidth / 2
+                return [{
+                    width: leafWidth,
+                    swingRadius: leafWidth,
+                    hingeSide: effectiveHingeSide,
+                    hingeOffsetFromCenter,
+                }]
+            }
+        }
+
         if (leaves.length > 0) {
             return shouldMirrorSwingForHandedness(context) ? mirrorResolvedSwingLeaves(leaves) : leaves
         }
@@ -4189,7 +4303,7 @@ function normalizeSwingLeavesForScreen(
 }
 
 function getPlanSwingReach(context: DoorContext, frame: DoorViewFrame): number {
-    const leaves = resolveSwingLeavesForWidth(context, frame.width)
+    const leaves = resolveSwingLeavesForWidth(context, frame.width, frame)
     if (leaves.length === 0) return frame.thickness / 2
     const faceOffset = frame.thickness / 2
     return faceOffset + Math.max(...leaves.map((leaf) => leaf.swingRadius * Math.sin(PLAN_SWING_OPEN_RAD)))
@@ -4301,7 +4415,7 @@ function calculateSwingArcEdges(
     const faceOffset = frame.thickness / 2
     const allEdges: ProjectedEdge[] = []
     const leaves = normalizeSwingLeavesForScreen(
-        resolveSwingLeavesForWidth(context, frame.width),
+        resolveSwingLeavesForWidth(context, frame.width, frame),
         frame,
         camera,
         width,
