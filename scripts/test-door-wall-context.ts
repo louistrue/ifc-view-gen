@@ -60,8 +60,11 @@ async function buildContext(options?: {
     openingDirection?: string
     placementYAxis?: THREE.Vector3
     deviceDepthOffset?: number
+    deviceCenterY?: number
     csetStandardCH?: Partial<DoorCsetStandardCHData>
     doorLeafMetadata?: DoorLeafMetadata
+    includeCeiling?: boolean
+    includeStair?: boolean
 }): Promise<DoorContext> {
     const {
         includeWall = true,
@@ -70,8 +73,11 @@ async function buildContext(options?: {
         openingDirection = 'SINGLE_SWING_LEFT',
         placementYAxis,
         deviceDepthOffset = 0.08,
+        deviceCenterY = 1.1,
         csetStandardCH,
         doorLeafMetadata,
+        includeCeiling = false,
+        includeStair = false,
     } = options ?? {}
 
     const doorCenter = new THREE.Vector3(0, 1.05, 0)
@@ -81,11 +87,13 @@ async function buildContext(options?: {
         new THREE.Vector3(localDeviceCenter.x, 0, localDeviceCenter.z),
         rotationY
     )
-    const deviceCenter = new THREE.Vector3(rotatedDeviceCenter.x, localDeviceCenter.y, rotatedDeviceCenter.z)
+    const deviceCenter = new THREE.Vector3(rotatedDeviceCenter.x, deviceCenterY, rotatedDeviceCenter.z)
 
     const doorMesh = createBoxMesh(1, 1, 2.1, 0.12, doorCenter, rotationY)
     const wallMesh = createBoxMesh(2, 40, 3, wallThickness, wallCenter, rotationY)
     const deviceMesh = createBoxMesh(3, 0.12, 0.12, 0.08, deviceCenter)
+    const ceilingMesh = createBoxMesh(4, 4, 0.14, 1.2, new THREE.Vector3(0, 2.45, 0), rotationY)
+    const stairMesh = createBoxMesh(5, 1.6, 0.4, 1.4, new THREE.Vector3(-0.95, 0.25, 0.55), rotationY)
 
     const door = makeElement(1, 'IFCDOOR', doorMesh)
     if (placementYAxis) {
@@ -101,6 +109,12 @@ async function buildContext(options?: {
 
     const device = makeElement(3, 'IFCELECTRICAPPLIANCE', deviceMesh)
     elements.push(device)
+    if (includeCeiling) {
+        elements.push(makeElement(4, 'IFCCOVERING', ceilingMesh))
+    }
+    if (includeStair) {
+        elements.push(makeElement(5, 'IFCSTAIR', stairMesh))
+    }
 
     const model: LoadedIFCModel = {
         group: new THREE.Group(),
@@ -153,6 +167,9 @@ async function buildContext(options?: {
         wallMeshes: includeWall ? [wallMesh] : [],
         nearbyWallMeshes: [],
         slabMeshes: [],
+        ceilingMeshes: includeCeiling ? [ceilingMesh] : [],
+        nearbyDoorMeshes: [],
+        stairMeshes: includeStair ? [stairMesh] : [],
         deviceMeshes: [deviceMesh],
     }
 
@@ -367,6 +384,9 @@ async function buildLCornerContext(): Promise<DoorContext> {
         wallMeshes: [hostWallMesh],
         nearbyWallMeshes: [perpWallMesh],
         slabMeshes: [],
+        ceilingMeshes: [],
+        nearbyDoorMeshes: [],
+        stairMeshes: [],
         deviceMeshes: [],
     }
 
@@ -420,6 +440,9 @@ async function buildAdjacentDoorsContexts(): Promise<{ primary: DoorContext; sec
             wallMeshes: [hostWallMesh],
             nearbyWallMeshes: [],
             slabMeshes: [],
+            ceilingMeshes: [],
+            nearbyDoorMeshes: [],
+            stairMeshes: [],
             deviceMeshes: [],
         }
     }
@@ -780,6 +803,36 @@ async function main() {
         assertCoordinatesWithinBounds(svg, options.width!, canvasH)
     }
 
+    const highMountedDeviceContext = await buildContext({
+        includeWall: true,
+        deviceCenterY: 2.15,
+        includeCeiling: true,
+        includeStair: true,
+    })
+    const highMountedDeviceViews = await renderDoorViews(highMountedDeviceContext, options)
+    const highMountedPlanDevicePaths = extractPathDataByFill(highMountedDeviceViews.plan, options.deviceColor!)
+    assert.ok(
+        highMountedDeviceContext.hostCeilings.length > 0,
+        'Expected IFCCOVERING elements to be collected as host ceilings'
+    )
+    assert.ok(
+        highMountedDeviceContext.nearbyStairs.length > 0,
+        'Expected IFCSTAIR elements to be collected as nearby stairs'
+    )
+    assert.deepEqual(
+        highMountedPlanDevicePaths,
+        [],
+        'Devices above the plan cut should not render in plan view'
+    )
+    assert.ok(
+        getWallFilledArea(highMountedDeviceViews.front, options.floorSlabColor!) > 1200,
+        'Front elevation should render ceiling/stair slab-color context'
+    )
+    assert.ok(
+        getWallFilledArea(highMountedDeviceViews.back, options.floorSlabColor!) > 1200,
+        'Back elevation should render ceiling/stair slab-color context'
+    )
+
     // ── Mesh-based plan section: L-corner + adjacent doors ────────────────────
     // Plan views now project actual wall meshes at the door's cut plane instead
     // of drawing two synthetic rectangular stubs. These fixtures verify that
@@ -857,6 +910,14 @@ async function main() {
         secondaryPlanWallArea > 1000,
         `Adjacent doors: secondary plan should contain non-degenerate wall fill (got ${secondaryPlanWallArea.toFixed(0)})`,
     )
+    assert.ok(
+        getWallFilledArea(adjacentPrimaryViews.plan, '#d1d5db') > 100,
+        'Adjacent doors: primary plan should render nearby-door context geometry'
+    )
+    assert.ok(
+        getWallFilledArea(adjacentSecondaryViews.plan, '#d1d5db') > 100,
+        'Adjacent doors: secondary plan should render nearby-door context geometry'
+    )
     for (const svg of [...Object.values(adjacentPrimaryViews), ...Object.values(adjacentSecondaryViews)]) {
         const canvasH = planH // use plan height as upper bound (conservative)
         assertCoordinatesWithinBounds(svg, options.width!, Math.max(canvasH, options.height!))
@@ -874,6 +935,9 @@ async function main() {
     }
     for (const [view, svg] of Object.entries(backMountedViews)) {
         writeFileSync(`${dir}/back-mounted-${view}.svg`, svg)
+    }
+    for (const [view, svg] of Object.entries(highMountedDeviceViews)) {
+        writeFileSync(`${dir}/high-mounted-device-${view}.svg`, svg)
     }
     // Plan-specific fixtures
     writeFileSync(`${dir}/plan-left-swing.svg`, leftPlan)

@@ -50,6 +50,9 @@ export interface DoorContextDiagnostics {
     detailedWallMeshCount?: number
     detailedNearbyWallMeshCount?: number
     detailedSlabMeshCount?: number
+    detailedCeilingMeshCount?: number
+    detailedNearbyDoorMeshCount?: number
+    detailedStairMeshCount?: number
     detailedDeviceMeshCount?: number
     detailedViewFrame?: DoorViewFrame
 }
@@ -62,6 +65,7 @@ export interface DoorContext {
     hostSlabAbove: ElementInfo | null
     hostSlabsBelow: ElementInfo[]
     hostSlabsAbove: ElementInfo[]
+    hostCeilings: ElementInfo[]
     nearbyDoors: ElementInfo[]
     /**
      * Walls located within the plan viewport band around the door, excluding the
@@ -70,6 +74,7 @@ export interface DoorContext {
      * at the door's cut plane instead of drawing two synthetic jamb rectangles.
      */
     nearbyWalls: ElementInfo[]
+    nearbyStairs: ElementInfo[]
     nearbyDevices: ElementInfo[]
     nearbyDeviceVisibility: NearbyDeviceVisibility[]
     geometricNormal: THREE.Vector3
@@ -109,6 +114,9 @@ export interface DoorContext {
         /** Meshes for walls adjacent to the door — perpendicular / neighbouring walls used for plan-section rendering. Never includes host-wall meshes. */
         nearbyWallMeshes: THREE.Mesh[]
         slabMeshes: THREE.Mesh[]
+        ceilingMeshes: THREE.Mesh[]
+        nearbyDoorMeshes: THREE.Mesh[]
+        stairMeshes: THREE.Mesh[]
         deviceMeshes: THREE.Mesh[]
     }
 }
@@ -511,7 +519,12 @@ function resolveOperableLeaves(
         return buildSingleLeaf('cset-clear-width', clearWidth, operation.fixedSide ? asymmetricPanelPosition : null, clearWidth)
     }
 
-    return buildSingleLeaf('cset-clear-width', safeTotalWidth, operation.fixedSide ? asymmetricPanelPosition : null, safeTotalWidth)
+    return buildSingleLeaf(
+        'cset-clear-width',
+        operableSpanWidth,
+        operation.fixedSide ? asymmetricPanelPosition : null,
+        operableSpanWidth
+    )
 }
 
 async function getDoorCsetStandardCH(
@@ -721,6 +734,41 @@ function isSlabType(typeName: string, ifcType?: number): boolean {
         (ifcType !== undefined && (
             ifcType === (WebIFC as any).IFCSLAB
             || ifcType === 152
+        ))
+    )
+}
+
+function isCoveringType(typeName: string, ifcType?: number): boolean {
+    const lower = typeName.toLowerCase()
+    const ifcCovering = (WebIFC as any).IFCCOVERING
+    return (
+        lower.includes('covering')
+        || lower.includes('ceiling')
+        || lower.includes('decke')
+        || typeName === 'IFCCOVERING'
+        || typeName.startsWith('IFCCOVERING')
+        || (ifcType !== undefined && (
+            (typeof ifcCovering === 'number' && ifcType === ifcCovering)
+            || ifcType === 326
+        ))
+    )
+}
+
+function isStairType(typeName: string, ifcType?: number): boolean {
+    const lower = typeName.toLowerCase()
+    const ifcStair = (WebIFC as any).IFCSTAIR
+    const ifcStairFlight = (WebIFC as any).IFCSTAIRFLIGHT
+    return (
+        lower.includes('stair')
+        || lower.includes('treppe')
+        || typeName === 'IFCSTAIR'
+        || typeName === 'IFCSTAIRFLIGHT'
+        || typeName.startsWith('IFCSTAIR')
+        || (ifcType !== undefined && (
+            (typeof ifcStair === 'number' && ifcType === ifcStair)
+            || (typeof ifcStairFlight === 'number' && ifcType === ifcStairFlight)
+            || ifcType === 331
+            || ifcType === 332
         ))
     )
 }
@@ -1084,13 +1132,22 @@ function classifyNearbyDeviceVisibility(
 
     const wallMid = (wallInterval.min + wallInterval.max) / 2
     const signedDepth = deviceMid - wallMid
+    const insideWallEnvelope = deviceInterval.max >= wallInterval.min && deviceInterval.min <= wallInterval.max
     const overlapScore = Math.max(frontOverlapScore, backOverlapScore)
     const overlapDelta = Math.abs(frontOverlapScore - backOverlapScore)
     const overlapDecisionThreshold = Math.max(0.015, faceBandDepth * 0.12)
     const depthDecisionThreshold = Math.max(0.02, wallDepth * 0.08)
+    const frontFaceGap = Math.abs(deviceInterval.max - wallInterval.max)
+    const backFaceGap = Math.abs(deviceInterval.min - wallInterval.min)
 
     let side: DeviceVisibilitySide = 'unknown'
-    if (overlapScore > 0 && overlapDelta > overlapDecisionThreshold) {
+    if (insideWallEnvelope) {
+        if (overlapScore > 0 && overlapDelta > overlapDecisionThreshold * 0.5) {
+            side = frontOverlapScore >= backOverlapScore ? 'front' : 'back'
+        } else if (Math.abs(frontFaceGap - backFaceGap) > 0.01) {
+            side = frontFaceGap < backFaceGap ? 'front' : 'back'
+        }
+    } else if (overlapScore > 0 && overlapDelta > overlapDecisionThreshold) {
         side = frontOverlapScore > backOverlapScore ? 'front' : 'back'
     } else if (signedDepth > depthDecisionThreshold) {
         side = 'front'
@@ -1327,7 +1384,7 @@ function findHostWall(
     return closestWall
 }
 
-const HOST_CONTEXT_PERPENDICULAR_CROP_METERS = 1.0
+const HOST_CONTEXT_PERPENDICULAR_CROP_METERS = 2.5
 
 function findHostSlabs(
     door: ElementInfo,
@@ -1416,12 +1473,210 @@ function findHostSlabs(
     belowCandidates.sort(sortCandidates)
     aboveCandidates.sort(sortCandidates)
 
-    return {
-        below: belowCandidates[0]?.element ?? null,
-        above: aboveCandidates[0]?.element ?? null,
-        belowAll: belowCandidates.map((candidate) => candidate.element),
-        aboveAll: aboveCandidates.map((candidate) => candidate.element),
+    // Restrict to the door's own storey. Keep only slabs adjacent to the door
+    // and any composite partners that are stacked directly on top of the
+    // primary slab (concrete + finish / topping). Anything further than
+    // MAX_STOREY_OFFSET or separated by a free-standing gap belongs to a
+    // different storey and must not appear in the elevation.
+    const MAX_STOREY_OFFSET_METERS = 1.5
+    const COMPOSITE_STACK_TOLERANCE_METERS = 0.1
+
+    const keepCompositeStack = (
+        candidates: Candidate[],
+        direction: 'below' | 'above'
+    ): ElementInfo[] => {
+        if (candidates.length === 0) return []
+        const primary = candidates[0]
+        if (primary.gap > MAX_STOREY_OFFSET_METERS) return []
+
+        const primaryBox = primary.element.boundingBox
+        if (!primaryBox) return [primary.element]
+        const primaryRange = measureBoxAlongAxis(primaryBox, upAxis)
+
+        const keep: ElementInfo[] = [primary.element]
+        const layers = [{ minB: primaryRange.min, maxB: primaryRange.max }]
+
+        for (let i = 1; i < candidates.length; i++) {
+            const candidate = candidates[i]
+            if (candidate.gap > MAX_STOREY_OFFSET_METERS) continue
+            const box = candidate.element.boundingBox
+            if (!box) continue
+            const range = measureBoxAlongAxis(box, upAxis)
+            // Composite stack: candidate must touch at least one existing layer
+            // within COMPOSITE_STACK_TOLERANCE_METERS along the vertical axis.
+            const touchesExisting = layers.some((layer) => {
+                const overlap = Math.min(layer.maxB, range.max) - Math.max(layer.minB, range.min)
+                if (overlap > -COMPOSITE_STACK_TOLERANCE_METERS) return true
+                if (direction === 'below') {
+                    return Math.abs(range.max - layer.minB) <= COMPOSITE_STACK_TOLERANCE_METERS
+                        || Math.abs(range.min - layer.maxB) <= COMPOSITE_STACK_TOLERANCE_METERS
+                }
+                return Math.abs(range.min - layer.maxB) <= COMPOSITE_STACK_TOLERANCE_METERS
+                    || Math.abs(range.max - layer.minB) <= COMPOSITE_STACK_TOLERANCE_METERS
+            })
+            if (touchesExisting) {
+                keep.push(candidate.element)
+                layers.push({ minB: range.min, maxB: range.max })
+            }
+        }
+
+        return keep
     }
+
+    const belowKept = keepCompositeStack(belowCandidates, 'below')
+    const aboveKept = keepCompositeStack(aboveCandidates, 'above')
+
+    return {
+        below: belowKept[0] ?? null,
+        above: aboveKept[0] ?? null,
+        belowAll: belowKept,
+        aboveAll: aboveKept,
+    }
+}
+
+function findHostCeilings(
+    door: ElementInfo,
+    hostWall: ElementInfo | null,
+    coverings: ElementInfo[],
+    viewFrame: DoorViewFrame
+): ElementInfo[] {
+    const doorBox = door.boundingBox
+    if (!doorBox || coverings.length === 0) {
+        return []
+    }
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const doorWidth = measureBoxAlongAxis(doorBox, widthAxis)
+    const doorHeight = measureBoxAlongAxis(doorBox, upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+    const hostDepth = hostWall?.boundingBox
+        ? measureBoxAlongAxis(hostWall.boundingBox, depthAxis)
+        : {
+            min: originDepth - Math.max(viewFrame.thickness / 2, 0.12),
+            max: originDepth + Math.max(viewFrame.thickness / 2, 0.12),
+        }
+    const widthPadding = Math.max(viewFrame.width * 0.18, 0.12)
+    const depthPadding = Math.max(viewFrame.thickness * 0.3, 0.18)
+
+    return coverings
+        .filter((covering) => Boolean(covering.boundingBox))
+        .map((covering) => {
+            const box = covering.boundingBox!
+            const widthRange = measureBoxAlongAxis(box, widthAxis)
+            const depthRange = measureBoxAlongAxis(box, depthAxis)
+            const upRange = measureBoxAlongAxis(box, upAxis)
+            const localDepthMin = depthRange.min - originDepth
+            const localDepthMax = depthRange.max - originDepth
+            if (
+                localDepthMin > HOST_CONTEXT_PERPENDICULAR_CROP_METERS
+                || localDepthMax < -HOST_CONTEXT_PERPENDICULAR_CROP_METERS
+            ) {
+                return null
+            }
+
+            const widthOverlap = getIntervalOverlapLength(
+                widthRange.min,
+                widthRange.max,
+                doorWidth.min - widthPadding,
+                doorWidth.max + widthPadding
+            )
+            if (widthOverlap <= 0.04) return null
+
+            const depthOverlap = getIntervalOverlapLength(
+                depthRange.min,
+                depthRange.max,
+                hostDepth.min - depthPadding,
+                hostDepth.max + depthPadding
+            )
+            if (depthOverlap <= 0.01) return null
+
+            const gapAboveDoor = upRange.min - doorHeight.max
+            if (gapAboveDoor < -0.2 || gapAboveDoor > 1.8) return null
+
+            return {
+                element: covering,
+                score: gapAboveDoor - (widthOverlap + depthOverlap) * 0.2,
+                upRange,
+            }
+        })
+        .filter(
+            (entry): entry is { element: ElementInfo; score: number; upRange: { min: number; max: number } } =>
+                entry !== null
+        )
+        .sort((a, b) => a.score - b.score || a.element.expressID - b.element.expressID)
+        // Suspended ceiling context: keep only the primary ceiling plane and
+        // any coverings that occupy the same horizontal band. Anything at a
+        // different elevation is a ceiling from an adjacent/other storey and
+        // must not be projected into the door's elevation view.
+        .filter((entry, index, array) => {
+            if (index === 0) return true
+            const primary = array[0]
+            const SAME_BAND_TOLERANCE_METERS = 0.25
+            return Math.abs(entry.upRange.min - primary.upRange.min) <= SAME_BAND_TOLERANCE_METERS
+                || Math.abs(entry.upRange.max - primary.upRange.max) <= SAME_BAND_TOLERANCE_METERS
+        })
+        .map((entry) => entry.element)
+}
+
+function findNearbyStairs(
+    door: ElementInfo,
+    stairs: ElementInfo[],
+    viewFrame: DoorViewFrame,
+    lateralRadius: number = 1.8,
+    depthRadius: number = 2.2,
+    limit: number = 4
+): ElementInfo[] {
+    const doorBox = door.boundingBox
+    if (!doorBox || stairs.length === 0) {
+        return []
+    }
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const doorWidth = measureBoxAlongAxis(doorBox, widthAxis)
+    const doorHeight = measureBoxAlongAxis(doorBox, upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+    const depthBandMin = originDepth - depthRadius
+    const depthBandMax = originDepth + depthRadius
+
+    return stairs
+        .filter((stair) => Boolean(stair.boundingBox))
+        .map((stair) => {
+            const box = stair.boundingBox!
+            const widthRange = measureBoxAlongAxis(box, widthAxis)
+            const depthRange = measureBoxAlongAxis(box, depthAxis)
+            const upRange = measureBoxAlongAxis(box, upAxis)
+            const widthGap = Math.max(
+                doorWidth.min - lateralRadius - widthRange.max,
+                widthRange.min - (doorWidth.max + lateralRadius),
+                0
+            )
+            const verticalGap = Math.max(
+                doorHeight.min - 0.5 - upRange.max,
+                upRange.min - (doorHeight.max + 0.8),
+                0
+            )
+            if (widthGap > 0.01 || verticalGap > 0.01) {
+                return null
+            }
+            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
+                return null
+            }
+
+            return {
+                element: stair,
+                score:
+                    Math.abs(((widthRange.min + widthRange.max) / 2) - ((doorWidth.min + doorWidth.max) / 2))
+                    + Math.abs(((depthRange.min + depthRange.max) / 2) - originDepth) * 0.8,
+            }
+        })
+        .filter((entry): entry is { element: ElementInfo; score: number } => entry !== null)
+        .sort((a, b) => a.score - b.score || a.element.expressID - b.element.expressID)
+        .slice(0, limit)
+        .map((entry) => entry.element)
 }
 
 /**
@@ -1444,8 +1699,8 @@ function findNearbyDevices(
     const upAxis = viewFrame.upAxis.clone().normalize()
     const doorBoundsInFrame = measureBoxInFrame(door.boundingBox, widthAxis, upAxis)
     const doorCenterA = (doorBoundsInFrame.minA + doorBoundsInFrame.maxA) / 2
-    const expandedDoorVerticalMin = doorBoundsInFrame.minB - 0.15
-    const expandedDoorVerticalMax = doorBoundsInFrame.maxB + 0.15
+    const expandedDoorVerticalMin = doorBoundsInFrame.minB
+    const expandedDoorVerticalMax = doorBoundsInFrame.maxB
     const edgeBandThreshold = Math.max(viewFrame.width * 0.18, 0.24)
 
     const filtered = devices
@@ -1620,9 +1875,9 @@ function findNearbyWalls(
     walls: ElementInfo[],
     hostWall: ElementInfo | null,
     viewFrame: DoorViewFrame,
-    lateralRadius: number = 0.8,
-    depthRadius: number = 0.8,
-    limit: number = 6
+    lateralRadius: number = 1.6,
+    depthRadius: number = 1.2,
+    limit: number = 12
 ): ElementInfo[] {
     if (!door.boundingBox) return []
 
@@ -1678,9 +1933,25 @@ function findNearbyWalls(
             const lateralDistance = Math.abs(widthCenter - originWidth)
             const depthDistance = Math.abs(depthCenter - originDepth)
 
+            const doorwayWidthGap = Math.max(
+                widthBandMin - widthRange.max,
+                widthRange.min - widthBandMax,
+                0
+            )
+            const doorPlaneGap = Math.max(
+                depthBandMin - depthRange.max,
+                depthRange.min - depthBandMax,
+                0
+            )
+
             return {
                 wall,
-                score: lateralDistance + depthDistance - (widthOverlap + depthOverlap) * 0.5,
+                score:
+                    lateralDistance
+                    + depthDistance
+                    + doorwayWidthGap * 2.5
+                    + doorPlaneGap * 3
+                    - (widthOverlap + depthOverlap) * 0.6,
             }
         })
         .filter((entry): entry is { wall: ElementInfo; score: number } => entry !== null)
@@ -1888,6 +2159,8 @@ export async function analyzeDoors(
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
     const slabs: ElementInfo[] = []
+    const coverings: ElementInfo[] = []
+    const stairs: ElementInfo[] = []
     const devices: ElementInfo[] = []
 
     // Helper to process elements from a model
@@ -1903,6 +2176,10 @@ export async function analyzeDoors(
                 || slabAggregatePartMap?.has(element.expressID)
             ) {
                 slabs.push(element)
+            } else if (isCoveringType(element.typeName, element.ifcType)) {
+                coverings.push(element)
+            } else if (isStairType(element.typeName, element.ifcType)) {
+                stairs.push(element)
             } else if (isElectricalDeviceType(element.typeName)) {
                 devices.push(element)
             }
@@ -1974,6 +2251,8 @@ export async function analyzeDoors(
             belowAll: hostSlabsBelow,
             aboveAll: hostSlabsAbove,
         } = findHostSlabs(door, hostWall, slabs, viewFrame)
+        const hostCeilings = findHostCeilings(door, hostWall, coverings, viewFrame)
+        const nearbyStairs = findNearbyStairs(door, stairs, viewFrame)
         const nearbyDevices = findNearbyDevices(door, devices, geometricNormal, hostWall, viewFrame)
         const nearbyDeviceVisibility = nearbyDevices.map((device) =>
             classifyNearbyDeviceVisibility(device, hostWall, viewFrame)
@@ -2012,8 +2291,10 @@ export async function analyzeDoors(
             hostSlabAbove,
             hostSlabsBelow,
             hostSlabsAbove,
+            hostCeilings,
             nearbyDoors: [],
             nearbyWalls,
+            nearbyStairs,
             nearbyDevices,
             nearbyDeviceVisibility,
             geometricNormal,
@@ -2148,6 +2429,54 @@ export function getHostSlabMeshes(context: DoorContext): THREE.Mesh[] {
     )
 }
 
+export function getHostCeilingMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.hostCeilings.length === 0) return []
+    if (context.detailedGeometry?.ceilingMeshes?.length) {
+        return [...context.detailedGeometry.ceilingMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const ceiling of context.hostCeilings) {
+        if (seenIDs.has(ceiling.expressID)) continue
+        seenIDs.add(ceiling.expressID)
+        meshes.push(...collectMeshesFromElement(ceiling))
+    }
+    return meshes
+}
+
+export function getNearbyDoorMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.nearbyDoors.length === 0) return []
+    if (context.detailedGeometry?.nearbyDoorMeshes?.length) {
+        return [...context.detailedGeometry.nearbyDoorMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const nearbyDoor of context.nearbyDoors) {
+        if (seenIDs.has(nearbyDoor.expressID)) continue
+        seenIDs.add(nearbyDoor.expressID)
+        meshes.push(...collectMeshesFromElement(nearbyDoor))
+    }
+    return meshes
+}
+
+export function getNearbyStairMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.nearbyStairs.length === 0) return []
+    if (context.detailedGeometry?.stairMeshes?.length) {
+        return [...context.detailedGeometry.stairMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const stair of context.nearbyStairs) {
+        if (seenIDs.has(stair.expressID)) continue
+        seenIDs.add(stair.expressID)
+        meshes.push(...collectMeshesFromElement(stair))
+    }
+    return meshes
+}
+
 /**
  * Collect meshes from an element - traverse scene to find all meshes with matching expressID
  */
@@ -2209,6 +2538,9 @@ export async function loadDetailedGeometry(
     const doorIDs = new Set<number>()
     const wallIDs = new Set<number>()
     const slabIDs = new Set<number>()
+    const ceilingIDs = new Set<number>()
+    const nearbyDoorIDs = new Set<number>()
+    const stairIDs = new Set<number>()
     const deviceIDs = new Set<number>()
 
     for (const context of doorContexts) {
@@ -2221,6 +2553,15 @@ export async function loadDetailedGeometry(
         }
         for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
             slabIDs.add(slab.expressID)
+        }
+        for (const ceiling of context.hostCeilings) {
+            ceilingIDs.add(ceiling.expressID)
+        }
+        for (const nearbyDoor of context.nearbyDoors) {
+            nearbyDoorIDs.add(nearbyDoor.expressID)
+        }
+        for (const stair of context.nearbyStairs) {
+            stairIDs.add(stair.expressID)
         }
         for (const device of context.nearbyDevices) {
             deviceIDs.add(device.expressID)
@@ -2239,7 +2580,7 @@ export async function loadDetailedGeometry(
     }
 
     // Extract all geometry in one pass
-    const allIDs = [...doorIDs, ...wallIDs, ...slabIDs, ...deviceIDs]
+    const allIDs = [...doorIDs, ...wallIDs, ...slabIDs, ...ceilingIDs, ...nearbyDoorIDs, ...stairIDs, ...deviceIDs]
     const geometryMap = await extractDetailedGeometry(file, allIDs)
     applyCenterOffset(geometryMap)
 
@@ -2279,6 +2620,27 @@ export async function loadDetailedGeometry(
             seenSlabIDs.add(slab.expressID)
             slabMeshes.push(...(geometryMap.get(slab.expressID) || []))
         }
+        const ceilingMeshes: THREE.Mesh[] = []
+        const seenCeilingIDs = new Set<number>()
+        for (const ceiling of context.hostCeilings) {
+            if (seenCeilingIDs.has(ceiling.expressID)) continue
+            seenCeilingIDs.add(ceiling.expressID)
+            ceilingMeshes.push(...(geometryMap.get(ceiling.expressID) || []))
+        }
+        const nearbyDoorMeshes: THREE.Mesh[] = []
+        const seenNearbyDoorIDs = new Set<number>()
+        for (const nearbyDoor of context.nearbyDoors) {
+            if (seenNearbyDoorIDs.has(nearbyDoor.expressID)) continue
+            seenNearbyDoorIDs.add(nearbyDoor.expressID)
+            nearbyDoorMeshes.push(...(geometryMap.get(nearbyDoor.expressID) || []))
+        }
+        const stairMeshes: THREE.Mesh[] = []
+        const seenStairIDs = new Set<number>()
+        for (const stair of context.nearbyStairs) {
+            if (seenStairIDs.has(stair.expressID)) continue
+            seenStairIDs.add(stair.expressID)
+            stairMeshes.push(...(geometryMap.get(stair.expressID) || []))
+        }
         const deviceMeshes: THREE.Mesh[] = []
         for (const device of context.nearbyDevices) {
             const meshes = geometryMap.get(device.expressID) || []
@@ -2290,6 +2652,9 @@ export async function loadDetailedGeometry(
             wallMeshes,
             nearbyWallMeshes,
             slabMeshes,
+            ceilingMeshes,
+            nearbyDoorMeshes,
+            stairMeshes,
             deviceMeshes,
         }
 
@@ -2305,6 +2670,9 @@ export async function loadDetailedGeometry(
             detailedWallMeshCount: wallMeshes.length,
             detailedNearbyWallMeshCount: nearbyWallMeshes.length,
             detailedSlabMeshCount: slabMeshes.length,
+            detailedCeilingMeshCount: ceilingMeshes.length,
+            detailedNearbyDoorMeshCount: nearbyDoorMeshes.length,
+            detailedStairMeshCount: stairMeshes.length,
             detailedDeviceMeshCount: deviceMeshes.length,
         }
         if (doorMeshes.length > 0) {
