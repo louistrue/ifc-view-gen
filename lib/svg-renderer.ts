@@ -1824,14 +1824,19 @@ function resolveSvgViewTransform(
     fitBounds: ProjectedBounds,
     options: Required<SVGRenderOptions>,
     context: DoorContext | null,
-    sharedDrawingScale?: number
+    sharedDrawingScale?: number,
+    viewType: 'Front' | 'Back' | 'Plan' | '' = ''
 ): {
     scale: number
     offsetX: number
     offsetY: number
     viewHeight: number
 } {
-    const { viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(options, context)
+    // Viewport metrics depend on which view is rendered (legend rows and visible devices
+    // differ between Front/Back/Plan). Passing the actual viewType keeps the precomputed
+    // scale consistent with the eventual `generateSVGString` call, otherwise the elevation
+    // scale can diverge from the plan scale whenever device/legend visibility changes.
+    const { viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(options, context, viewType)
     const contentWidth = fitBounds.maxX - fitBounds.minX
     const contentHeight = fitBounds.maxY - fitBounds.minY
     const naturalScale = Math.min(
@@ -1850,7 +1855,8 @@ function getViewportClipBounds(
     fitGeometry: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
     options: Required<SVGRenderOptions>,
     context: DoorContext | null,
-    sharedDrawingScale?: number
+    sharedDrawingScale?: number,
+    viewType: 'Front' | 'Back' | 'Plan' | '' = ''
 ): ProjectedBounds | null {
     const fitBounds = getBoundsFromProjectedGeometry(fitGeometry.edges, fitGeometry.polygons)
     if (!fitBounds) return null
@@ -1859,7 +1865,8 @@ function getViewportClipBounds(
         fitBounds,
         options,
         context,
-        sharedDrawingScale
+        sharedDrawingScale,
+        viewType
     )
 
     return {
@@ -1906,9 +1913,10 @@ function getElevationHostClipBounds(
     options: Required<SVGRenderOptions>,
     camera: THREE.OrthographicCamera,
     width: number,
-    height: number
+    height: number,
+    viewType: 'Front' | 'Back' = 'Front'
 ): ProjectedBounds | null {
-    const bounds = getViewportClipBounds(fitGeometry, options, context)
+    const bounds = getViewportClipBounds(fitGeometry, options, context, undefined, viewType)
     if (!bounds) return null
 
     const frame = context.viewFrame
@@ -1997,7 +2005,20 @@ function getStoreyMarkerLevelOffsetMeters(context: DoorContext): number {
             frame.semanticFacing
         )
         if (Number.isFinite(wallBounds.minB)) {
-            return Math.min(wallBounds.minB - originB, -frame.height / 2)
+            // The wall bottom is a reasonable proxy for the slab top when the wall only
+            // spans one storey (typical case: wall bottom ≈ slab top, 0.2–0.4 m below
+            // the door opening). For walls that span multiple storeys or reach a
+            // foundation, `wallBounds.minB` can be several meters below the door which
+            // would push the storey marker to the canvas edge, producing a misleading
+            // symbol. Clamp the wall-derived offset to the door-bottom fallback when it
+            // extends further than MAX_WALL_BELOW_DOOR_METERS below the door opening.
+            const doorBottomOffset = -frame.height / 2
+            const wallOffset = wallBounds.minB - originB
+            const MAX_WALL_BELOW_DOOR_METERS = 0.5
+            if (wallOffset < doorBottomOffset - MAX_WALL_BELOW_DOOR_METERS) {
+                return doorBottomOffset
+            }
+            return Math.min(wallOffset, doorBottomOffset)
         }
     }
 
@@ -2139,7 +2160,8 @@ function collectFrontElevationFitGeometry(
         opts,
         camera,
         frustumWidth,
-        frustumHeight
+        frustumHeight,
+        'Front'
     )
     return elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry
 }
@@ -2849,11 +2871,12 @@ function renderElevationFromMeshes(
         frustumWidth,
         frustumHeight
     )
-    const elevationHostClipBounds = getElevationHostClipBounds(context, fitGeometry, opts, camera, frustumWidth, frustumHeight)
+    const elevationViewType: 'Front' | 'Back' = isBackView ? 'Back' : 'Front'
+    const elevationHostClipBounds = getElevationHostClipBounds(context, fitGeometry, opts, camera, frustumWidth, frustumHeight, elevationViewType)
     const scaleFitGeometry = elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry
     const scaleFitBounds = getBoundsFromProjectedGeometry(scaleFitGeometry.edges, scaleFitGeometry.polygons)
     const sharedDrawingScale = scaleFitBounds
-        ? resolveSvgViewTransform(scaleFitBounds, opts, context).scale
+        ? resolveSvgViewTransform(scaleFitBounds, opts, context, undefined, elevationViewType).scale
         : undefined
     const wallMeshes = getHostWallMeshes(context)
     const wallGeometry = wallMeshes.length > 0
@@ -3656,7 +3679,7 @@ function renderPlanFromMeshes(
     const hostGeometry = (semanticPlanWallGeometry.edges.length > 0 || semanticPlanWallGeometry.polygons.length > 0)
         ? clipProjectedGeometryToBounds(
             semanticPlanWallGeometry,
-            getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale)
+            getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
         )
         : { edges: [], polygons: [] }
     renderGeometry.edges.push(...hostGeometry.edges)

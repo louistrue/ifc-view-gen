@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict'
 import * as THREE from 'three'
-import { analyzeDoors, type DoorContext } from '../lib/door-analyzer'
+import { analyzeDoors, getDoorOperationInfo, type DoorContext } from '../lib/door-analyzer'
 import type { DoorCsetStandardCHData, DoorLeafMetadata } from '../lib/ifc-loader'
 import type { ElementInfo, LoadedIFCModel } from '../lib/ifc-types'
 import { planSvgCanvasHeight, renderDoorViews, type SVGRenderOptions } from '../lib/svg-renderer'
@@ -347,6 +347,22 @@ function getLargestWallRectY(svg: string, fill: string): number | null {
 }
 
 async function main() {
+    // ── Operation-type parsing regression ────────────────────────────────────
+    // DOUBLE_SWING_LEFT / DOUBLE_SWING_RIGHT are distinct IfcDoorTypeOperationEnum
+    // values (single-leaf double-acting with specific handedness). They must be
+    // matched with the correct `hingeSide` before the generic DOUBLE_SWING /
+    // DOUBLE_DOOR_* fallback, otherwise they fall through and default to
+    // `hingeSide: 'right'`, breaking handedness mirroring.
+    const doubleSwingLeft  = getDoorOperationInfo('DOUBLE_SWING_LEFT')
+    const doubleSwingRight = getDoorOperationInfo('DOUBLE_SWING_RIGHT')
+    const doubleSwingBoth  = getDoorOperationInfo('DOUBLE_SWING')
+    assert.equal(doubleSwingLeft.kind,       'swing', 'DOUBLE_SWING_LEFT should be parsed as a swing')
+    assert.equal(doubleSwingLeft.hingeSide,  'left',  'DOUBLE_SWING_LEFT must preserve left handedness')
+    assert.equal(doubleSwingRight.kind,      'swing', 'DOUBLE_SWING_RIGHT should be parsed as a swing')
+    assert.equal(doubleSwingRight.hingeSide, 'right', 'DOUBLE_SWING_RIGHT must preserve right handedness')
+    assert.equal(doubleSwingBoth.kind,       'swing', 'DOUBLE_SWING should be parsed as a swing')
+    assert.equal(doubleSwingBoth.hingeSide,  'both',  'Bare DOUBLE_SWING should report both hinges')
+
     const options: SVGRenderOptions = {
         width: 1000,
         height: 1000,

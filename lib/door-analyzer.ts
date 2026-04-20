@@ -314,6 +314,17 @@ export function getDoorOperationInfo(operationType: string | null): DoorOperatio
     if (upper.includes('SINGLE_SWING_RIGHT') || upper === 'SINGLE_SWING_RIGHT') {
         return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
     }
+    // IfcDoorTypeOperationEnum: DOUBLE_SWING_LEFT / DOUBLE_SWING_RIGHT is a single-leaf
+    // double-acting door (swings both ways) with a specific handedness. Must be matched
+    // before the generic DOUBLE_SWING / DOUBLE_DOOR_* fallback below, otherwise the
+    // `_LEFT`/`_RIGHT` variants fall through to the final `SWING` fallback and get
+    // parsed as right-hinged by default — breaking handedness mirroring.
+    if (upper.includes('DOUBLE_SWING_LEFT')) {
+        return { kind: 'swing', hingeSide: 'left', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
+    }
+    if (upper.includes('DOUBLE_SWING_RIGHT')) {
+        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
+    }
     if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING') || upper === 'DOUBLE_SWING') {
         return { kind: 'swing', hingeSide: 'both', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
     }
@@ -724,14 +735,17 @@ function isElectricalDeviceType(typeName: string): boolean {
         lower.includes('fixture') ||
         lower.includes('panel') ||
         lower.includes('distribution') ||
+        // IFCFLOWTERMINAL covers sinks/diffusers as well as outlets/switches; it is kept
+        // because in typical door-context IFC exports flow terminals near doors are almost
+        // always electrical (wall outlets / light fixtures). The abstract base classes
+        // below (IfcFlowSegment, IfcFlowController, IfcDistributionFlowElement,
+        // IfcDistributionControlElement) are intentionally excluded: they also cover
+        // HVAC/plumbing elements which must not enter the nearby-device set or they would
+        // crowd out real switches/outlets given the selection cap.
         typeName === 'IFCFLOWTERMINAL' ||
         typeName === 'IFCSWITCHINGDEVICE' ||
         typeName === 'IFCOUTLET' ||
         typeName === 'IFCLIGHTFIXTURE' ||
-        typeName === 'IFCFLOWSEGMENT' ||
-        typeName === 'IFCFLOWCONTROLLER' ||
-        typeName === 'IFCDISTRIBUTIONCONTROLELEMENT' ||
-        typeName === 'IFCDISTRIBUTIONFLOWELEMENT' ||
         typeName === 'IFCELECTRICDISTRIBUTIONBOARD' ||
         typeName === 'IFCJUNCTIONBOX' ||
         typeName === 'IFCCABLECARRIERSEGMENT' ||
@@ -1982,10 +1996,17 @@ export function getDoorMeshes(
 }
 
 export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
+    // Without a host wall there are no meshes to match. Guarding here also prevents
+    // meshes that happen to have a missing `userData.expressID` from comparing
+    // `undefined === undefined` and being wrongly classified as host-wall meshes.
+    if (!context.hostWall) {
+        return []
+    }
+    const hostWallExpressID = context.hostWall.expressID
     return getDoorMeshes(context, { includeHostWall: true }).filter(
         (mesh) => (
-            mesh.userData.expressID === context.hostWall?.expressID
-            || mesh.userData.elementInfo?.expressID === context.hostWall?.expressID
+            mesh.userData.expressID === hostWallExpressID
+            || mesh.userData.elementInfo?.expressID === hostWallExpressID
         )
     )
 }
