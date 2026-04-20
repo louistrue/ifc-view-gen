@@ -48,6 +48,7 @@ export interface DoorContextDiagnostics {
     viewFrameSource: DoorContextViewFrameSource
     detailedDoorMeshCount?: number
     detailedWallMeshCount?: number
+    detailedNearbyWallMeshCount?: number
     detailedSlabMeshCount?: number
     detailedDeviceMeshCount?: number
     detailedViewFrame?: DoorViewFrame
@@ -62,6 +63,13 @@ export interface DoorContext {
     hostSlabsBelow: ElementInfo[]
     hostSlabsAbove: ElementInfo[]
     nearbyDoors: ElementInfo[]
+    /**
+     * Walls located within the plan viewport band around the door, excluding the
+     * host wall itself. Populated so that plan-view rendering can section real
+     * perpendicular / adjacent walls (L-corners, T-intersections, wall returns)
+     * at the door's cut plane instead of drawing two synthetic jamb rectangles.
+     */
+    nearbyWalls: ElementInfo[]
     nearbyDevices: ElementInfo[]
     nearbyDeviceVisibility: NearbyDeviceVisibility[]
     geometricNormal: THREE.Vector3
@@ -98,6 +106,8 @@ export interface DoorContext {
     detailedGeometry?: {
         doorMeshes: THREE.Mesh[]
         wallMeshes: THREE.Mesh[]
+        /** Meshes for walls adjacent to the door — perpendicular / neighbouring walls used for plan-section rendering. Never includes host-wall meshes. */
+        nearbyWallMeshes: THREE.Mesh[]
         slabMeshes: THREE.Mesh[]
         deviceMeshes: THREE.Mesh[]
     }
@@ -1591,6 +1601,95 @@ function findNearbyDoors(
 }
 
 /**
+ * Find walls in the model that sit within the plan viewport around a door and
+ * should participate in the plan-section rendering. This is how perpendicular
+ * walls at an L-corner, wall returns, or partitions meeting the host wall at
+ * a T-intersection become visible in plan view.
+ *
+ * Selection criteria (in the door's local `viewFrame`):
+ *   - widthAxis:       within ±(viewFrame.width/2 + lateralRadius)
+ *   - upAxis:          overlaps the door's height band (±0.1 m)
+ *   - semanticFacing:  within ±depthRadius of the door plane
+ *
+ * The host wall is excluded because it is already available via
+ * `context.hostWall`. A single bounding-box overlap test is sufficient here —
+ * the renderer later does precise mesh-level sectioning at the cut plane.
+ */
+function findNearbyWalls(
+    door: ElementInfo,
+    walls: ElementInfo[],
+    hostWall: ElementInfo | null,
+    viewFrame: DoorViewFrame,
+    lateralRadius: number = 0.8,
+    depthRadius: number = 0.8,
+    limit: number = 6
+): ElementInfo[] {
+    if (!door.boundingBox) return []
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+
+    const originWidth = viewFrame.origin.dot(widthAxis)
+    const originUp = viewFrame.origin.dot(upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+
+    const halfWidth = viewFrame.width / 2
+    const halfHeight = viewFrame.height / 2
+    const widthBandMin = originWidth - halfWidth - lateralRadius
+    const widthBandMax = originWidth + halfWidth + lateralRadius
+    const upBandMin = originUp - halfHeight - 0.1
+    const upBandMax = originUp + halfHeight + 0.1
+    const depthBandMin = originDepth - depthRadius
+    const depthBandMax = originDepth + depthRadius
+
+    const hostWallID = hostWall?.expressID
+
+    const candidates = walls
+        .filter((wall) =>
+            wall.expressID !== hostWallID
+            && Boolean(wall.boundingBox)
+        )
+        .map((wall) => {
+            const widthRange = measureBoxAlongAxis(wall.boundingBox!, widthAxis)
+            const upRange = measureBoxAlongAxis(wall.boundingBox!, upAxis)
+            const depthRange = measureBoxAlongAxis(wall.boundingBox!, depthAxis)
+
+            if (!rangesOverlap(widthRange.min, widthRange.max, widthBandMin, widthBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(upRange.min, upRange.max, upBandMin, upBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
+                return null
+            }
+
+            const widthOverlap = getIntervalOverlapLength(
+                widthRange.min, widthRange.max,
+                widthBandMin, widthBandMax
+            )
+            const depthOverlap = getIntervalOverlapLength(
+                depthRange.min, depthRange.max,
+                depthBandMin, depthBandMax
+            )
+            const widthCenter = (widthRange.min + widthRange.max) / 2
+            const depthCenter = (depthRange.min + depthRange.max) / 2
+            const lateralDistance = Math.abs(widthCenter - originWidth)
+            const depthDistance = Math.abs(depthCenter - originDepth)
+
+            return {
+                wall,
+                score: lateralDistance + depthDistance - (widthOverlap + depthOverlap) * 0.5,
+            }
+        })
+        .filter((entry): entry is { wall: ElementInfo; score: number } => entry !== null)
+        .sort((a, b) => a.score - b.score || a.wall.expressID - b.wall.expressID)
+
+    return candidates.slice(0, limit).map((entry) => entry.wall)
+}
+
+/**
  * Get the opening direction and type name of a door from its type
  * Works with both web-ifc models and fragments models
  * @param operationTypeMap - Optional map of door expressID -> OperationType (from web-ifc extraction)
@@ -1879,6 +1978,7 @@ export async function analyzeDoors(
         const nearbyDeviceVisibility = nearbyDevices.map((device) =>
             classifyNearbyDeviceVisibility(device, hostWall, viewFrame)
         )
+        const nearbyWalls = findNearbyWalls(door, walls, hostWall, viewFrame)
 
         const center = door.boundingBox
             ? door.boundingBox.getCenter(new THREE.Vector3())
@@ -1913,6 +2013,7 @@ export async function analyzeDoors(
             hostSlabsBelow,
             hostSlabsAbove,
             nearbyDoors: [],
+            nearbyWalls,
             nearbyDevices,
             nearbyDeviceVisibility,
             geometricNormal,
@@ -2011,6 +2112,30 @@ export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
     )
 }
 
+/**
+ * Meshes for walls adjacent to the door that should be sectioned in plan view
+ * (perpendicular walls at L-corners, wall returns, and partitions at
+ * T-intersections). Host-wall meshes are intentionally excluded.
+ */
+export function getNearbyWallMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.nearbyWalls.length === 0) {
+        return []
+    }
+
+    if (context.detailedGeometry?.nearbyWallMeshes?.length) {
+        return [...context.detailedGeometry.nearbyWallMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const wall of context.nearbyWalls) {
+        if (seenIDs.has(wall.expressID)) continue
+        seenIDs.add(wall.expressID)
+        meshes.push(...collectMeshesFromElement(wall))
+    }
+    return meshes
+}
+
 export function getHostSlabMeshes(context: DoorContext): THREE.Mesh[] {
     const slabIDs = new Set<number>()
     for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
@@ -2091,6 +2216,9 @@ export async function loadDetailedGeometry(
         if (context.hostWall) {
             wallIDs.add(context.hostWall.expressID)
         }
+        for (const wall of context.nearbyWalls) {
+            wallIDs.add(wall.expressID)
+        }
         for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
             slabIDs.add(slab.expressID)
         }
@@ -2134,6 +2262,16 @@ export async function loadDetailedGeometry(
         const wallMeshes = context.hostWall
             ? (geometryMap.get(context.hostWall.expressID) || [])
             : []
+        const nearbyWallMeshes: THREE.Mesh[] = []
+        const seenNearbyWallIDs = new Set<number>()
+        if (context.hostWall) {
+            seenNearbyWallIDs.add(context.hostWall.expressID)
+        }
+        for (const wall of context.nearbyWalls) {
+            if (seenNearbyWallIDs.has(wall.expressID)) continue
+            seenNearbyWallIDs.add(wall.expressID)
+            nearbyWallMeshes.push(...(geometryMap.get(wall.expressID) || []))
+        }
         const slabMeshes: THREE.Mesh[] = []
         const seenSlabIDs = new Set<number>()
         for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
@@ -2150,6 +2288,7 @@ export async function loadDetailedGeometry(
         context.detailedGeometry = {
             doorMeshes,
             wallMeshes,
+            nearbyWallMeshes,
             slabMeshes,
             deviceMeshes,
         }
@@ -2164,6 +2303,7 @@ export async function loadDetailedGeometry(
             ...baseDiagnostics,
             detailedDoorMeshCount: doorMeshes.length,
             detailedWallMeshCount: wallMeshes.length,
+            detailedNearbyWallMeshCount: nearbyWallMeshes.length,
             detailedSlabMeshCount: slabMeshes.length,
             detailedDeviceMeshCount: deviceMeshes.length,
         }

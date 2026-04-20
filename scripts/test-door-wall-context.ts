@@ -151,6 +151,7 @@ async function buildContext(options?: {
     context.detailedGeometry = {
         doorMeshes: [doorMesh],
         wallMeshes: includeWall ? [wallMesh] : [],
+        nearbyWallMeshes: [],
         slabMeshes: [],
         deviceMeshes: [deviceMesh],
     }
@@ -320,6 +321,113 @@ function getLongestDashedGuide(svg: string): { x1: number; y1: number; x2: numbe
     }
 
     return bestLine
+}
+
+/**
+ * L-corner fixture: a door placed in a host wall with an adjacent
+ * perpendicular wall meeting the host wall near the door's left jamb. Used to
+ * verify that `findNearbyWalls` picks up the perpendicular wall and that the
+ * plan section renderer draws its footprint in plan view.
+ */
+async function buildLCornerContext(): Promise<DoorContext> {
+    const doorCenter = new THREE.Vector3(0, 1.05, 0)
+    const hostWallCenter = new THREE.Vector3(0, 1.5, 0)
+    // 0.24 thick × 3 tall × 3 deep; meets the host wall at x ≈ -0.6 (just
+    // outside the door's left jamb at x = -0.5) and extends towards -z.
+    const perpWallCenter = new THREE.Vector3(-0.6, 1.5, -1.5)
+
+    const doorMesh = createBoxMesh(1, 1, 2.1, 0.12, doorCenter)
+    const hostWallMesh = createBoxMesh(2, 40, 3, 0.24, hostWallCenter)
+    const perpWallMesh = createBoxMesh(3, 0.24, 3, 3, perpWallCenter)
+
+    const door = makeElement(1, 'IFCDOOR', doorMesh)
+    const hostWall = makeElement(2, 'IFCWALL', hostWallMesh)
+    const perpWall = makeElement(3, 'IFCWALL', perpWallMesh)
+
+    const model: LoadedIFCModel = {
+        group: new THREE.Group(),
+        elements: [door, hostWall, perpWall],
+        modelID: 0,
+        api: null,
+    }
+    ;(model as LoadedIFCModel & { fragmentsModel: { getItemsData: () => Promise<unknown[]> } }).fragmentsModel = {
+        getItemsData: async () => [],
+    }
+
+    const [context] = await analyzeDoors(
+        model,
+        undefined,
+        undefined,
+        new Map([[door.expressID, 'SINGLE_SWING_LEFT']])
+    )
+    assert.ok(context, 'Expected analyzeDoors to produce a door context for L-corner fixture')
+
+    context.detailedGeometry = {
+        doorMeshes: [doorMesh],
+        wallMeshes: [hostWallMesh],
+        nearbyWallMeshes: [perpWallMesh],
+        slabMeshes: [],
+        deviceMeshes: [],
+    }
+
+    return context
+}
+
+/**
+ * Adjacent-doors fixture: two doors hosted by the same wall with a small
+ * horizontal gap between them. Used to verify that `findNearbyDoors` identifies
+ * the neighbour and that both plan views render without geometry corruption
+ * when the mesh-section renderer encounters the full host wall.
+ */
+async function buildAdjacentDoorsContexts(): Promise<{ primary: DoorContext; secondary: DoorContext }> {
+    const door1Center = new THREE.Vector3(0, 1.05, 0)
+    const door2Center = new THREE.Vector3(1.5, 1.05, 0)
+    const hostWallCenter = new THREE.Vector3(0, 1.5, 0)
+
+    const door1Mesh = createBoxMesh(1, 1, 2.1, 0.12, door1Center)
+    const door2Mesh = createBoxMesh(2, 1, 2.1, 0.12, door2Center)
+    const hostWallMesh = createBoxMesh(3, 40, 3, 0.24, hostWallCenter)
+
+    const door1 = makeElement(1, 'IFCDOOR', door1Mesh)
+    const door2 = makeElement(2, 'IFCDOOR', door2Mesh)
+    const hostWall = makeElement(3, 'IFCWALL', hostWallMesh)
+
+    const model: LoadedIFCModel = {
+        group: new THREE.Group(),
+        elements: [door1, door2, hostWall],
+        modelID: 0,
+        api: null,
+    }
+    ;(model as LoadedIFCModel & { fragmentsModel: { getItemsData: () => Promise<unknown[]> } }).fragmentsModel = {
+        getItemsData: async () => [],
+    }
+
+    const contexts = await analyzeDoors(
+        model,
+        undefined,
+        undefined,
+        new Map([
+            [door1.expressID, 'SINGLE_SWING_LEFT'],
+            [door2.expressID, 'SINGLE_SWING_RIGHT'],
+        ])
+    )
+    assert.equal(contexts.length, 2, 'Expected two door contexts for adjacent-door fixture')
+
+    for (const ctx of contexts) {
+        const ownMesh = ctx.door.expressID === door1.expressID ? door1Mesh : door2Mesh
+        ctx.detailedGeometry = {
+            doorMeshes: [ownMesh],
+            wallMeshes: [hostWallMesh],
+            nearbyWallMeshes: [],
+            slabMeshes: [],
+            deviceMeshes: [],
+        }
+    }
+
+    const primary = contexts.find((c) => c.door.expressID === door1.expressID)
+    const secondary = contexts.find((c) => c.door.expressID === door2.expressID)
+    assert.ok(primary && secondary, 'Expected both primary and secondary door contexts')
+    return { primary, secondary }
 }
 
 function getLargestWallRectY(svg: string, fill: string): number | null {
@@ -672,6 +780,88 @@ async function main() {
         assertCoordinatesWithinBounds(svg, options.width!, canvasH)
     }
 
+    // ── Mesh-based plan section: L-corner + adjacent doors ────────────────────
+    // Plan views now project actual wall meshes at the door's cut plane instead
+    // of drawing two synthetic rectangular stubs. These fixtures verify that
+    //   (a) perpendicular walls meeting the host wall become visible in plan, and
+    //   (b) adjacent doors in the same host wall don't corrupt the plan view.
+    const lCornerContext = await buildLCornerContext()
+    assert.equal(
+        lCornerContext.nearbyWalls.length,
+        1,
+        'L-corner: analyzer should pick up exactly one perpendicular wall',
+    )
+    assert.equal(
+        lCornerContext.nearbyWalls[0].expressID,
+        3,
+        'L-corner: the perpendicular wall should be the detected nearby wall',
+    )
+    assert.ok(
+        lCornerContext.detailedGeometry?.nearbyWallMeshes?.length === 1,
+        'L-corner: nearby-wall meshes must be carried into detailedGeometry',
+    )
+
+    const lCornerViews = await renderDoorViews(lCornerContext, options)
+    const lCornerPlanArea = getWallFilledArea(lCornerViews.plan, options.wallColor!)
+    const baselinePlanArea = getWallFilledArea(withWallViews.plan, options.wallColor!)
+    assert.ok(
+        lCornerPlanArea > baselinePlanArea + 1000,
+        `L-corner plan view should carry more wall fill area than the single-host-wall baseline (got ${lCornerPlanArea.toFixed(0)} vs ${baselinePlanArea.toFixed(0)})`,
+    )
+
+    // Confirm the perpendicular wall actually extends the wall footprint in the
+    // depth direction (not just laterally). We compare the vertical span of the
+    // wall fill polygons — baseline's thin host-wall cut should be much
+    // shallower than the L-corner's footprint that reaches into -depth.
+    const lCornerRenderedBounds = getRenderedContentBounds(lCornerViews.plan)
+    const baselineRenderedBounds = getRenderedContentBounds(withWallViews.plan)
+    assert.ok(lCornerRenderedBounds && baselineRenderedBounds, 'Expected plan bounds to be measurable')
+    const lCornerDepthSpan = lCornerRenderedBounds!.maxY - lCornerRenderedBounds!.minY
+    const baselineDepthSpan = baselineRenderedBounds!.maxY - baselineRenderedBounds!.minY
+    assert.ok(
+        lCornerDepthSpan > baselineDepthSpan + 5,
+        `L-corner plan view should extend deeper than baseline (got span ${lCornerDepthSpan.toFixed(1)} vs ${baselineDepthSpan.toFixed(1)})`,
+    )
+    for (const [viewName, svg] of Object.entries(lCornerViews)) {
+        const canvasH = viewName === 'plan' ? planH : options.height!
+        assertCoordinatesWithinBounds(svg, options.width!, canvasH)
+    }
+
+    // Adjacent doors in the same host wall.
+    const { primary: adjacentPrimary, secondary: adjacentSecondary } = await buildAdjacentDoorsContexts()
+    assert.equal(
+        adjacentPrimary.nearbyDoors.length,
+        1,
+        'Adjacent doors: the primary context should record its neighbour',
+    )
+    assert.equal(
+        adjacentPrimary.nearbyDoors[0].expressID,
+        adjacentSecondary.door.expressID,
+        'Adjacent doors: the recorded neighbour should be the second door',
+    )
+    assert.equal(
+        adjacentPrimary.nearbyWalls.length,
+        0,
+        'Adjacent doors: a door is not a wall — nearbyWalls must stay empty when there is only the host wall',
+    )
+
+    const adjacentPrimaryViews = await renderDoorViews(adjacentPrimary, options)
+    const adjacentSecondaryViews = await renderDoorViews(adjacentSecondary, options)
+    const primaryPlanWallArea = getWallFilledArea(adjacentPrimaryViews.plan, options.wallColor!)
+    const secondaryPlanWallArea = getWallFilledArea(adjacentSecondaryViews.plan, options.wallColor!)
+    assert.ok(
+        primaryPlanWallArea > 1000,
+        `Adjacent doors: primary plan should contain non-degenerate wall fill (got ${primaryPlanWallArea.toFixed(0)})`,
+    )
+    assert.ok(
+        secondaryPlanWallArea > 1000,
+        `Adjacent doors: secondary plan should contain non-degenerate wall fill (got ${secondaryPlanWallArea.toFixed(0)})`,
+    )
+    for (const svg of [...Object.values(adjacentPrimaryViews), ...Object.values(adjacentSecondaryViews)]) {
+        const canvasH = planH // use plan height as upper bound (conservative)
+        assertCoordinatesWithinBounds(svg, options.width!, Math.max(canvasH, options.height!))
+    }
+
     // Write fixtures for visual inspection
     const { writeFileSync, mkdirSync } = await import('node:fs')
     const dir = 'test-output/door-wall-context'
@@ -699,6 +889,15 @@ async function main() {
     writeFileSync(`${dir}/plan-handedness-right-plusZ.svg`,  handednessRightPlusZViews.plan)
     writeFileSync(`${dir}/plan-handedness-right-minusZ.svg`, handednessRightMinusZViews.plan)
     writeFileSync(`${dir}/plan-handedness-double-plusZ.svg`, handednessDoubleDoorViews.plan)
+    for (const [view, svg] of Object.entries(lCornerViews)) {
+        writeFileSync(`${dir}/l-corner-${view}.svg`, svg)
+    }
+    for (const [view, svg] of Object.entries(adjacentPrimaryViews)) {
+        writeFileSync(`${dir}/adjacent-primary-${view}.svg`, svg)
+    }
+    for (const [view, svg] of Object.entries(adjacentSecondaryViews)) {
+        writeFileSync(`${dir}/adjacent-secondary-${view}.svg`, svg)
+    }
 
     console.log('Door wall context regression test passed')
 }

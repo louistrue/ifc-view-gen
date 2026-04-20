@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { DoorContext, DoorViewFrame } from './door-analyzer'
-import { getDoorMeshes, getDoorOperationInfo, getHostSlabMeshes, getHostWallMeshes } from './door-analyzer'
+import { getDoorMeshes, getDoorOperationInfo, getHostSlabMeshes, getHostWallMeshes, getNearbyWallMeshes } from './door-analyzer'
 import {
     INTER_WOFF2_LATIN_400_BASE64,
     INTER_WOFF2_LATIN_600_BASE64,
@@ -1421,6 +1421,446 @@ function createSemanticElevationNearbyDoorGeometry(
     }
 
     return geometry
+}
+
+function intersectSegmentWithYPlane(a: THREE.Vector3, b: THREE.Vector3, planeY: number): THREE.Vector3 {
+    const dy = b.y - a.y
+    if (Math.abs(dy) < 1e-9) {
+        return a.clone()
+    }
+    const t = (planeY - a.y) / dy
+    return new THREE.Vector3(
+        a.x + (b.x - a.x) * t,
+        planeY,
+        a.z + (b.z - a.z) * t
+    )
+}
+
+/**
+ * Clip a convex polygon in-place against the half-space `axis · p >= plane`
+ * (for sign = +1) or `axis · p <= plane` (for sign = −1) using
+ * Sutherland–Hodgman. Used to prune mesh-section polygons to the plan-view
+ * corridor around the door so that long host walls don't blow up the fit
+ * bounds, while still preserving the real footprint near the door.
+ */
+function clipPolygonAgainstAxisPlane(
+    polygon: THREE.Vector3[],
+    axis: THREE.Vector3,
+    plane: number,
+    sign: 1 | -1
+): THREE.Vector3[] {
+    if (polygon.length === 0) return []
+    const output: THREE.Vector3[] = []
+    const valueOf = (p: THREE.Vector3) => sign * (p.dot(axis) - plane)
+    for (let i = 0; i < polygon.length; i++) {
+        const current = polygon[i]
+        const previous = polygon[(i + polygon.length - 1) % polygon.length]
+        const currentInside = valueOf(current) >= 0
+        const previousInside = valueOf(previous) >= 0
+        if (currentInside) {
+            if (!previousInside) {
+                output.push(intersectSegmentWithAxisPlane(previous, current, axis, plane))
+            }
+            output.push(current.clone())
+        } else if (previousInside) {
+            output.push(intersectSegmentWithAxisPlane(previous, current, axis, plane))
+        }
+    }
+    return output
+}
+
+function intersectSegmentWithAxisPlane(
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    axis: THREE.Vector3,
+    plane: number
+): THREE.Vector3 {
+    const dA = a.dot(axis)
+    const dB = b.dot(axis)
+    const denom = dB - dA
+    if (Math.abs(denom) < 1e-9) {
+        return a.clone()
+    }
+    const t = (plane - dA) / denom
+    return new THREE.Vector3(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t
+    )
+}
+
+/**
+ * 4-half-space corridor expressed in the door's local plan axes. Anything
+ * outside this box in world space is pruned from mesh-section geometry before
+ * projection so that very long walls don't inflate the viewport.
+ */
+interface PlanSectionCorridor {
+    widthAxis: THREE.Vector3
+    depthAxis: THREE.Vector3
+    minWidth: number
+    maxWidth: number
+    minDepth: number
+    maxDepth: number
+}
+
+function clipPolygonToPlanSectionCorridor(
+    polygon: THREE.Vector3[],
+    corridor: PlanSectionCorridor
+): THREE.Vector3[] {
+    let result = polygon
+    result = clipPolygonAgainstAxisPlane(result, corridor.widthAxis, corridor.minWidth, 1)
+    if (result.length < 3) return []
+    result = clipPolygonAgainstAxisPlane(result, corridor.widthAxis, corridor.maxWidth, -1)
+    if (result.length < 3) return []
+    result = clipPolygonAgainstAxisPlane(result, corridor.depthAxis, corridor.minDepth, 1)
+    if (result.length < 3) return []
+    result = clipPolygonAgainstAxisPlane(result, corridor.depthAxis, corridor.maxDepth, -1)
+    if (result.length < 3) return []
+    return result
+}
+
+function clipSegmentToPlanSectionCorridor(
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    corridor: PlanSectionCorridor
+): [THREE.Vector3, THREE.Vector3] | null {
+    let p1 = a.clone()
+    let p2 = b.clone()
+    const clipPlane = (
+        axis: THREE.Vector3,
+        plane: number,
+        sign: 1 | -1
+    ): boolean => {
+        const valueOf = (p: THREE.Vector3) => sign * (p.dot(axis) - plane)
+        const v1 = valueOf(p1)
+        const v2 = valueOf(p2)
+        if (v1 < 0 && v2 < 0) return false
+        if (v1 >= 0 && v2 >= 0) return true
+        const intersection = intersectSegmentWithAxisPlane(p1, p2, axis, plane)
+        if (v1 < 0) p1 = intersection
+        else p2 = intersection
+        return true
+    }
+    if (!clipPlane(corridor.widthAxis, corridor.minWidth, 1)) return null
+    if (!clipPlane(corridor.widthAxis, corridor.maxWidth, -1)) return null
+    if (!clipPlane(corridor.depthAxis, corridor.minDepth, 1)) return null
+    if (!clipPlane(corridor.depthAxis, corridor.maxDepth, -1)) return null
+    return [p1, p2]
+}
+
+/**
+ * Extract the 2D boundary segments where `mesh`'s triangles cross the
+ * horizontal plane `y = cutY`. Near-coincident segments (shared between
+ * neighbouring triangles) are coalesced by quantised-key hashing so each
+ * wall-face edge is emitted exactly once. Produces the raw section outline;
+ * polygon reconstruction happens separately.
+ */
+function extractMeshSectionSegments(
+    mesh: THREE.Mesh,
+    cutY: number
+): Array<{ a: THREE.Vector3; b: THREE.Vector3 }> {
+    const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+    const positions = geometry?.getAttribute('position')
+    if (!geometry || !positions || positions.count === 0) return []
+    mesh.updateMatrixWorld(true)
+    const matrix = mesh.matrixWorld
+    const index = geometry.getIndex()
+
+    const segments = new Map<string, { a: THREE.Vector3; b: THREE.Vector3 }>()
+    const keyFor = (p: THREE.Vector3) =>
+        `${Math.round(p.x * 10000)}_${Math.round(p.z * 10000)}`
+
+    const registerSegment = (a: THREE.Vector3, b: THREE.Vector3) => {
+        const keyA = keyFor(a)
+        const keyB = keyFor(b)
+        if (keyA === keyB) return
+        const orderedKey = keyA < keyB ? `${keyA}|${keyB}` : `${keyB}|${keyA}`
+        if (segments.has(orderedKey)) return
+        segments.set(orderedKey, { a, b })
+    }
+
+    const fetchVertex = (vertexIndex: number): THREE.Vector3 => new THREE.Vector3(
+        positions.getX(vertexIndex),
+        positions.getY(vertexIndex),
+        positions.getZ(vertexIndex)
+    ).applyMatrix4(matrix)
+
+    const processTriangle = (i1: number, i2: number, i3: number) => {
+        const verts = [fetchVertex(i1), fetchVertex(i2), fetchVertex(i3)]
+        const sides = verts.map((v) => {
+            if (v.y > cutY + 1e-6) return 1
+            if (v.y < cutY - 1e-6) return -1
+            return 0
+        })
+        if (!sides.some((s) => s === 1) || !sides.some((s) => s === -1)) return
+
+        const intersections: THREE.Vector3[] = []
+        for (let i = 0; i < 3; i++) {
+            const curr = verts[i]
+            const next = verts[(i + 1) % 3]
+            const sCurr = sides[i]
+            const sNext = sides[(i + 1) % 3]
+            if (sCurr === 0) {
+                intersections.push(new THREE.Vector3(curr.x, cutY, curr.z))
+                continue
+            }
+            if (sCurr !== sNext && sNext !== 0) {
+                intersections.push(intersectSegmentWithYPlane(curr, next, cutY))
+            }
+        }
+        if (intersections.length < 2) return
+        registerSegment(intersections[0], intersections[1])
+        if (intersections.length === 3) {
+            registerSegment(intersections[1], intersections[2])
+        }
+    }
+
+    if (index && index.count > 0) {
+        for (let i = 0; i < index.count; i += 3) {
+            processTriangle(index.getX(i), index.getX(i + 1), index.getX(i + 2))
+        }
+    } else {
+        for (let i = 0; i < positions.count; i += 3) {
+            processTriangle(i, i + 1, i + 2)
+        }
+    }
+
+    return [...segments.values()]
+}
+
+/**
+ * Reconstruct closed polygons from an unordered set of 2D boundary segments
+ * (in the horizontal plane, with `y` already flattened to the cut height).
+ *
+ * Segments are joined by their endpoints into adjacency chains; chains that
+ * close back on themselves become polygons, while open chains are kept as
+ * polylines so the outline edges are still drawn even for non-watertight
+ * meshes (common in IFC exports).
+ */
+function reconstructPolygonsFromSegments(
+    segments: Array<{ a: THREE.Vector3; b: THREE.Vector3 }>
+): { closedLoops: THREE.Vector3[][]; openChains: THREE.Vector3[][] } {
+    const closedLoops: THREE.Vector3[][] = []
+    const openChains: THREE.Vector3[][] = []
+    if (segments.length === 0) return { closedLoops, openChains }
+
+    const EPS_SCALE = 10000
+    const keyFor = (p: THREE.Vector3) => `${Math.round(p.x * EPS_SCALE)}_${Math.round(p.z * EPS_SCALE)}`
+
+    const vertexByKey = new Map<string, number>()
+    const vertexPoints: THREE.Vector3[] = []
+    const adjacency: number[][] = []
+
+    const internVertex = (p: THREE.Vector3): number => {
+        const key = keyFor(p)
+        const existing = vertexByKey.get(key)
+        if (existing !== undefined) return existing
+        const idx = vertexPoints.length
+        vertexByKey.set(key, idx)
+        vertexPoints.push(p.clone())
+        adjacency.push([])
+        return idx
+    }
+
+    // `edgeEntries` stores undirected edges; each entry records the two vertex
+    // indices. Visiting an edge is tracked per entry so we never reuse it.
+    const edgeEntries: Array<{ a: number; b: number; visited: boolean }> = []
+    for (const seg of segments) {
+        const ia = internVertex(seg.a)
+        const ib = internVertex(seg.b)
+        if (ia === ib) continue
+        const edgeIndex = edgeEntries.length
+        edgeEntries.push({ a: ia, b: ib, visited: false })
+        adjacency[ia].push(edgeIndex)
+        adjacency[ib].push(edgeIndex)
+    }
+
+    const otherEndpoint = (edgeIndex: number, fromVertex: number): number => {
+        const entry = edgeEntries[edgeIndex]
+        return entry.a === fromVertex ? entry.b : entry.a
+    }
+
+    // Walk each unvisited edge until we either return to the starting vertex
+    // (closed loop) or hit a dead end (open chain).
+    for (let startEdge = 0; startEdge < edgeEntries.length; startEdge++) {
+        const startEntry = edgeEntries[startEdge]
+        if (startEntry.visited) continue
+
+        // Prefer starting from a vertex with odd degree — it's a dead-end in an
+        // open chain and gives cleaner traversal. Otherwise any vertex works.
+        let originVertex = startEntry.a
+        if (adjacency[startEntry.a].length % 2 === 0 && adjacency[startEntry.b].length % 2 === 1) {
+            originVertex = startEntry.b
+        }
+        const path: number[] = [originVertex]
+        let currentVertex = originVertex
+        let currentEdge = startEdge
+        startEntry.visited = true
+        currentVertex = otherEndpoint(currentEdge, originVertex)
+        path.push(currentVertex)
+        let closed = false
+
+        while (true) {
+            const candidates = adjacency[currentVertex].filter((e) => !edgeEntries[e].visited)
+            if (candidates.length === 0) break
+            const nextEdge = candidates[0]
+            edgeEntries[nextEdge].visited = true
+            const nextVertex = otherEndpoint(nextEdge, currentVertex)
+            if (nextVertex === originVertex) {
+                closed = true
+                break
+            }
+            path.push(nextVertex)
+            currentVertex = nextVertex
+            if (path.length > edgeEntries.length + 2) break
+        }
+
+        const points = path.map((idx) => vertexPoints[idx].clone())
+        if (closed && points.length >= 3) {
+            closedLoops.push(points)
+        } else if (points.length >= 2) {
+            openChains.push(points)
+        }
+    }
+
+    return { closedLoops, openChains }
+}
+
+/**
+ * Render a single wall mesh as a set of filled plan-section polygons + crisp
+ * outline edges, clipped to the door's plan corridor. Closed loops reconstructed
+ * from the mesh section become filled polygons; open chains (non-watertight
+ * regions) are emitted as outline-only polylines so the user still sees the
+ * actual wall faces.
+ */
+function addMeshPlanSectionForWall(
+    mesh: THREE.Mesh,
+    cutY: number,
+    corridor: PlanSectionCorridor,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    fillColor: string,
+    strokeColor: string,
+    layer: number,
+    out: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
+): number {
+    const segments = extractMeshSectionSegments(mesh, cutY)
+    if (segments.length === 0) return 0
+    const { closedLoops, openChains } = reconstructPolygonsFromSegments(segments)
+
+    let emitted = 0
+
+    for (const loop of closedLoops) {
+        for (const p of loop) p.y = cutY
+        const clipped = clipPolygonToPlanSectionCorridor(loop, corridor)
+        if (clipped.length < 3) continue
+        appendProjectedPolygon(
+            out,
+            clipped,
+            camera,
+            width,
+            height,
+            fillColor,
+            strokeColor,
+            layer,
+            1,
+            WALL_EDGE_STROKE_FACTOR
+        )
+        emitted++
+    }
+
+    // Open chains (non-watertight meshes): emit outline-only segments so the
+    // wall is still visible even when a fill polygon can't be reconstructed.
+    for (const chain of openChains) {
+        for (let i = 0; i + 1 < chain.length; i++) {
+            const clipped = clipSegmentToPlanSectionCorridor(chain[i], chain[i + 1], corridor)
+            if (!clipped) continue
+            const proj1 = projectPoint(clipped[0], camera, width, height)
+            const proj2 = projectPoint(clipped[1], camera, width, height)
+            out.edges.push({
+                x1: proj1.x,
+                y1: proj1.y,
+                x2: proj2.x,
+                y2: proj2.y,
+                color: strokeColor,
+                depth: (proj1.z + proj2.z) / 2,
+                layer,
+                strokeWidthFactor: WALL_EDGE_STROKE_FACTOR,
+            })
+            emitted++
+        }
+    }
+
+    return emitted
+}
+
+/**
+ * Section the host wall and any nearby walls at the door's plan cut plane,
+ * producing real filled polygons + outline edges for plan view. Unlike
+ * `createSemanticPlanWallGeometry`, this reflects the actual wall geometry —
+ * L-corners, T-intersections, varying thickness, wall returns, and multiple
+ * doors in the same host wall all appear correctly because they come straight
+ * from the IFC mesh topology intersected with the cut plane.
+ */
+function createMeshPlanSectionGeometry(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    cutY: number,
+    options: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const out = { edges: [] as ProjectedEdge[], polygons: [] as ProjectedPolygon[] }
+    const hostMeshes = getHostWallMeshes(context)
+    const nearbyMeshes = getNearbyWallMeshes(context)
+    const wallMeshes = [...hostMeshes, ...nearbyMeshes]
+    if (wallMeshes.length === 0) {
+        return out
+    }
+
+    // Build the plan-view corridor. Lateral extent covers the door + enough
+    // room either side to show nearby walls / adjacent doors. Depth extent is
+    // driven by the host wall's own thickness, padded so perpendicular walls
+    // at L-corners remain visible.
+    const frame = context.viewFrame
+    const widthAxis = frame.widthAxis.clone().normalize()
+    const depthAxis = frame.semanticFacing.clone().normalize()
+    const halfDoorWidth = frame.width / 2
+    const wallMetrics = getLocalHostWallPlanMetrics(context)
+    const hostWallThickness = wallMetrics?.thickness ?? frame.thickness
+    const lateralExtend = Math.max(frame.width, 0.9)
+    const depthPadding = Math.max(hostWallThickness * 0.75, 0.45)
+    const originWidth = frame.origin.dot(widthAxis)
+    const originDepth = frame.origin.dot(depthAxis)
+    const depthMin = (wallMetrics?.minDepth ?? -hostWallThickness / 2) - depthPadding
+    const depthMax = (wallMetrics?.maxDepth ?? hostWallThickness / 2) + depthPadding
+
+    const corridor: PlanSectionCorridor = {
+        widthAxis,
+        depthAxis,
+        minWidth: originWidth - halfDoorWidth - lateralExtend,
+        maxWidth: originWidth + halfDoorWidth + lateralExtend,
+        minDepth: originDepth + depthMin,
+        maxDepth: originDepth + depthMax,
+    }
+
+    for (const mesh of wallMeshes) {
+        addMeshPlanSectionForWall(
+            mesh,
+            cutY,
+            corridor,
+            camera,
+            width,
+            height,
+            options.wallColor,
+            options.lineColor,
+            -1,
+            out
+        )
+    }
+
+    return out
 }
 
 function createSemanticPlanWallGeometry(
@@ -3646,6 +4086,21 @@ function renderPlanFromMeshes(
         planWallMetrics?.maxDepth ?? halfT
     )
 
+    // Section the host wall and any nearby walls at the cut plane. This draws
+    // the real wall footprint — including perpendicular walls at L-corners,
+    // partitions at T-intersections, and varying thicknesses — instead of the
+    // two synthetic rectangular stubs that the semantic fallback produces.
+    const meshPlanSectionGeometry = createMeshPlanSectionGeometry(
+        context,
+        camera,
+        frustumWidth,
+        frustumHeight,
+        cutHeight,
+        opts
+    )
+    const hasMeshSection = meshPlanSectionGeometry.polygons.length > 0
+        || meshPlanSectionGeometry.edges.some((edge) => edge.color !== 'none')
+
     // Compute fitGeometry analytically from frame data.
     // Using projected mesh geometry for fitBounds is unreliable: web-ifc meshes viewed from above
     // often produce degenerate edges, and arc edges may be at different positions than the door mesh.
@@ -3675,10 +4130,29 @@ function renderPlanFromMeshes(
         ],
         polygons: [...deviceGeometry.polygons],
     }
-    const semanticPlanWallGeometry = createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
-    const hostGeometry = (semanticPlanWallGeometry.edges.length > 0 || semanticPlanWallGeometry.polygons.length > 0)
+    // Prefer the real mesh-based section; fall back to the synthetic two-stub
+    // drawing only when no wall meshes are available (e.g. Fragments-only
+    // pipeline without detailed geometry, or no host wall at all).
+    const planWallGeometry = hasMeshSection
+        ? meshPlanSectionGeometry
+        : createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
+
+    // Expand fit bounds to include every vertex of the wall-section geometry so
+    // the plan viewport doesn't crop nearby walls / returns.
+    if (hasMeshSection) {
+        for (const polygon of planWallGeometry.polygons) {
+            for (const point of polygon.points) {
+                fitGeometry.edges.push({
+                    x1: point.x, y1: point.y, x2: point.x, y2: point.y,
+                    color: 'none', depth: 0, layer: 0,
+                })
+            }
+        }
+    }
+
+    const hostGeometry = (planWallGeometry.edges.length > 0 || planWallGeometry.polygons.length > 0)
         ? clipProjectedGeometryToBounds(
-            semanticPlanWallGeometry,
+            planWallGeometry,
             getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
         )
         : { edges: [], polygons: [] }
