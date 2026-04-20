@@ -809,8 +809,13 @@ async function main() {
         includeCeiling: true,
         includeStair: true,
     })
-    const highMountedDeviceViews = await renderDoorViews(highMountedDeviceContext, options)
-    const highMountedPlanDevicePaths = extractPathDataByFill(highMountedDeviceViews.plan, options.deviceColor!)
+    // Render this fixture with a distinct floorSlabColor so the ceiling/stair
+    // assertions measure real slab-context fills. If we re-used the default
+    // (which falls back to wallColor), the host-wall fill alone would satisfy
+    // the area threshold and mask slab-rendering regressions.
+    const highMountedOptions = { ...options, floorSlabColor: '#6EAF72' }
+    const highMountedDeviceViews = await renderDoorViews(highMountedDeviceContext, highMountedOptions)
+    const highMountedPlanDevicePaths = extractPathDataByFill(highMountedDeviceViews.plan, highMountedOptions.deviceColor!)
     assert.ok(
         highMountedDeviceContext.hostCeilings.length > 0,
         'Expected IFCCOVERING elements to be collected as host ceilings'
@@ -824,11 +829,7 @@ async function main() {
         [],
         'Devices above the plan cut should not render in plan view'
     )
-    // `options.floorSlabColor` is intentionally unset here so the renderer falls back
-    // to its default slab color (which matches the wall color). Asserting against
-    // `options.floorSlabColor!` would look for literal `fill="undefined"` in the SVG
-    // and miss valid slab/ceiling fills entirely.
-    const slabColor = options.floorSlabColor ?? options.wallColor!
+    const slabColor = highMountedOptions.floorSlabColor!
     assert.ok(
         getWallFilledArea(highMountedDeviceViews.front, slabColor) > 1200,
         'Front elevation should render ceiling/stair slab-color context'

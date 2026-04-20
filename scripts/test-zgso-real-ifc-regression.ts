@@ -230,12 +230,39 @@ function getDashedLines(svg: string): DashedLine[] {
     return dashed.sort((a, b) => b.length - a.length)
 }
 
-function getExpectedSingleHingeSide(context: DoorContext): 'left' | 'right' | null {
-    if (context.operableLeaves?.leaves.length === 1) {
-        return context.operableLeaves.leaves[0].hingeSide
-    }
+/**
+ * Mirrors `placementYAxis · semanticFacing > 0`, matching the renderer's
+ * `shouldMirrorSwingForHandedness` check. When true the rendered hinge is
+ * flipped relative to the raw IFC hinge side, so any test that compares a
+ * dashed guide's screen origin against the "expected" side must apply the
+ * same mirror or it will flag correctly rendered doors.
+ */
+function shouldMirrorExpectedHingeSide(context: DoorContext): boolean {
     const info = getDoorOperationInfo(context.openingDirection)
-    return info.hingeSide === 'left' || info.hingeSide === 'right' ? info.hingeSide : null
+    if (!info.swingCapable || (info.hingeSide !== 'left' && info.hingeSide !== 'right')) {
+        return false
+    }
+    const placementYAxis = context.door.placementYAxis?.clone().setY(0)
+    if (!placementYAxis || placementYAxis.lengthSq() < 1e-8) return false
+    placementYAxis.normalize()
+    const facing = context.viewFrame.semanticFacing.clone().setY(0)
+    if (facing.lengthSq() < 1e-8) return false
+    facing.normalize()
+    return placementYAxis.dot(facing) > 0
+}
+
+function getExpectedSingleHingeSide(context: DoorContext): 'left' | 'right' | null {
+    let hingeSide: 'left' | 'right' | null = null
+    if (context.operableLeaves?.leaves.length === 1) {
+        hingeSide = context.operableLeaves.leaves[0].hingeSide
+    } else {
+        const info = getDoorOperationInfo(context.openingDirection)
+        hingeSide = info.hingeSide === 'left' || info.hingeSide === 'right' ? info.hingeSide : null
+    }
+    if (!hingeSide) return null
+    return shouldMirrorExpectedHingeSide(context)
+        ? (hingeSide === 'left' ? 'right' : 'left')
+        : hingeSide
 }
 
 function evaluateBlockingTag(tag: string, context: DoorContext, viewMetrics: Record<string, ViewMetrics>, viewsRequested: string[]): string[] {
