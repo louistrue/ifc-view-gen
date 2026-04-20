@@ -14,7 +14,7 @@ const guids = readdirSync(SRC_ROOT).filter((name) => {
 
 let written = 0
 for (const guid of guids) {
-    const safe = guid.replace(/\$/g, '')
+    const safe = guid.replace(/[^A-Za-z0-9_-]/g, '_')
     for (const view of ['plan', 'front', 'back']) {
         const svgPath = join(SRC_ROOT, guid, 'rendered', `${view}.svg`)
         try {

@@ -353,7 +353,10 @@ export function getDoorOperationInfo(operationType: string | null): DoorOperatio
         return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: 'right' }
     }
     if (upper.includes('SLIDING') && !upper.includes('FOLDING')) {
-        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: 'right' }
+        // Generic `SLIDING` is IFC's unspecified-direction value. Leave slideDirection
+        // null so the renderer can render a neutral/centered slide indicator rather
+        // than forcing an arbitrary handedness (matching the `folding` branch behavior).
+        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: null }
     }
     if (upper.includes('FOLDING')) {
         return { kind: 'folding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: null }
@@ -785,18 +788,20 @@ function isElectricalDeviceType(typeName: string): boolean {
         lower.includes('conduit') ||
         lower.includes('carrier') ||
         lower.includes('junction') ||
-        lower.includes('distributionflow') ||
         lower.includes('switch') ||
         lower.includes('outlet') ||
         lower.includes('socket') ||
         lower.includes('light') ||
         lower.includes('fixture') ||
         lower.includes('panel') ||
-        lower.includes('distribution') ||
+        // Match only specific electrical distribution concretes (e.g. distribution board),
+        // not the abstract `IfcDistributionFlowElement` / `IfcDistributionControlElement`
+        // bases which also cover HVAC / plumbing.
+        lower.includes('distributionboard') ||
         // IFCFLOWTERMINAL covers sinks/diffusers as well as outlets/switches; it is kept
         // because in typical door-context IFC exports flow terminals near doors are almost
         // always electrical (wall outlets / light fixtures). The abstract base classes
-        // below (IfcFlowSegment, IfcFlowController, IfcDistributionFlowElement,
+        // (IfcFlowSegment, IfcFlowController, IfcDistributionFlowElement,
         // IfcDistributionControlElement) are intentionally excluded: they also cover
         // HVAC/plumbing elements which must not enter the nearby-device set or they would
         // crowd out real switches/outlets given the selection cap.
@@ -1507,12 +1512,17 @@ function findHostSlabs(
             const touchesExisting = layers.some((layer) => {
                 const overlap = Math.min(layer.maxB, range.max) - Math.max(layer.minB, range.min)
                 if (overlap > -COMPOSITE_STACK_TOLERANCE_METERS) return true
+                // Asymmetric adjacency: a "below"-direction candidate must stack UNDER an
+                // existing layer (its top touches the layer's bottom). An "above"-direction
+                // candidate must stack OVER an existing layer (its bottom touches the layer's
+                // top). The previous symmetric check accepted geometrically implausible
+                // arrangements (e.g. an "above" layer whose top sat flush with the primary's
+                // bottom), which could pull floors from the wrong storey into elevation host
+                // context.
                 if (direction === 'below') {
                     return Math.abs(range.max - layer.minB) <= COMPOSITE_STACK_TOLERANCE_METERS
-                        || Math.abs(range.min - layer.maxB) <= COMPOSITE_STACK_TOLERANCE_METERS
                 }
                 return Math.abs(range.min - layer.maxB) <= COMPOSITE_STACK_TOLERANCE_METERS
-                    || Math.abs(range.max - layer.minB) <= COMPOSITE_STACK_TOLERANCE_METERS
             })
             if (touchesExisting) {
                 keep.push(candidate.element)

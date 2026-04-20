@@ -308,9 +308,17 @@ function evaluateBlockingTag(tag: string, context: DoorContext, viewMetrics: Rec
 }
 
 function classifyResolution(report: Omit<GuidReport, 'resolution'>): GuidReport['resolution'] {
+    const allTags = [...report.tags, ...report.blockingTags, ...report.manualReviewTags]
+    const hasTag = (pattern: RegExp) => allTags.some((tag) => pattern.test(tag))
+
+    // Known model-data / non-reproducible cases must short-circuit before the
+    // `needs additional rule` fallback, otherwise every context-backed blocking
+    // failure gets flagged as a renderer gap even when the backlog already marks
+    // it as a model-data limitation.
+    if (hasTag(/not[_ -]?reproducible/i)) return 'not reproducible'
+    if (hasTag(/model[_ -]?data|ifc[_ -]?data|source[_ -]?model/i)) return 'model-data limitation'
     if (!report.hasContext) return 'model-data limitation'
     if (report.blockingFailures.length === 0 && report.manualReviewTags.length === 0) return 'fixed'
-    if (report.blockingFailures.length === 0) return 'needs additional rule'
     return 'needs additional rule'
 }
 

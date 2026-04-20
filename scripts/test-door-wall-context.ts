@@ -824,12 +824,17 @@ async function main() {
         [],
         'Devices above the plan cut should not render in plan view'
     )
+    // `options.floorSlabColor` is intentionally unset here so the renderer falls back
+    // to its default slab color (which matches the wall color). Asserting against
+    // `options.floorSlabColor!` would look for literal `fill="undefined"` in the SVG
+    // and miss valid slab/ceiling fills entirely.
+    const slabColor = options.floorSlabColor ?? options.wallColor!
     assert.ok(
-        getWallFilledArea(highMountedDeviceViews.front, options.floorSlabColor!) > 1200,
+        getWallFilledArea(highMountedDeviceViews.front, slabColor) > 1200,
         'Front elevation should render ceiling/stair slab-color context'
     )
     assert.ok(
-        getWallFilledArea(highMountedDeviceViews.back, options.floorSlabColor!) > 1200,
+        getWallFilledArea(highMountedDeviceViews.back, slabColor) > 1200,
         'Back elevation should render ceiling/stair slab-color context'
     )
 

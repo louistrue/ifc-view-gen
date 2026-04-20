@@ -186,7 +186,13 @@ async function main() {
 
         for (const record of group.records) {
             const sourcePdf = resolve(issueFolder, record.pdf)
-            if (!existsSync(sourcePdf)) continue
+            if (!existsSync(sourcePdf)) {
+                // Surface rather than silently drop: a generated review package
+                // must not look complete while issue evidence is actually missing.
+                throw new Error(
+                    `Issue PDF not found for GUID ${group.guid}, issue ${record.number}: ${sourcePdf}`
+                )
+            }
             const ext = extname(record.pdf).toLowerCase() || '.pdf'
             const viewSuffix = normalizeView(record.view) ?? 'unknown'
             const destPdf = resolve(issuePdfDir, `${record.number}-${viewSuffix}${ext}`)

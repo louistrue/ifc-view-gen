@@ -1923,7 +1923,20 @@ function extractMeshSectionSegments(
             if (v.y < cutY - 1e-6) return -1
             return 0
         })
-        if (!sides.some((s) => s === 1) || !sides.some((s) => s === -1)) return
+        // When exactly two vertices lie on the cut plane, the shared edge IS the section
+        // edge. This happens often for prismatic wall meshes whose triangulation includes
+        // horizontal edges at the cut height; the intersection walk below would drop them
+        // because it only emits plane-crossing segments. Emit the on-plane edge directly.
+        if (sides.filter((s) => s === 0).length === 2) {
+            const onPlane = verts.filter((_, i) => sides[i] === 0)
+            registerSegment(
+                new THREE.Vector3(onPlane[0].x, cutY, onPlane[0].z),
+                new THREE.Vector3(onPlane[1].x, cutY, onPlane[1].z)
+            )
+            return
+        }
+        // Skip triangles that lie entirely on one side of the plane (no intersection).
+        if (sides.every((s) => s >= 0) || sides.every((s) => s <= 0)) return
 
         const intersections: THREE.Vector3[] = []
         for (let i = 0; i < 3; i++) {
@@ -3721,7 +3734,6 @@ function renderElevationFromMeshes(
         ...ceilingGeometryRaw.polygons,
         ...stairGeometryRaw.polygons
     )
-    const fitBounds = getBoundsFromProjectedGeometry(fitGeometry.edges, fitGeometry.polygons)
     const elevationViewType: 'Front' | 'Back' = isBackView ? 'Back' : 'Front'
     const elevationHostClipBounds = getElevationHostClipBounds(context, fitGeometry, opts, camera, frustumWidth, frustumHeight, elevationViewType)
     const scaleFitGeometry = elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry
@@ -4752,14 +4764,27 @@ function renderPlanFromMeshes(
     // lateral window. Far-away wall endpoints (multi-metre host walls) stay
     // clipped downstream but must not stretch the viewport here.
     if (hasMeshSection) {
+        const pushFitPoint = (x: number, y: number) => {
+            fitGeometry.edges.push({
+                x1: x, y1: y, x2: x, y2: y,
+                color: 'none', depth: 0, layer: 0,
+            })
+        }
         for (const polygon of planWallGeometry.polygons) {
             for (const point of polygon.points) {
                 if (point.x < lateralLeftX || point.x > lateralRightX) continue
-                fitGeometry.edges.push({
-                    x1: point.x, y1: point.y, x2: point.x, y2: point.y,
-                    color: 'none', depth: 0, layer: 0,
-                })
+                pushFitPoint(point.x, point.y)
             }
+        }
+        // Open-chain wall sections (non-watertight meshes) are emitted as edges only;
+        // without these, fit bounds would drop the section and later clipping could
+        // remove the only nearby-wall geometry in the rendered output.
+        for (const edge of planWallGeometry.edges) {
+            const minX = Math.min(edge.x1, edge.x2)
+            const maxX = Math.max(edge.x1, edge.x2)
+            if (maxX < lateralLeftX || minX > lateralRightX) continue
+            pushFitPoint(THREE.MathUtils.clamp(edge.x1, lateralLeftX, lateralRightX), edge.y1)
+            pushFitPoint(THREE.MathUtils.clamp(edge.x2, lateralLeftX, lateralRightX), edge.y2)
         }
     }
 
