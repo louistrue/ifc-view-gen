@@ -448,6 +448,32 @@ async function main() {
         openingDirection: 'SINGLE_SWING_LEFT',
         placementYAxis: new THREE.Vector3(0, 0, -1),
     })
+    // Handedness coverage: flipping IFC placementYAxis must flip the hinge side in plan.
+    const handednessLeftPlusZ  = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_LEFT',
+        placementYAxis: new THREE.Vector3(0, 0, 1),
+    })
+    const handednessLeftMinusZ = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_LEFT',
+        placementYAxis: new THREE.Vector3(0, 0, -1),
+    })
+    const handednessRightPlusZ  = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_RIGHT',
+        placementYAxis: new THREE.Vector3(0, 0, 1),
+    })
+    const handednessRightMinusZ = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_RIGHT',
+        placementYAxis: new THREE.Vector3(0, 0, -1),
+    })
+    const handednessDoubleDoorPlusZ = await buildContext({
+        includeWall: true,
+        openingDirection: 'DOUBLE_DOOR_SINGLE_SWING',
+        placementYAxis: new THREE.Vector3(0, 0, 1),
+    })
     const sideFixedLeftCtx = await buildContext({
         includeWall: true,
         openingDirection: 'SWING_FIXED_LEFT',
@@ -487,6 +513,11 @@ async function main() {
     const upwardArcViews = await renderDoorViews(upwardArcCtx,  options)
     const sideFixedLeftViews = await renderDoorViews(sideFixedLeftCtx, options)
     const sideFixedRightViews = await renderDoorViews(sideFixedRightCtx, options)
+    const handednessLeftPlusZViews   = await renderDoorViews(handednessLeftPlusZ,  options)
+    const handednessLeftMinusZViews  = await renderDoorViews(handednessLeftMinusZ, options)
+    const handednessRightPlusZViews  = await renderDoorViews(handednessRightPlusZ, options)
+    const handednessRightMinusZViews = await renderDoorViews(handednessRightMinusZ,options)
+    const handednessDoubleDoorViews  = await renderDoorViews(handednessDoubleDoorPlusZ, options)
 
     const leftPlan   = leftPlanViews.plan
     const rightPlan  = rightPlanViews.plan
@@ -521,6 +552,50 @@ async function main() {
     assert.ok(rightGuide.x1 > options.width! / 2, 'Right swing guide should originate from the right hinge side')
     assert.ok(sideFixedLeftGuide.x1 < options.width! / 2, 'Fixed-left sidelight should hinge from the left jamb')
     assert.ok(sideFixedRightGuide.x1 > options.width! / 2, 'Fixed-right sidelight should hinge from the right jamb')
+
+    // IFC handedness invariant: flipping placementYAxis (local +Y direction) must
+    // flip the hinge side for ALL swing-capable operation types. The renderer's
+    // `widthAxis` depends on `semanticFacing`, which can be guessed with either
+    // sign; the mirror logic compensates so that IFC LEFT/RIGHT always maps to
+    // the correct world-side regardless of that ambiguity.
+    const handednessLeftPlusZGuide   = getLongestDashedGuide(handednessLeftPlusZViews.plan)
+    const handednessLeftMinusZGuide  = getLongestDashedGuide(handednessLeftMinusZViews.plan)
+    const handednessRightPlusZGuide  = getLongestDashedGuide(handednessRightPlusZViews.plan)
+    const handednessRightMinusZGuide = getLongestDashedGuide(handednessRightMinusZViews.plan)
+    assert.ok(handednessLeftPlusZGuide,   'SINGLE_SWING_LEFT with placementYAxis=+Z should render a swing guide')
+    assert.ok(handednessLeftMinusZGuide,  'SINGLE_SWING_LEFT with placementYAxis=-Z should render a swing guide')
+    assert.ok(handednessRightPlusZGuide,  'SINGLE_SWING_RIGHT with placementYAxis=+Z should render a swing guide')
+    assert.ok(handednessRightMinusZGuide, 'SINGLE_SWING_RIGHT with placementYAxis=-Z should render a swing guide')
+    const midX = options.width! / 2
+    const leftPlusZOnLeft   = handednessLeftPlusZGuide.x1   < midX
+    const leftMinusZOnLeft  = handednessLeftMinusZGuide.x1  < midX
+    const rightPlusZOnLeft  = handednessRightPlusZGuide.x1  < midX
+    const rightMinusZOnLeft = handednessRightMinusZGuide.x1 < midX
+    assert.notEqual(
+        leftPlusZOnLeft,
+        leftMinusZOnLeft,
+        'Flipping placementYAxis must mirror SINGLE_SWING_LEFT hinge side (otherwise IFC handedness is ignored)'
+    )
+    assert.notEqual(
+        rightPlusZOnLeft,
+        rightMinusZOnLeft,
+        'Flipping placementYAxis must mirror SINGLE_SWING_RIGHT hinge side (otherwise IFC handedness is ignored)'
+    )
+    // LEFT and RIGHT with the SAME placementYAxis must hinge on opposite sides.
+    assert.notEqual(
+        leftPlusZOnLeft,
+        rightPlusZOnLeft,
+        'SINGLE_SWING_LEFT and SINGLE_SWING_RIGHT must hinge on opposite sides for the same placementYAxis'
+    )
+    assert.notEqual(
+        leftMinusZOnLeft,
+        rightMinusZOnLeft,
+        'SINGLE_SWING_LEFT and SINGLE_SWING_RIGHT must hinge on opposite sides for the same placementYAxis'
+    )
+    // Double doors (hingeSide='both') must still render a symbolic swing; hinge mirroring
+    // is a no-op for symmetric leaves but the renderer must not crash or drop the swing.
+    const handednessDoubleDoorGuide = getLongestDashedGuide(handednessDoubleDoorViews.plan)
+    assert.ok(handednessDoubleDoorGuide, 'DOUBLE_DOOR_SINGLE_SWING with placementYAxis=+Z should still render a swing guide')
 
     // Default synthetic setup opens downward: y2 > y1.
     assert.ok(leftGuide.y2  > leftGuide.y1,  'Left swing arc should open downward (into room)')
@@ -603,6 +678,11 @@ async function main() {
     writeFileSync(`${dir}/plan-upward-arc.svg`, upwardArcPlan)
     writeFileSync(`${dir}/plan-fixed-left-sidelight.svg`, sideFixedLeftPlan)
     writeFileSync(`${dir}/plan-fixed-right-sidelight.svg`, sideFixedRightPlan)
+    writeFileSync(`${dir}/plan-handedness-left-plusZ.svg`,   handednessLeftPlusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-left-minusZ.svg`,  handednessLeftMinusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-right-plusZ.svg`,  handednessRightPlusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-right-minusZ.svg`, handednessRightMinusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-double-plusZ.svg`, handednessDoubleDoorViews.plan)
 
     console.log('Door wall context regression test passed')
 }

@@ -3124,9 +3124,27 @@ interface ResolvedSwingLeaf {
     hingeOffsetFromCenter: number
 }
 
-function shouldMirrorSidelightSwing(context: DoorContext): boolean {
-    const upper = context.openingDirection?.toUpperCase() || ''
-    if (!upper.includes('SWING_FIXED_LEFT') && !upper.includes('SWING_FIXED_RIGHT')) {
+/**
+ * Decide whether a door's resolved swing leaves need a left↔right mirror to honour
+ * IFC handedness. IFC defines LEFT/RIGHT "as viewed in the direction of the positive
+ * local Y-axis" (= `placementYAxis`). The renderer's `widthAxis` is derived from
+ * `semanticFacing` via `cross(worldUp, semanticFacing)`. Because `semanticFacing`
+ * can be guessed with either sign from bounding-box / mesh-normal heuristics, the
+ * renderer's local-X and IFC's local-X may disagree by 180°.
+ *
+ * When `placementYAxis` and `semanticFacing` point the same way (dot > 0), the
+ * renderer's `widthAxis` is opposite to IFC's local +X, so hingeSide LEFT/RIGHT
+ * need to be swapped. When they point opposite ways, axes already agree and no
+ * mirror is required. When `placementYAxis` is unavailable, preserve historical
+ * behaviour (no mirror).
+ *
+ * This applies to ALL swing-capable operations (SINGLE_SWING_LEFT/RIGHT,
+ * DOUBLE_SWING*, DOUBLE_DOOR_*, SWING_FIXED_LEFT/RIGHT), because the coordinate
+ * ambiguity is independent of which operation type is in use.
+ */
+function shouldMirrorSwingForHandedness(context: DoorContext): boolean {
+    const info = getDoorOperationInfo(context.openingDirection)
+    if (!info.swingCapable || !info.hingeSide) {
         return false
     }
 
@@ -3203,7 +3221,7 @@ function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): R
             }))
             .filter((leaf) => Number.isFinite(leaf.width) && leaf.width > 0.01)
         if (leaves.length > 0) {
-            return shouldMirrorSidelightSwing(context) ? mirrorResolvedSwingLeaves(leaves) : leaves
+            return shouldMirrorSwingForHandedness(context) ? mirrorResolvedSwingLeaves(leaves) : leaves
         }
     }
 
@@ -3221,7 +3239,7 @@ function resolveSwingLeavesForWidth(context: DoorContext, totalWidth: number): R
             hingeOffsetFromCenter: params.hingeSide === 'left' ? -totalWidth / 2 : totalWidth / 2,
         },
     ]
-    return shouldMirrorSidelightSwing(context) ? mirrorResolvedSwingLeaves(leaves) : leaves
+    return shouldMirrorSwingForHandedness(context) ? mirrorResolvedSwingLeaves(leaves) : leaves
 }
 
 function normalizeSwingLeavesForScreen(
