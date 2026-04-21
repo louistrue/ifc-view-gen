@@ -20,6 +20,12 @@ export interface SVGRenderOptions {
     width?: number
     height?: number
     margin?: number // meters
+    /**
+     * Grundriss (detailed mesh): fester Weltabstand um die Tür entlang Breite und
+     * Öffnungsnormale — die Fit-/Clip-Zone; alles außerhalb wird beschnitten (Zoom
+     * folgt nicht dem größten Element). Standard 0.5 m.
+     */
+    planCropMarginMeters?: number
     doorColor?: string
     wallColor?: string
     floorSlabColor?: string
@@ -87,6 +93,7 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
     margin: 0.5,
+    planCropMarginMeters: 0.5,
     doorColor: '#dedede',
     wallColor: '#e3e3e3',
     floorSlabColor: '#e3e3e3',
@@ -2163,30 +2170,30 @@ function createMeshPlanSectionGeometry(
         return out
     }
 
-    // Build the plan-view corridor. Lateral extent covers the door + enough
-    // room either side to show nearby walls / adjacent doors. Depth extent is
-    // driven by the host wall's own thickness, padded so perpendicular walls
-    // at L-corners remain visible.
+    // Corridor matches plan crop margin: door ± pad in width and depth so section
+    // geometry exists inside the same window that fit/clip uses (not full IFC wall).
     const frame = context.viewFrame
     const widthAxis = frame.widthAxis.clone().normalize()
     const depthAxis = frame.semanticFacing.clone().normalize()
     const halfDoorWidth = frame.width / 2
+    const halfT = frame.thickness / 2
+    const planPad = Math.max(options.planCropMarginMeters, 0)
     const wallMetrics = getLocalHostWallPlanMetrics(context)
     const hostWallThickness = wallMetrics?.thickness ?? frame.thickness
-    const lateralExtend = Math.max(frame.width + 0.6, 1.6)
-    const depthPadding = Math.max(hostWallThickness + 0.2, 1.0)
+    const lateralExtend = halfDoorWidth + planPad
+    const depthHalfSpan = Math.max(halfT, hostWallThickness / 2) + planPad
+    const relDepthMin = -depthHalfSpan
+    const relDepthMax = depthHalfSpan
     const originWidth = frame.origin.dot(widthAxis)
     const originDepth = frame.origin.dot(depthAxis)
-    const depthMin = (wallMetrics?.minDepth ?? -hostWallThickness / 2) - depthPadding
-    const depthMax = (wallMetrics?.maxDepth ?? hostWallThickness / 2) + depthPadding
 
     const corridor: PlanSectionCorridor = {
         widthAxis,
         depthAxis,
         minWidth: originWidth - halfDoorWidth - lateralExtend,
         maxWidth: originWidth + halfDoorWidth + lateralExtend,
-        minDepth: originDepth + depthMin,
-        maxDepth: originDepth + depthMax,
+        minDepth: originDepth + relDepthMin,
+        maxDepth: originDepth + relDepthMax,
     }
 
     for (const mesh of wallMeshes) {
@@ -3325,7 +3332,9 @@ function generateSVGString(
         ? (renderMeta.planWallBandBounds.maxY - renderMeta.planWallBandBounds.minY) * scale
         : (renderMeta.context?.viewFrame ? Math.max(renderMeta.context.viewFrame.thickness * scale, 12) : undefined)
 
-    const wallBandsSvg = showFills && hasWall && !renderMeta.suppressSyntheticWallBands
+    // Plan: wall fill comes only from mesh/semantic section geometry — no synthetic
+    // left/right “reveal” rectangles (they are not IFC-derived).
+    const wallBandsSvg = showFills && renderMeta.viewType !== 'Plan' && hasWall && !renderMeta.suppressSyntheticWallBands
         ? (() => {
             const elevationMask = getElevationWallBandMask(renderMeta.context, renderMeta.viewType)
             return renderWallRevealSvg(
@@ -4616,13 +4625,14 @@ function renderPlanFromMeshes(
     const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
     const halfW = frame.width / 2
     const halfT = frame.thickness / 2
+    const planCropM = Math.max(opts.planCropMarginMeters, 0)
 
-    const projectPlanBounds = (depthMin: number, depthMax: number): ProjectedBounds => {
+    const projectPlanRect = (depthMin: number, depthMax: number, widthHalfLocal: number): ProjectedBounds => {
         const corners = [
-            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-halfW)).add(frame.semanticFacing.clone().multiplyScalar(depthMin)),
-            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.semanticFacing.clone().multiplyScalar(depthMin)),
-            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.semanticFacing.clone().multiplyScalar(depthMax)),
-            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-halfW)).add(frame.semanticFacing.clone().multiplyScalar(depthMax)),
+            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-widthHalfLocal)).add(frame.semanticFacing.clone().multiplyScalar(depthMin)),
+            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(widthHalfLocal)).add(frame.semanticFacing.clone().multiplyScalar(depthMin)),
+            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(widthHalfLocal)).add(frame.semanticFacing.clone().multiplyScalar(depthMax)),
+            frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-widthHalfLocal)).add(frame.semanticFacing.clone().multiplyScalar(depthMax)),
         ]
         let minX = Infinity
         let maxX = -Infinity
@@ -4664,12 +4674,8 @@ function renderPlanFromMeshes(
         renderGeometry.edges.push(...arcEdges)
     }
 
-    const planDoorBounds = projectPlanBounds(-halfT, halfT)
-    const planWallMetrics = getLocalHostWallPlanMetrics(context)
-    const planWallBandBounds = projectPlanBounds(
-        planWallMetrics?.minDepth ?? -halfT,
-        planWallMetrics?.maxDepth ?? halfT
-    )
+    const planDoorBounds = projectPlanRect(-halfT, halfT, halfW)
+    const planWallBandBounds = projectPlanRect(-halfT - planCropM, halfT + planCropM, halfW + planCropM)
 
     // Section the host wall and any nearby walls at the cut plane. This draws
     // the real wall footprint — including perpendicular walls at L-corners,
@@ -4702,56 +4708,21 @@ function renderPlanFromMeshes(
         return { x1: proj.x, y1: proj.y, x2: proj.x, y2: proj.y, color: 'none', depth: 0, layer: 0 }
     }
 
-    // Lateral window around the door. The plan should focus on the door + a
-    // short wall reveal on each side (~door-width or ~1.5-2 m, capped so huge
-    // host walls or curtain-wall hosts can't stretch the viewport end-to-end).
-    const planLateralGap = THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5)
-    const lateralLeftFit = fitPoint(
-        frame.origin.clone()
-            .add(frame.widthAxis.clone().multiplyScalar(-halfW - planLateralGap))
-            .add(openAxisFit.clone().multiplyScalar(arcReach))
-    )
-    const lateralRightFit = fitPoint(
-        frame.origin.clone()
-            .add(frame.widthAxis.clone().multiplyScalar(halfW + planLateralGap))
-            .add(openAxisFit.clone().multiplyScalar(arcReach))
-    )
-    const lateralLeftX = Math.min(lateralLeftFit.x1, lateralRightFit.x1)
-    const lateralRightX = Math.max(lateralLeftFit.x1, lateralRightFit.x1)
-    const keepWithinLateral = (edges: ProjectedEdge[]): ProjectedEdge[] =>
-        edges.filter(
-            (edge) =>
-                Math.max(edge.x1, edge.x2) >= lateralLeftX
-                && Math.min(edge.x1, edge.x2) <= lateralRightX
-        )
-    const keepPolygonsWithinLateral = (polygons: ProjectedPolygon[]): ProjectedPolygon[] =>
-        polygons.filter((polygon) => {
-            const xs = polygon.points.map((point) => point.x)
-            return Math.max(...xs) >= lateralLeftX && Math.min(...xs) <= lateralRightX
-        })
-
+    // Fit / clip window: door ± planCropMarginMeters in width and along opening
+    // normal (not driven by the largest wall mesh). Swing arc corners use the
+    // same lateral half-width so the arc stays in frame.
+    const fitW = halfW + planCropM
+    const fitD = halfT + planCropM
     const fitGeometry = {
         edges: [
-            // Door outline corners (back and front)
-            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
-            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).sub(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
-            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
-            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(frame.semanticFacing.clone().multiplyScalar(frame.thickness / 2))),
-            // Arc envelope corners (full reach in openAxisFit direction)
-            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
-            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(halfW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
-            // Lateral window anchors — force the plan fit window to extend at
-            // least this far on each side so a short host-wall stub still
-            // renders, but no further so multi-metre walls cannot widen it.
-            lateralLeftFit,
-            lateralRightFit,
-            ...keepWithinLateral(deviceGeometry.edges),
-            ...keepWithinLateral(nearbyDoorGeometry.edges),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-fitW)).add(frame.semanticFacing.clone().multiplyScalar(-fitD))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(fitW)).add(frame.semanticFacing.clone().multiplyScalar(-fitD))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(fitW)).add(frame.semanticFacing.clone().multiplyScalar(fitD))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-fitW)).add(frame.semanticFacing.clone().multiplyScalar(fitD))),
+            fitPoint(frame.origin.clone().sub(frame.widthAxis.clone().multiplyScalar(fitW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
+            fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(fitW)).add(openAxisFit.clone().multiplyScalar(arcReach))),
         ],
-        polygons: [
-            ...keepPolygonsWithinLateral(deviceGeometry.polygons),
-            ...keepPolygonsWithinLateral(nearbyDoorGeometry.polygons),
-        ],
+        polygons: [],
     }
     // Prefer the real mesh-based section; fall back to the synthetic two-stub
     // drawing only when no wall meshes are available (e.g. Fragments-only
@@ -4759,34 +4730,6 @@ function renderPlanFromMeshes(
     const planWallGeometry = (hasMeshSection || realWallMeshCount > 0)
         ? meshPlanSectionGeometry
         : createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
-
-    // Expand fit bounds to include only wall-section vertices inside the
-    // lateral window. Far-away wall endpoints (multi-metre host walls) stay
-    // clipped downstream but must not stretch the viewport here.
-    if (hasMeshSection) {
-        const pushFitPoint = (x: number, y: number) => {
-            fitGeometry.edges.push({
-                x1: x, y1: y, x2: x, y2: y,
-                color: 'none', depth: 0, layer: 0,
-            })
-        }
-        for (const polygon of planWallGeometry.polygons) {
-            for (const point of polygon.points) {
-                if (point.x < lateralLeftX || point.x > lateralRightX) continue
-                pushFitPoint(point.x, point.y)
-            }
-        }
-        // Open-chain wall sections (non-watertight meshes) are emitted as edges only;
-        // without these, fit bounds would drop the section and later clipping could
-        // remove the only nearby-wall geometry in the rendered output.
-        for (const edge of planWallGeometry.edges) {
-            const minX = Math.min(edge.x1, edge.x2)
-            const maxX = Math.max(edge.x1, edge.x2)
-            if (maxX < lateralLeftX || minX > lateralRightX) continue
-            pushFitPoint(THREE.MathUtils.clamp(edge.x1, lateralLeftX, lateralRightX), edge.y1)
-            pushFitPoint(THREE.MathUtils.clamp(edge.x2, lateralLeftX, lateralRightX), edge.y2)
-        }
-    }
 
     const hostGeometry = (planWallGeometry.edges.length > 0 || planWallGeometry.polygons.length > 0)
         ? clipProjectedGeometryToBounds(
@@ -4807,7 +4750,7 @@ function renderPlanFromMeshes(
             context,
             viewType: 'Plan',
             planArcFlip: flipArc,
-            suppressSyntheticWallBands: hasPlanWallGeometry,
+            suppressSyntheticWallBands: true,
             planDoorBounds,
             planWallBandBounds: { minY: planWallBandBounds.minY, maxY: planWallBandBounds.maxY },
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
@@ -4842,43 +4785,6 @@ function renderPlanFromBoundingBox(
     const scaledThickness = doorThickness * scale
     const offsetX = (svgWidth - scaledWidth) / 2
     const offsetY = padding + (availableHeight - scaledThickness) / 2
-    const hasWall = Boolean(context.hostWall?.boundingBox)
-    const planWallMetrics = getLocalHostWallPlanMetrics(context)
-    const scalePxPerMeter = scaledThickness / Math.max(doorThickness, 1e-6)
-    const wallThicknessPx = planWallMetrics
-        ? Math.max(planWallMetrics.thickness * scalePxPerMeter, 12)
-        : Math.max(scaledThickness, 12)
-    const doorMinDepth = -doorThickness / 2
-    const planBandY = planWallMetrics
-        ? offsetY + (planWallMetrics.minDepth - doorMinDepth) * scalePxPerMeter
-        : offsetY
-    const wallRevealSvg = hasWall
-        ? renderWallRevealSvg(
-            getWallRevealRects({
-                bounds: {
-                    minX: padding,
-                    maxX: svgWidth - padding,
-                    minY: padding,
-                    maxY: padding + availableHeight,
-                },
-                offsetX,
-                offsetY,
-                scaledWidth,
-                scaledHeight: scaledThickness,
-                wallRevealSide: opts.wallRevealSide,
-                wallRevealTop: opts.wallRevealTop,
-                viewType: 'Plan',
-                wallThicknessPx,
-                planBandY,
-                planBandHeight: wallThicknessPx,
-                planArcFlip: false,
-            }),
-            wallColor,
-            lineColor,
-            lineWidth
-        )
-        : ''
-
     const arrowY = offsetY + scaledThickness + 30
     const arrowEndY = arrowY + 25
 
@@ -4886,7 +4792,6 @@ function renderPlanFromBoundingBox(
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
 ${fontDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
-${wallRevealSvg}
 
   <!-- Door outline (bounding box fallback) -->
   <rect x="${offsetX}" y="${offsetY}" width="${scaledWidth}" height="${scaledThickness}" 

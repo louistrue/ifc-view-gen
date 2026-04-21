@@ -35,7 +35,11 @@ yarn-error.log*
 next-env.d.ts
 
 *.ifc
-
+*.cursorignore
+*.svg
+*.png
+*.log
+guid.json
 
 20251230_test-prototyp.pdf
 Antworten auf Fragen in Feedback.md
