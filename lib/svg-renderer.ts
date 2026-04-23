@@ -1564,9 +1564,18 @@ function getNearbyDoorAxisRects(context: DoorContext): AxisRect[] {
     const frame = context.viewFrame
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.upAxis)
+    const originC = frame.origin.dot(frame.semanticFacing)
     const seenDoorIDs = new Set<number>()
     const rects: AxisRect[] = []
     const nearbyDoorMeshes = getNearbyDoorMeshes(context)
+
+    // Only show nearby doors that actually sit in (or straddle) the host
+    // wall plane. A door far down a perpendicular hallway would otherwise
+    // ghost onto this elevation as a translucent overlay even though
+    // architecturally it's in a different wall. Test the nearby door's
+    // depth CENTER (not its range) so a long wall barely clipping the
+    // tolerance band cannot smuggle a hallway door through.
+    const DEPTH_CENTER_TOLERANCE_METERS = Math.max(frame.thickness, 0.08) + 0.10
 
     for (const nearbyDoor of context.nearbyDoors || []) {
         if (seenDoorIDs.has(nearbyDoor.expressID) || !nearbyDoor.boundingBox) {
@@ -1590,6 +1599,11 @@ function getNearbyDoorAxisRects(context: DoorContext): AxisRect[] {
             || bounds.maxA <= bounds.minA
             || bounds.maxB <= bounds.minB
         )) {
+            continue
+        }
+
+        const depthCenter = (bounds.minC + bounds.maxC) / 2 - originC
+        if (Math.abs(depthCenter) > DEPTH_CENTER_TOLERANCE_METERS) {
             continue
         }
 
@@ -1966,7 +1980,6 @@ function createSemanticElevationNearbyWallGeometry(
     const frame = context.viewFrame
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.upAxis)
-    const nearbyWallMeshes = getNearbyWallMeshes(context)
     // Vertical clamp still uses the door's storey band; lateral clamping is
     // handled downstream by `elevationHostClipBounds` so perpendicular walls
     // outside the door-width corridor (e.g. ±1.3 m at a niche) don't get
@@ -1976,12 +1989,13 @@ function createSemanticElevationNearbyWallGeometry(
 
     for (const wall of context.nearbyWalls) {
         if (!wall.boundingBox) continue
-        const meshes = [
-            ...nearbyWallMeshes.filter((mesh) => mesh.userData.expressID === wall.expressID),
-            ...getWallAggregatePartMeshesForParent(context, wall.expressID),
-        ]
-        const bounds = measureMeshesOrBoxInAxes(
-            meshes,
+        // Use the element bounding box directly — web-ifc's boolean cut can
+        // leave phantom mesh vertices well outside the wall's real footprint
+        // (same problem we already dodged in `getElevationWallFootprintLocalA`),
+        // and for a thin perpendicular wall at 0.16 m thickness the polluted
+        // mesh scan was projecting a 0.4 m-wide rect that passed through the
+        // round windows flanking the door.
+        const bounds = measureBoundingBoxInAxes(
             wall.boundingBox,
             frame.widthAxis,
             frame.upAxis,
@@ -2056,39 +2070,19 @@ function createProjectedElevationWallBackdropGeometry(
     height: number,
     clipBounds: ProjectedBounds | null,
     options: Required<SVGRenderOptions>,
-    hostWallMeshes: THREE.Mesh[] = [],
     footprintLocalA: { minA: number; maxA: number } | null = null
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     if (!clipBounds) return geometry
 
-    // Clamp the backdrop's vertical extent to the host wall's actual projected
-    // Y range. Otherwise the left/right panels extend the full clip height and
-    // leave a door-width white gap below the door (the 3-panel layout has no
-    // below-door panel). Outside the wall's Y range, slabs/nothing take over.
-    let wallMinY = clipBounds.minY
-    let wallMaxY = clipBounds.maxY
-    if (hostWallMeshes.length > 0) {
-        const bounds = measureMeshesInAxes(
-            hostWallMeshes,
-            frame.widthAxis,
-            frame.upAxis,
-            frame.semanticFacing
-        )
-        if (bounds) {
-            const originB = frame.origin.dot(frame.upAxis)
-            const topPt = frame.origin.clone().add(
-                frame.upAxis.clone().multiplyScalar(bounds.maxB - originB)
-            )
-            const botPt = frame.origin.clone().add(
-                frame.upAxis.clone().multiplyScalar(bounds.minB - originB)
-            )
-            const topPx = projectPoint(topPt, camera, width, height).y
-            const botPx = projectPoint(botPt, camera, width, height).y
-            wallMinY = Math.max(clipBounds.minY, Math.min(topPx, botPx))
-            wallMaxY = Math.min(clipBounds.maxY, Math.max(topPx, botPx))
-        }
-    }
+    // Left/right backdrop panels span the entire clip-band height. The
+    // slab/ceiling strips (drawn at depth -1) layer on top, so letting the
+    // backdrop extend to clipBounds.minY / clipBounds.maxY never visibly
+    // conflicts with the slab band — it just closes the "white gap" above
+    // the host wall where nearby walls get dropped by the back-view
+    // occlusion filter.
+    const wallMinY = clipBounds.minY
+    const wallMaxY = clipBounds.maxY
 
     // Clamp the backdrop's horizontal extent to the real wall footprint along
     // the door's widthAxis. This stops the fill at T-junctions / L-corners /
@@ -4666,7 +4660,6 @@ function renderElevationFromMeshes(
             frustumHeight,
             elevationHostClipBounds,
             opts,
-            getHostWallMeshes(context),
             getElevationWallFootprintLocalA(context)
         ), '#a855f7') // purple = host wall backdrop
         renderGeometry.edges.push(...backdropWallGeometry.edges)
