@@ -1858,41 +1858,17 @@ function createSemanticPlanNearbyDoorGeometry(
 }
 
 function createSemanticElevationNearbyWindowGeometry(
-    context: DoorContext,
-    camera: THREE.OrthographicCamera,
-    width: number,
-    height: number
+    _context: DoorContext,
+    _camera: THREE.OrthographicCamera,
+    _width: number,
+    _height: number
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
-    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
-    const frame = context.viewFrame
-
-    for (const rect of getNearbyWindowAxisRects(context)) {
-        const outer = createRectPoints3D(
-            frame.origin,
-            frame.widthAxis,
-            frame.upAxis,
-            rect.minA,
-            rect.maxA,
-            rect.minB,
-            rect.maxB
-        )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
-        appendProjectedEdge(geometry, outer[0], outer[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[1], outer[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[2], outer[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[3], outer[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-    }
-
-    return geometry
+    // Intentionally empty: the AABB rect around each nearby window drew a
+    // square silhouette over round window cutouts (boolean-cut openings in
+    // the host wall already render as their real shape via the wall mesh's
+    // sharp-edge projection). Relying on the mesh-level silhouette means a
+    // round window reads as a circle, not a square with a circle inside.
+    return { edges: [], polygons: [] }
 }
 
 function createSemanticPlanNearbyWindowGeometry(
@@ -2031,7 +2007,11 @@ function createSemanticElevationNearbyWallGeometry(
         }
         if (rect.maxA <= rect.minA || rect.maxB <= rect.minB) continue
         const corners = createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, rect.minA, rect.maxA, rect.minB, rect.maxB)
-        appendProjectedFillPolygon(geometry, corners, camera, width, height, options.wallColor, -0.8, 0.65)
+        // Walls are opaque in reality. With fillOpacity < 1 a nearby wall
+        // whose Y extent reaches above the backdrop's Y clamp let the page
+        // background bleed through, producing a lighter-coloured "white
+        // square" artefact above the door.
+        appendProjectedFillPolygon(geometry, corners, camera, width, height, options.wallColor, -0.8, 1)
         for (let i = 0; i < corners.length; i++) {
             appendProjectedEdge(geometry, corners[i], corners[(i + 1) % corners.length], camera, width, height, options.lineColor, -0.8, WALL_EDGE_STROKE_FACTOR)
         }
