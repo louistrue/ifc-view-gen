@@ -86,6 +86,13 @@ export interface DoorContext {
     hostSlabsAbove: ElementInfo[]
     hostCeilings: ElementInfo[]
     nearbyDoors: ElementInfo[]
+    /**
+     * Raw Cset_StandardCH CFC/BKP string per nearby door (and the current door, keyed
+     * by `door.expressID`). Lets the renderer pick the BKP-correct leaf colour
+     * (anthrazit / hellbraun / hellgrau) for adjacent doors without another
+     * pass through the IFC.
+     */
+    nearbyDoorBKP: Map<number, string | null>
     /** IfcWindow (and similar) instances in the same plan band as {@link nearbyWalls} — plan / elevation context. */
     nearbyWindows: ElementInfo[]
     /**
@@ -2691,6 +2698,7 @@ export async function analyzeDoors(
             hostSlabsAbove,
             hostCeilings,
             nearbyDoors: [],
+            nearbyDoorBKP: new Map<number, string | null>(),
             nearbyWindows,
             nearbyWalls,
             wallAggregatePartLinks,
@@ -2719,6 +2727,19 @@ export async function analyzeDoors(
 
     for (const context of doorContexts) {
         context.nearbyDoors = mergeNearbyDoorsForContext(context, doorContexts, primaryDoors)
+
+        // Populate BKP lookup for every nearby door (and the current door, keyed
+        // by door.expressID). The renderer uses this to pick the material-correct
+        // leaf colour for adjacent doors — without it they all fall to hellgrau.
+        const bkpMap = context.nearbyDoorBKP
+        bkpMap.clear()
+        const selfBKP = csetStandardCHMap?.get(context.door.expressID)?.cfcBkpCccBcc ?? null
+        bkpMap.set(context.door.expressID, selfBKP)
+        for (const nearbyDoor of context.nearbyDoors) {
+            if (bkpMap.has(nearbyDoor.expressID)) continue
+            const nearbyBKP = csetStandardCHMap?.get(nearbyDoor.expressID)?.cfcBkpCccBcc ?? null
+            bkpMap.set(nearbyDoor.expressID, nearbyBKP)
+        }
     }
 
     return doorContexts

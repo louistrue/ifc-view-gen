@@ -90,37 +90,31 @@ function svgWebFontDefs(fontFamily: string): string {
 }
 
 /**
- * Fixed-scale rendering mode (gated by RENDER_FIXED_SCALE=1).
- *
- * When enabled, every door/view uses the same drawing scale and the door is
- * anchored to the canvas centre horizontally (and vertically in elevations).
- * Slab-to-slab vertical content (≈10 cm intrusion top + floor + 10 cm bottom)
- * fills most of the picture height at 210 px/m for a 4 m design-max floor.
- *
- * See scripts/airtable-render-round.ts + lib/svg-renderer.ts for the trigger
- * points. Legacy per-door fit-to-bounds path is preserved when the flag is
- * off (zero-regression).
+ * Elevation rendering policy (single mode, always on):
+ *   - vertical: slab-to-slab content (10 cm of upper slab + floor + 10 cm of
+ *     lower slab, as defined by `getElevationHostClipBounds`) fits the full
+ *     available picture height. Content top sits a few px below the picture
+ *     top (narrow whitespace), bottom lands on the title-block separator.
+ *     Scale is derived per door from the storey clip so the 10 cm slab rule
+ *     is ALWAYS visible (no overflow).
+ *   - horizontal: door frame origin anchored to the canvas width centre so
+ *     front/back/plan agree on the door's X position. Wall panels and slab
+ *     strips extend to the canvas edges (no side gutter, no white border).
+ *   - plan: fits bounds centred, uses its own scale, but door X still lines
+ *     up with the elevations.
  */
-export function isFixedScaleMode(): boolean {
-    return process.env.RENDER_FIXED_SCALE === '1'
-}
 
-/** px per metre in fixed-scale mode. 4.0 m fits 842 SVG px avail height. */
-export const FIXED_PX_PER_METER = 210
+/** Narrow top/bottom breathing room inside the drawing area (SVG px). */
+export const ELEVATION_TOP_PAD_PX = 12
+export const ELEVATION_BOTTOM_PAD_PX = 4
+export const ELEVATION_SIDE_PAD_PX = 0
 
-/** Viewport pads used in fixed-scale mode (legacy mode keeps uniform 80 px). */
-export const FIXED_SIDE_PAD_PX = 0
-export const FIXED_TOP_PAD_PX = 24
-export const FIXED_BOTTOM_PAD_PX = 16
-
-/** Plan SVG canvas height = `width × PLAN_SVG_HEIGHT_RATIO` (Grundriss is wider-than-tall, not square). */
-export const PLAN_SVG_HEIGHT_RATIO = 0.5
-/** Slightly taller plan canvas in fixed-scale mode so 1.7 m content fits at 210 px/m. */
-export const PLAN_SVG_HEIGHT_RATIO_FIXED = 0.55
+/** Plan SVG canvas height = `width × PLAN_SVG_HEIGHT_RATIO`. 0.55 ensures
+ * the door + swing arc + thickness fit without overflowing. */
+export const PLAN_SVG_HEIGHT_RATIO = 0.55
 
 export function planSvgCanvasHeight(canvasWidth: number): number {
-    const ratio = isFixedScaleMode() ? PLAN_SVG_HEIGHT_RATIO_FIXED : PLAN_SVG_HEIGHT_RATIO
-    return Math.round(canvasWidth * ratio)
+    return Math.round(canvasWidth * PLAN_SVG_HEIGHT_RATIO)
 }
 
 // Colour defaults are resolved once from `config/render-colors.json` (palette-
@@ -295,6 +289,17 @@ function getMeshPolygonStyle(
             return { color: options.glassColor, fillOpacity: options.glassFillOpacity }
         }
         return { color: options.doorColor }
+    }
+    // Adjacent / nearby doors: glass panes still read blau; the leaf/frame
+    // takes the BKP colour of THAT specific door (metal → anthrazit, wood →
+    // hellbraun, unknown → default). Without this branch nearby doors fell
+    // through to the synthetic rectangle path and showed as hellgrau rects.
+    const isNearbyDoor = context.nearbyDoors.some((d) => d.expressID === expressID)
+    if (isNearbyDoor) {
+        if (useGlassStyling && isLikelyGlazingPanelMesh(mesh)) {
+            return { color: options.glassColor, fillOpacity: options.glassFillOpacity }
+        }
+        return { color: resolveElevationDoorColor(context.nearbyDoorBKP.get(expressID)) }
     }
     if (isHostSlab) {
         const dbg = debugColorFor(expressID)
@@ -1195,6 +1200,8 @@ type AxisRect = {
     maxA: number
     minB: number
     maxB: number
+    /** IFC expressID of the source element, used by renderers to look up BKP / colour. */
+    expressID?: number
 }
 
 function rangesOverlapOrTouch(
@@ -1651,6 +1658,7 @@ function getNearbyDoorAxisRects(context: DoorContext): AxisRect[] {
             maxA: bounds.maxA - originA,
             minB: bounds.minB - originB,
             maxB: bounds.maxB - originB,
+            expressID: nearbyDoor.expressID,
         })
     }
 
@@ -1688,6 +1696,7 @@ function getNearbyDoorPlanRects(context: DoorContext, cutHeight: number): AxisRe
             maxA: bounds.maxA - originA,
             minB: bounds.minB - originB,
             maxB: bounds.maxB - originB,
+            expressID: nearbyDoor.expressID,
         })
     }
 
@@ -1806,16 +1815,54 @@ function getNearbyStairAxisRects(context: DoorContext): AxisRect[] {
     return rects
 }
 
+/**
+ * Project the TRUE 3D mesh geometry of every adjacent door. Uses the same
+ * sharp-edge / polygon pipeline as the current door — no synthetic outer
+ * rectangle, no fake inset frame. Colour per door comes from
+ * `getMeshPolygonStyle` which reads `context.nearbyDoorBKP` → palette. Glass
+ * panes still fall through to `options.glassColor`.
+ *
+ * Falls back to a bbox rectangle (BKP-coloured, still no inset) only when a
+ * door has no mesh data at all.
+ */
 function createSemanticElevationNearbyDoorGeometry(
     context: DoorContext,
     camera: THREE.OrthographicCamera,
     width: number,
-    height: number
+    height: number,
+    options: Required<SVGRenderOptions>
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
+    const nearbyDoorMeshes = getNearbyDoorMeshes(context)
+
+    if (nearbyDoorMeshes.length > 0) {
+        const projected = collectProjectedGeometry(
+            nearbyDoorMeshes,
+            context,
+            options,
+            camera,
+            width,
+            height,
+            false,
+            -0.25,
+            'camera-facing',
+            true,
+            DOOR_EDGE_STROKE_FACTOR
+        )
+        geometry.edges.push(...projected.edges)
+        geometry.polygons.push(...projected.polygons)
+    }
+
+    const meshIdsWithGeometry = new Set<number>()
+    for (const mesh of nearbyDoorMeshes) {
+        const eid = mesh.userData?.expressID
+        if (typeof eid === 'number') meshIdsWithGeometry.add(eid)
+    }
 
     for (const rect of getNearbyDoorAxisRects(context)) {
+        if (rect.expressID !== undefined && meshIdsWithGeometry.has(rect.expressID)) continue
+        const fill = resolveElevationDoorColor(context.nearbyDoorBKP.get(rect.expressID ?? -1))
         const outer = createRectPoints3D(
             frame.origin,
             frame.widthAxis,
@@ -1825,54 +1872,60 @@ function createSemanticElevationNearbyDoorGeometry(
             rect.minB,
             rect.maxB
         )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
-        appendProjectedEdge(geometry, outer[0], outer[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[1], outer[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[2], outer[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[3], outer[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-
-        const insetX = THREE.MathUtils.clamp((rect.maxA - rect.minA) * 0.08, 0.025, 0.06)
-        const insetY = THREE.MathUtils.clamp((rect.maxB - rect.minB) * 0.05, 0.03, 0.08)
-        if (rect.maxA - rect.minA > insetX * 2 && rect.maxB - rect.minB > insetY * 2) {
-            const inner = createRectPoints3D(
-                frame.origin,
-                frame.widthAxis,
-                frame.upAxis,
-                rect.minA + insetX,
-                rect.maxA - insetX,
-                rect.minB + insetY,
-                rect.maxB - insetY
-            )
-            appendProjectedEdge(geometry, inner[0], inner[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-            appendProjectedEdge(geometry, inner[1], inner[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-            appendProjectedEdge(geometry, inner[2], inner[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-            appendProjectedEdge(geometry, inner[3], inner[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        }
+        appendProjectedFillPolygon(geometry, outer, camera, width, height, fill, -0.25, 1)
+        appendProjectedEdge(geometry, outer[0], outer[1], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[1], outer[2], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[2], outer[3], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[3], outer[0], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
     }
 
     return geometry
 }
 
+/**
+ * Plan-view adjacent doors: project the real mesh (same pipeline as the
+ * current door's top-down projection). BKP-coloured per door via
+ * `getMeshPolygonStyle`. Fallback bbox rectangle only if a door has no mesh.
+ */
 function createSemanticPlanNearbyDoorGeometry(
     context: DoorContext,
     camera: THREE.OrthographicCamera,
     width: number,
     height: number,
-    cutHeight: number
+    cutHeight: number,
+    options: Required<SVGRenderOptions>
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
+    const nearbyDoorMeshes = getNearbyDoorMeshes(context)
+
+    if (nearbyDoorMeshes.length > 0) {
+        const projected = collectProjectedGeometry(
+            nearbyDoorMeshes,
+            context,
+            options,
+            camera,
+            width,
+            height,
+            true,
+            -0.25,
+            'camera-facing',
+            false,
+            DOOR_EDGE_STROKE_FACTOR
+        )
+        geometry.edges.push(...projected.edges)
+        geometry.polygons.push(...projected.polygons)
+    }
+
+    const meshIdsWithGeometry = new Set<number>()
+    for (const mesh of nearbyDoorMeshes) {
+        const eid = mesh.userData?.expressID
+        if (typeof eid === 'number') meshIdsWithGeometry.add(eid)
+    }
 
     for (const rect of getNearbyDoorPlanRects(context, cutHeight)) {
+        if (rect.expressID !== undefined && meshIdsWithGeometry.has(rect.expressID)) continue
+        const fill = resolveElevationDoorColor(context.nearbyDoorBKP.get(rect.expressID ?? -1))
         const outer = createRectPoints3D(
             frame.origin.clone().add(frame.upAxis.clone().multiplyScalar(cutHeight - frame.origin.y)),
             frame.widthAxis,
@@ -1882,16 +1935,7 @@ function createSemanticPlanNearbyDoorGeometry(
             rect.minB,
             rect.maxB
         )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
+        appendProjectedFillPolygon(geometry, outer, camera, width, height, fill, -0.25, 1)
         for (let i = 0; i < outer.length; i++) {
             appendProjectedEdge(
                 geometry,
@@ -1900,9 +1944,9 @@ function createSemanticPlanNearbyDoorGeometry(
                 camera,
                 width,
                 height,
-                CONTEXT_DOOR_LINE_COLOR,
+                options.lineColor,
                 -0.25,
-                CONTEXT_DOOR_EDGE_STROKE_FACTOR
+                DOOR_EDGE_STROKE_FACTOR
             )
         }
     }
@@ -2127,9 +2171,13 @@ function createProjectedElevationWallBackdropGeometry(
     // the door's widthAxis. This stops the fill at T-junctions / L-corners /
     // the end of a storefront instead of bleeding across the whole clip band
     // into open space that has no actual wall behind it.
+    //
+    // Fixed-scale mode: intentionally skip the footprint clamp so the backdrop
+    // panels (and their outlines) extend to the full clipBounds (= canvas
+    // viewport), matching the "picture edge to picture edge" expectation.
     let wallMinX = clipBounds.minX
     let wallMaxX = clipBounds.maxX
-    if (footprintLocalA) {
+    if (footprintLocalA && !isFixedScaleMode()) {
         const leftPt = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(footprintLocalA.minA))
         const rightPt = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(footprintLocalA.maxA))
         const leftPx = projectPoint(leftPt, camera, width, height).x
@@ -3084,12 +3132,17 @@ interface RenderMeta {
 /**
  * Pick the drawing scale + offsets for a view.
  *
- * Legacy mode: fit-to-bounds (min of availW/contentW, availH/contentH), content
- * centred in the available area. Matches prior behaviour byte-for-byte.
+ * Elevations: scale is fit-to-HEIGHT per door so the slab-to-slab clip band
+ * (10 cm upper slab + floor + 10 cm lower slab) always fills the available
+ * picture height exactly. Content top sits at `topPad` (narrow breathing
+ * strip) and content bottom lands on the title-block separator. The door
+ * frame origin is anchored to the canvas horizontal centre so front/back/
+ * plan all agree on the door's X.
  *
- * Fixed mode (`RENDER_FIXED_SCALE=1`): uses `FIXED_PX_PER_METER`, anchors the
- * door frame origin to the canvas centre horizontally, and (for elevations)
- * vertically too — so the same door lands at the same X across front/back/plan.
+ * Plan: fit-to-bounds centred, either inheriting the front's scale via
+ * `sharedDrawingScale` (legacy plumbing — ignored when a doorAnchor is
+ * provided) or computing its own natural fit. Door X still anchors to canvas
+ * centre.
  */
 function computeViewTransform(
     fitBounds: ProjectedBounds,
@@ -3108,35 +3161,30 @@ function computeViewTransform(
     const { viewHeight, sidePad, topPad, availWidth, availHeight } = metrics
     const contentWidth = fitBounds.maxX - fitBounds.minX
     const contentHeight = fitBounds.maxY - fitBounds.minY
-    const fixed = isFixedScaleMode()
 
-    if (fixed && doorAnchor) {
-        const scale = FIXED_PX_PER_METER
-        // Centre the door's projected origin on the canvas horizontally.
-        const offsetX = options.width / 2 - (doorAnchor.x - fitBounds.minX) * scale
-        // Elevations: centre the door vertically in the available area too.
-        // Plan: keep the traditional "centre the fit bounds" vertical placement so
-        // wall + swing arc remain balanced (plan uses horizontal door anchor only).
-        let offsetY: number
-        if (viewType === 'Plan') {
-            const scaledHeight = contentHeight * scale
-            offsetY = topPad + (availHeight - scaledHeight) / 2
-        } else {
-            offsetY = topPad + availHeight / 2 - (doorAnchor.y - fitBounds.minY) * scale
-        }
+    if (viewType === 'Plan') {
+        // Plan: natural fit-to-bounds (min of width/height ratios), centred.
+        const naturalScale = Math.min(
+            availWidth / (contentWidth || 1),
+            availHeight / (contentHeight || 1)
+        )
+        const scale = sharedDrawingScale ?? naturalScale
+        const scaledWidth = contentWidth * scale
+        const scaledHeight = contentHeight * scale
+        const offsetX = doorAnchor
+            ? options.width / 2 - (doorAnchor.x - fitBounds.minX) * scale
+            : sidePad + (availWidth - scaledWidth) / 2
+        const offsetY = topPad + (availHeight - scaledHeight) / 2
         return { scale, offsetX, offsetY, viewHeight }
     }
 
-    // Legacy fit-to-bounds path — preserved exactly.
-    const naturalScale = Math.min(
-        availWidth / (contentWidth || 1),
-        availHeight / (contentHeight || 1)
-    )
-    const scale = sharedDrawingScale ?? naturalScale
-    const scaledWidth = contentWidth * scale
-    const scaledHeight = contentHeight * scale
-    const offsetX = sidePad + (availWidth - scaledWidth) / 2
-    const offsetY = topPad + (availHeight - scaledHeight) / 2
+    // Elevations: fit to HEIGHT (10 cm slab rule filled), top-anchor with
+    // small breather, door horizontally centred.
+    const scale = availHeight / (contentHeight || 1)
+    const offsetX = doorAnchor
+        ? options.width / 2 - (doorAnchor.x - fitBounds.minX) * scale
+        : sidePad + (availWidth - contentWidth * scale) / 2
+    const offsetY = topPad
     return { scale, offsetX, offsetY, viewHeight }
 }
 
@@ -3266,13 +3314,13 @@ function getElevationHostClipBounds(
     bounds.minY = Math.min(projectedTop.y, projectedBottom.y)
     bounds.maxY = Math.max(projectedTop.y, projectedBottom.y)
 
-    // Clamp horizontal extent to a tight window around the door so long host
-    // walls, nearby-door bands or slab edges running across the storey cannot
-    // stretch the frustum horizontally. The lateral window is sized to still
-    // reveal an adjacent door + small wall reveal on each side (~1.5-2 m for
-    // a standard 1 m door, ~door-width either side for wide curtain-wall
-    // doors), but no further.
-    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5)
+    // Clamp horizontal extent wide enough that host-wall panels, slab strips
+    // and outlines all reach the picture's left and right edges at the
+    // per-door fit-to-height scale used by the elevation renderer. We don't
+    // know the scale here, so use a generous world window (2.5 m door-reveal
+    // each side plus the door itself) — the eventual SVG transform still
+    // clips at the canvas edge, so overshoot is free.
+    const lateralGap = Math.max(THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5), 3.0)
     const leftPoint = frame.origin.clone().add(
         frame.widthAxis.clone().multiplyScalar(-frame.width / 2 - lateralGap)
     )
@@ -3283,12 +3331,8 @@ function getElevationHostClipBounds(
     const projectedRight = projectPoint(rightPoint, camera, width, height)
     const lateralMin = Math.min(projectedLeft.x, projectedRight.x)
     const lateralMax = Math.max(projectedLeft.x, projectedRight.x)
-    bounds.minX = Math.max(bounds.minX, lateralMin)
-    bounds.maxX = Math.min(bounds.maxX, lateralMax)
-    if (bounds.minX >= bounds.maxX) {
-        bounds.minX = lateralMin
-        bounds.maxX = lateralMax
-    }
+    bounds.minX = lateralMin
+    bounds.maxX = lateralMax
     return bounds
 }
 
@@ -3481,12 +3525,12 @@ function getSvgViewportMetrics(
         ? Math.ceil(30 + options.fontSize + Math.max(0, rowCount - 1) * lineStep)
         : 0
     const viewHeight = options.height - titleBlockHeight
-    const fixed = isFixedScaleMode()
-    const sidePad = fixed ? FIXED_SIDE_PAD_PX : 80
-    const topPad = fixed ? FIXED_TOP_PAD_PX : 80
-    const bottomPad = fixed ? FIXED_BOTTOM_PAD_PX : 80
-    // `padding` is retained for the legacy call sites that treat it as uniform.
-    const padding = fixed ? Math.max(sidePad, topPad, bottomPad) : 80
+    const sidePad = ELEVATION_SIDE_PAD_PX
+    const topPad = ELEVATION_TOP_PAD_PX
+    const bottomPad = ELEVATION_BOTTOM_PAD_PX
+    // `padding` kept for legacy call sites (unused after refactor but preserved
+    // to avoid signature churn).
+    const padding = Math.max(sidePad, topPad, bottomPad)
     const availWidth = options.width - sidePad * 2
     const availHeight = viewHeight - topPad - bottomPad
     return { titleBlockHeight, viewHeight, padding, sidePad, topPad, bottomPad, availWidth, availHeight }
@@ -3912,10 +3956,27 @@ function generateSVGString(
     </clipPath>
   </defs>
 `
+    // Fixed-scale elevations: fill the strip ABOVE the content bounds with
+    // wall colour so short-storey doors still read as a continuous wall up to
+    // the picture's top edge. Everything below content top is left alone so
+    // glass transparency and title-block separator keep working normally.
+    let elevationTopFill = ''
+    if (
+        isFixedScaleMode()
+        && !isPlanView
+        && currentViewType !== ''
+        && Number.isFinite(minX)
+    ) {
+        const contentTop = offsetY
+        if (contentTop > 0.5) {
+            elevationTopFill = `  <rect x="0" y="0" width="${width}" height="${contentTop.toFixed(2)}" fill="${options.wallColor}"/>\n`
+        }
+    }
+
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
 ${fontDefs}${drawingClipDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
-  <g id="fills">
+${elevationTopFill}  <g id="fills">
   <g clip-path="url(#drawing-clip)">
 ${wallBandsSvg}
 `
@@ -4713,7 +4774,8 @@ function renderElevationFromMeshes(
         context,
         camera,
         frustumWidth,
-        frustumHeight
+        frustumHeight,
+        opts
     )
     const nearbyWindowGeometry = createSemanticElevationNearbyWindowGeometry(
         context,
@@ -4898,22 +4960,25 @@ function renderFallbackContextWindowSvg(
         stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR}"/>`
 }
 
+/**
+ * Last-resort SVG for a nearby door in the bounding-box-only fallback path.
+ * Used only when no mesh geometry was loaded for the door. BKP-coloured fill;
+ * no fake inset frame (that was synthetic proxy geometry — we show the real
+ * silhouette everywhere we have one).
+ */
 function renderFallbackContextDoorSvg(
     x: number,
     y: number,
     width: number,
     height: number,
-    lineWidth: number
+    lineWidth: number,
+    fillColor: string = CONTEXT_DOOR_FILL_COLOR,
+    strokeColor: string = CONTEXT_DOOR_LINE_COLOR
 ): string {
-    const insetX = Math.min(width * 0.08, 14)
-    const insetY = Math.min(height * 0.05, 14)
     return `
   <rect x="${x}" y="${y}" width="${width}" height="${height}"
-        fill="${CONTEXT_DOOR_FILL_COLOR}" fill-opacity="${CONTEXT_DOOR_FILL_OPACITY}"
-        stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR}"/>
-  <rect x="${x + insetX}" y="${y + insetY}"
-        width="${Math.max(0, width - insetX * 2)}" height="${Math.max(0, height - insetY * 2)}"
-        fill="none" stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${Math.max(0.8, lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR)}"/>`
+        fill="${fillColor}" fill-opacity="1"
+        stroke="${strokeColor}" stroke-width="${lineWidth * DOOR_EDGE_STROKE_FACTOR}"/>`
 }
 
 /**
@@ -4966,12 +5031,15 @@ function renderElevationFromBoundingBox(
             if (rectX + rectWidth < padding || rectX > svgWidth - padding || rectY + rectHeight < padding || rectY > padding + availableHeight) {
                 return ''
             }
+            const bkpFill = resolveElevationDoorColor(context.nearbyDoorBKP.get(rect.expressID ?? -1))
             return renderFallbackContextDoorSvg(
                 rectX,
                 rectY,
                 rectWidth,
                 rectHeight,
-                lineWidth
+                lineWidth,
+                bkpFill,
+                lineColor
             )
         })
         .filter(Boolean)
@@ -5740,7 +5808,7 @@ function renderPlanFromMeshes(
         DOOR_EDGE_STROKE_FACTOR
     )
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
-    const nearbyDoorGeometryRaw = createSemanticPlanNearbyDoorGeometry(context, camera, frustumWidth, frustumHeight, cutHeight)
+    const nearbyDoorGeometryRaw = createSemanticPlanNearbyDoorGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
     const nearbyWindowGeometryRaw = createSemanticPlanNearbyWindowGeometry(context, camera, frustumWidth, frustumHeight, cutHeight)
     const nearbyDoorGeometry = planViewportClip
         ? clipProjectedGeometryToBounds(nearbyDoorGeometryRaw, planViewportClip)
