@@ -2809,81 +2809,12 @@ function createMeshPlanSectionGeometry(
         maxDepth: originDepth + relDepthMax,
     }
 
-    // Under-fill: rectangle spanning the host wall's extent at the cut plane,
-    // with the door opening cut out. Prefer the TRUE widthAxis/depthAxis
-    // extent derived from the mesh-section segments at cutY — this is the
-    // wall's real length at the cut, not the full 3D bbox (which can include
-    // phantom mesh vertices extending past the real wall and make the under-
-    // fill bleed out to the canvas edge). Falls back to the bbox only when no
-    // mesh-section segments are produced (narrow jamb slab case).
+    // Plan wall rendering is mesh-only — no bbox under-fill, no synthetic
+    // rects. Only what `addMeshPlanSectionForWall` finds at the cut plane.
+    // If web-ifc leaves a wall sparse at cutY, the plan reflects that
+    // honestly instead of inventing a rectangle based on the wall's bbox.
     const hostWallCfc = context.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
     const hostWallCutColor = resolveWallCutColor(hostWallCfc) ?? options.wallColor
-    const hostBoundsBbox = getHostWallAxisBounds(context, widthAxis, depthAxis, frame.upAxis)
-    const hostSectionBounds: { minA: number; maxA: number; minB: number; maxB: number } | null = (() => {
-        let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity
-        for (const mesh of hostMeshes) {
-            const segs = extractMeshSectionSegments(mesh, cutY)
-            for (const s of segs) {
-                for (const p of [s.a, s.b]) {
-                    const a = p.dot(widthAxis)
-                    const b = p.dot(depthAxis)
-                    if (a < minA) minA = a
-                    if (a > maxA) maxA = a
-                    if (b < minB) minB = b
-                    if (b > maxB) maxB = b
-                }
-            }
-        }
-        return minA === Infinity ? null : { minA, maxA, minB, maxB }
-    })()
-    const hostBounds = hostSectionBounds ?? hostBoundsBbox
-    if (hostBounds && context.hostWall) {
-        const halfDoorWidth = frame.width / 2
-        const originWidthAbs = frame.origin.dot(widthAxis)
-        const minWidthLocal = hostBounds.minA - originWidthAbs
-        const maxWidthLocal = hostBounds.maxA - originWidthAbs
-        const minDepthLocal = hostBounds.minB - originDepth
-        const maxDepthLocal = hostBounds.maxB - originDepth
-        const originCut = frame.origin.clone().add(
-            frame.upAxis.clone().multiplyScalar(cutY - frame.origin.y)
-        )
-        const markLastAsSkipClip = () => {
-            const lastPoly = out.polygons[out.polygons.length - 1]
-            if (lastPoly) lastPoly.skipClip = true
-            // Also flag the four edges the polygon emitted (last 4 entries).
-            for (let i = Math.max(0, out.edges.length - 4); i < out.edges.length; i++) {
-                out.edges[i].skipClip = true
-            }
-        }
-        // Left of door: bbox min to jamb
-        if (minWidthLocal < -halfDoorWidth) {
-            const leftRect = createRectPoints3D(
-                originCut,
-                widthAxis,
-                depthAxis,
-                minWidthLocal,
-                -halfDoorWidth,
-                minDepthLocal,
-                maxDepthLocal
-            )
-            appendProjectedPolygon(out, leftRect, camera, width, height, hostWallCutColor, options.lineColor, -2, 1, WALL_EDGE_STROKE_FACTOR)
-            markLastAsSkipClip()
-        }
-        // Right of door: jamb to bbox max
-        if (maxWidthLocal > halfDoorWidth) {
-            const rightRect = createRectPoints3D(
-                originCut,
-                widthAxis,
-                depthAxis,
-                halfDoorWidth,
-                maxWidthLocal,
-                minDepthLocal,
-                maxDepthLocal
-            )
-            appendProjectedPolygon(out, rightRect, camera, width, height, hostWallCutColor, options.lineColor, -2, 1, WALL_EDGE_STROKE_FACTOR)
-            markLastAsSkipClip()
-        }
-    }
 
     for (const mesh of wallMeshes) {
         addMeshPlanSectionForWall(
