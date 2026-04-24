@@ -17,7 +17,7 @@ import {
     INTER_WOFF2_LATIN_600_BASE64,
     INTER_WOFF2_LATIN_700_BASE64,
 } from './inter-svg-font-embed-data'
-import { loadRenderColors, resolveElevationDoorColor } from './color-config'
+import { isSafetyDeviceName, loadRenderColors, resolveElevationDoorColor } from './color-config'
 
 export interface SVGRenderOptions {
     width?: number
@@ -35,6 +35,8 @@ export interface SVGRenderOptions {
     deviceColor?: string
     /** Fill color for glazing in Vorder-/Rückansicht only; Grundriss uses `doorColor` for those meshes. */
     glassColor?: string
+    /** Fill for safety/alarm devices (Rauchmelder, Notleuchte, …). Classified by `isSafetyDeviceName`. */
+    safetyColor?: string
     /** Opacity for glazing fills in Ansichten (0–1); ignored im Grundriss (gleiche Opacity wie übrige Türfläche). */
     glassFillOpacity?: number
     backgroundColor?: string // Background color for area outside door
@@ -107,6 +109,7 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     floorSlabColor: COLORS.plan.wallCut,
     deviceColor: COLORS.plan.electrical,
     glassColor: COLORS.elevation.glass,
+    safetyColor: COLORS.plan.safety,
     glassFillOpacity: 0.32,
     backgroundColor: '#fff',
     lineWidth: 1.5,
@@ -2810,7 +2813,8 @@ function createSemanticElevationDeviceGeometry(
             -rectHeight / 2,
             rectHeight / 2
         )
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 1, 1, DEVICE_EDGE_STROKE_FACTOR)
+        const deviceFill = isSafetyDeviceName(device.name) ? options.safetyColor : options.deviceColor
+        appendProjectedPolygon(geometry, rect, camera, width, height, deviceFill, options.lineColor, 1, 1, DEVICE_EDGE_STROKE_FACTOR)
         const lastPolygon = geometry.polygons[geometry.polygons.length - 1]
         if (lastPolygon) {
             lastPolygon.skipClip = true
@@ -2860,7 +2864,8 @@ function createSemanticPlanDeviceGeometry(
             -rectDepth / 2,
             rectDepth / 2
         )
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 0, 1, DEVICE_EDGE_STROKE_FACTOR)
+        const deviceFill = isSafetyDeviceName(device.name) ? options.safetyColor : options.deviceColor
+        appendProjectedPolygon(geometry, rect, camera, width, height, deviceFill, options.lineColor, 0, 1, DEVICE_EDGE_STROKE_FACTOR)
     }
 
     return geometry
@@ -3972,7 +3977,11 @@ function renderTitleBlock(
         }
 
         if (hasDevices) {
-            items.push({ color: options.deviceColor, text: 'Elektro' })
+            const visibleDevices = context?.nearbyDevices ?? []
+            const hasElectrical = visibleDevices.some((d) => !isSafetyDeviceName(d.name))
+            const hasSafety = visibleDevices.some((d) => isSafetyDeviceName(d.name))
+            if (hasElectrical) items.push({ color: options.deviceColor, text: 'Elektro' })
+            if (hasSafety) items.push({ color: options.safetyColor, text: 'Sicherheit' })
         }
 
         for (const item of items) {

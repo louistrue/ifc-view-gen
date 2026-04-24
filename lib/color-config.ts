@@ -209,3 +209,36 @@ export function resolveElevationDoorColor(
     const category = classifyDoorBKP(cfcBkpCccBcc)
     return category ? colors.elevation.door.byBKP[category] : colors.elevation.door.default
 }
+
+/**
+ * Classify an electrical-model element as safety-relevant by its `Name`.
+ *
+ * The ELEC IFC flattens everything into IfcElectricAppliance / IfcLamp
+ * regardless of semantic role, so the discriminator lives in the name
+ * field. Keywords below cover fire, alarm, emergency-light, and water
+ * detection devices actually present in the Flu21 model.
+ *
+ * Bewegungsmelder (motion detector) is intentionally classified as
+ * electrical — in Swiss commercial buildings it's more often part of the
+ * lighting-automation system than the alarm panel.
+ */
+const SAFETY_NAME_KEYWORDS: readonly string[] = [
+    'rauchmelder',
+    'brandmelde',
+    'handfeuermelder',
+    'feuermelder',
+    'wärmemelder', 'waermemelder', 'wärmemelder',
+    'wassermelder',
+    'alarm',
+    'sirene',
+    'blitzleuchte',
+    'notleuchte',
+    'notbeleuchtung',
+    'fluchtweg',
+]
+
+export function isSafetyDeviceName(name: string | null | undefined): boolean {
+    if (!name) return false
+    const lower = name.toLowerCase()
+    return SAFETY_NAME_KEYWORDS.some((kw) => lower.includes(kw))
+}
