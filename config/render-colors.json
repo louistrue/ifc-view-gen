@@ -1,25 +1,32 @@
 {
   "palette": {
-    "grau":       "#9E9E9E",
-    "hellgrau":   "#E3E3E3",
-    "gelb":       "#F4B400",
-    "pink":       "#E91E63",
-    "anthrazit":  "#3A3A3A",
-    "hellbraun":  "#C19A6B",
-    "hellblau":   "#D3E4F5"
+    "grau":       "#E0E0E0",
+    "hellgrau":   "#D9CBBA",
+    "gelb":       "#FAC846",
+    "pink":       "#FA467F",
+    "anthrazit":  "#B8B8B8",
+    "hellbraun":  "#D19D5A",
+    "hellblau":   "#B5E1F7",
+    "graubraun":  "#D9CBBA"
   },
   "plan": {
     "wallCut":             "grau",
+    "wallCutByBKP": {
+      "drywall": "graubraun"
+    },
     "ceilingCut":          "grau",
     "suspendedCeilingCut": "grau",
-    "windowContext":       "hellgrau",
-    "doorContext":         "hellgrau",
-    "currentDoor":         "hellgrau",
+    "windowContext":       "anthrazit",
+    "doorContext":         "anthrazit",
+    "currentDoor":         "anthrazit",
     "electrical":          "gelb",
     "safety":              "pink"
   },
   "elevation": {
     "wall":             "grau",
+    "wallByBKP": {
+      "drywall": "graubraun"
+    },
     "suspendedCeiling": "grau",
     "glass":            "hellblau",
     "electrical":       "gelb",
@@ -32,6 +39,9 @@
         "context": "hellgrau"
       }
     }
+  },
+  "safety": {
+    "layerKeywords": ["e_sicherheit", "sicherheit"]
   },
   "strokes": {
     "outline": "#000000"

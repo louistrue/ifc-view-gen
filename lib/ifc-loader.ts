@@ -663,6 +663,17 @@ export interface DoorCsetStandardCHData {
     isExternal: string | null
 }
 
+/**
+ * Slim structure: walls only care about CFC/BKP for now (drywall vs. default).
+ * Keyed by wall OR IfcBuildingElementPart expressID — the renderer looks up
+ * either depending on what it drew. If a part inherits from its parent wall
+ * (some authoring tools only tag the wall), the caller merges via
+ * `wallAggregatePartMap`.
+ */
+export interface WallCsetStandardCHData {
+    cfcBkpCccBcc: string | null
+}
+
 export interface DoorPanelMetadata {
     operation: string | null
     widthRatio: number | null
@@ -1024,6 +1035,220 @@ function extractDoorCsetStandardCHFromOpenModel(api: IfcAPI, modelID: number): M
 }
 
 /**
+ * Extract `Cset_StandardCH.'CFC / BKP / CCC / BCC'` for every IfcWall /
+ * IfcWallStandardCase / IfcCurtainWall / IfcBuildingElementPart occurrence.
+ *
+ * Same shape as the door extractor: one pass over IfcRelDefinesByType to
+ * harvest type-level property propagation, one pass over IfcRelDefinesByProperties
+ * to read the actual pset. We accept any pset whose name normalises to
+ * `csetstandardch` — in the Flu21 model some walls expose the CFC under
+ * `Pset_WallCommon` variants too, so we also accept `psetwallcommon`.
+ */
+function extractWallCsetStandardCHFromOpenModel(api: IfcAPI, modelID: number): Map<number, WallCsetStandardCHData> {
+    const result = new Map<number, WallCsetStandardCHData>()
+    const ifcWallType = (WebIFC as any).IFCWALL
+    const ifcWallStandardCaseType = (WebIFC as any).IFCWALLSTANDARDCASE
+    const ifcCurtainWallType = (WebIFC as any).IFCCURTAINWALL
+    const ifcBuildingElementPartType = (WebIFC as any).IFCBUILDINGELEMENTPART
+    const targetTypes: number[] = []
+    for (const t of [ifcWallType, ifcWallStandardCaseType, ifcCurtainWallType, ifcBuildingElementPartType]) {
+        if (typeof t === 'number') targetTypes.push(t)
+    }
+    if (targetTypes.length === 0) return result
+
+    const targetSet = new Set<number>()
+    for (const t of targetTypes) {
+        const ids = api.GetLineIDsWithType(modelID, t)
+        for (let i = 0; i < ids.size(); i++) targetSet.add(ids.get(i))
+    }
+    if (targetSet.size === 0) return result
+
+    // Type → occurrences: for IFCRELDEFINESBYTYPE we can propagate a type's
+    // Cset to its owned elements in one step.
+    const typeToElements = new Map<number, number[]>()
+    const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+    for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
+        const rel = api.GetLine(modelID, relDefinesByTypeIds.get(i))
+        const typeId = rel?.RelatingType?.value
+        if (typeof typeId !== 'number') continue
+        for (const obj of normalizeIfcRelationshipRelatedObjects(rel)) {
+            const elementId = obj?.value
+            if (typeof elementId !== 'number' || !targetSet.has(elementId)) continue
+            const arr = typeToElements.get(typeId) || []
+            arr.push(elementId)
+            typeToElements.set(typeId, arr)
+        }
+    }
+
+    const relDefinesByPropsIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES)
+    for (let i = 0; i < relDefinesByPropsIds.size(); i++) {
+        const rel = api.GetLine(modelID, relDefinesByPropsIds.get(i))
+        const relatingPropDefId = rel?.RelatingPropertyDefinition?.value
+        if (typeof relatingPropDefId !== 'number') continue
+
+        const pset = api.GetLine(modelID, relatingPropDefId)
+        const psetName = String(unwrapIfcValue(pset?.Name) || '')
+        const normalizedPsetName = normalizeIfcName(psetName)
+        const isRelevantPset =
+            normalizedPsetName === 'csetstandardch'
+            || normalizedPsetName === 'psetwallcommon'
+        if (!isRelevantPset) continue
+
+        const hasProperties = normalizeIfcRefAttribute(pset?.HasProperties)
+
+        const targetIds = new Set<number>()
+        for (const obj of normalizeIfcRelationshipRelatedObjects(rel)) {
+            const objId = obj?.value
+            if (typeof objId !== 'number') continue
+            if (targetSet.has(objId)) {
+                targetIds.add(objId)
+            } else {
+                const elementsForType = typeToElements.get(objId)
+                if (elementsForType) elementsForType.forEach((id) => targetIds.add(id))
+            }
+        }
+        if (targetIds.size === 0) continue
+
+        let cfcValue: string | null = null
+        for (const propRef of hasProperties) {
+            const propId = propRef?.value
+            if (typeof propId !== 'number') continue
+            const prop = api.GetLine(modelID, propId)
+            const propName = String(unwrapIfcValue(prop?.Name) || '')
+            if (!propName) continue
+            if (normalizeIfcName(propName) !== 'cfcbkpcccbcc') continue
+            const raw = unwrapIfcValue(prop?.NominalValue)
+            if (raw == null || raw === '') continue
+            const s = typeof raw === 'string' ? raw.trim() : String(raw).trim()
+            if (s) { cfcValue = s; break }
+        }
+        if (!cfcValue) continue
+
+        for (const elementId of targetIds) {
+            const existing = result.get(elementId)
+            if (existing?.cfcBkpCccBcc) continue // first-match wins
+            result.set(elementId, { cfcBkpCccBcc: cfcValue })
+        }
+    }
+
+    return result
+}
+
+/**
+ * Collect presentation-layer + IfcSystem/IfcGroup names per element.
+ *
+ * The Flu21 elec IFC flags safety-relevant devices via a presentation layer
+ * named `E_Sicherheit`. Some authoring tools attach it via
+ * `IfcPresentationLayerAssignment` (representation-item level), others use an
+ * `IfcSystem` named similarly. We harvest both paths and merge them into a
+ * single `Map<expressID, string[]>` so the renderer can match by keyword.
+ *
+ * Only runs over IFC types we actually classify today (electrical devices).
+ */
+function extractElementLayerAssignmentsFromOpenModel(
+    api: IfcAPI,
+    modelID: number,
+    targetTypeCodes: readonly number[]
+): Map<number, string[]> {
+    const result = new Map<number, string[]>()
+    if (targetTypeCodes.length === 0) return result
+
+    const targetSet = new Set<number>()
+    for (const t of targetTypeCodes) {
+        if (typeof t !== 'number') continue
+        const ids = api.GetLineIDsWithType(modelID, t)
+        for (let i = 0; i < ids.size(); i++) targetSet.add(ids.get(i))
+    }
+    if (targetSet.size === 0) return result
+
+    const appendLayer = (elementId: number, layerName: string) => {
+        const trimmed = layerName.trim()
+        if (!trimmed) return
+        const arr = result.get(elementId) || []
+        if (!arr.includes(trimmed)) arr.push(trimmed)
+        result.set(elementId, arr)
+    }
+
+    // --- Path A: IfcPresentationLayerAssignment → AssignedItems ---
+    // AssignedItems contain IfcRepresentation and/or IfcRepresentationItem
+    // references. Build a reverse map rep/repItem → element for target IDs,
+    // then walk the layer assignments once.
+    const repToElement = new Map<number, number>()
+    const repItemToElement = new Map<number, number>()
+    for (const elementId of targetSet) {
+        const entity = api.GetLine(modelID, elementId)
+        const repDefId = entity?.Representation?.value
+        if (typeof repDefId !== 'number') continue
+        const repDef = api.GetLine(modelID, repDefId)
+        const representations = Array.isArray(repDef?.Representations) ? repDef.Representations : []
+        for (const repRef of representations) {
+            const repId = repRef?.value
+            if (typeof repId !== 'number') continue
+            repToElement.set(repId, elementId)
+            const rep = api.GetLine(modelID, repId)
+            const items = Array.isArray(rep?.Items) ? rep.Items : []
+            for (const itemRef of items) {
+                const itemId = itemRef?.value
+                if (typeof itemId !== 'number') continue
+                repItemToElement.set(itemId, elementId)
+            }
+        }
+    }
+
+    const layerAssignmentType = (WebIFC as any).IFCPRESENTATIONLAYERASSIGNMENT
+    const layerWithStyleType = (WebIFC as any).IFCPRESENTATIONLAYERWITHSTYLE
+    const layerTypes: number[] = []
+    if (typeof layerAssignmentType === 'number') layerTypes.push(layerAssignmentType)
+    if (typeof layerWithStyleType === 'number' && layerWithStyleType !== layerAssignmentType) {
+        layerTypes.push(layerWithStyleType)
+    }
+    for (const lt of layerTypes) {
+        const ids = api.GetLineIDsWithType(modelID, lt)
+        for (let i = 0; i < ids.size(); i++) {
+            const layer = api.GetLine(modelID, ids.get(i))
+            const layerName = String(unwrapIfcValue(layer?.Name) || '')
+            if (!layerName) continue
+            const assigned = Array.isArray(layer?.AssignedItems) ? layer.AssignedItems : []
+            for (const itemRef of assigned) {
+                const itemId = itemRef?.value
+                if (typeof itemId !== 'number') continue
+                const elementViaRep = repToElement.get(itemId)
+                if (typeof elementViaRep === 'number') {
+                    appendLayer(elementViaRep, layerName)
+                    continue
+                }
+                const elementViaItem = repItemToElement.get(itemId)
+                if (typeof elementViaItem === 'number') appendLayer(elementViaItem, layerName)
+            }
+        }
+    }
+
+    // --- Path B: IfcRelAssignsToGroup → IfcSystem/IfcGroup ---
+    // Some authoring tools attach the safety designation as a system group
+    // instead of a layer. We accept any group name here — the classifier in
+    // color-config decides whether it matches the safety keywords.
+    const relAssignsToGroupType = (WebIFC as any).IFCRELASSIGNSTOGROUP
+    if (typeof relAssignsToGroupType === 'number') {
+        const ids = api.GetLineIDsWithType(modelID, relAssignsToGroupType)
+        for (let i = 0; i < ids.size(); i++) {
+            const rel = api.GetLine(modelID, ids.get(i))
+            const groupId = rel?.RelatingGroup?.value
+            if (typeof groupId !== 'number') continue
+            const group = api.GetLine(modelID, groupId)
+            const groupName = String(unwrapIfcValue(group?.Name) || '')
+            if (!groupName) continue
+            for (const obj of normalizeIfcRelationshipRelatedObjects(rel)) {
+                const objId = obj?.value
+                if (typeof objId !== 'number' || !targetSet.has(objId)) continue
+                appendLayer(objId, groupName)
+            }
+        }
+    }
+
+    return result
+}
+
+/**
  * Extract Cset_StandardCH values for each door occurrence from IFC.
  * Supports direct door properties and properties assigned to door types.
  */
@@ -1044,12 +1269,15 @@ export async function extractDoorCsetStandardCH(file: File): Promise<Map<number,
 }
 
 /**
- * Single `OpenModel` pass: operation types, Cset_StandardCH, and wall aggregate part → wall map.
- * Use from CLI / batch scripts to avoid parsing the same IFC three times.
+ * Single `OpenModel` pass: operation types, door + wall Cset_StandardCH, the
+ * wall aggregate part → wall map, and (optionally) element → layer names for
+ * the electrical model. Use from CLI / batch scripts to avoid parsing the
+ * same IFC multiple times.
  */
 export async function extractDoorAnalyzerSidecarMaps(file: File): Promise<{
     operationTypeMap: Map<number, string>
     csetStandardCHMap: Map<number, DoorCsetStandardCHData>
+    wallCsetStandardCHMap: Map<number, WallCsetStandardCHData>
     wallAggregatePartMap: Map<number, number>
 }> {
     const api = await initializeIFCAPI()
@@ -1060,6 +1288,7 @@ export async function extractDoorAnalyzerSidecarMaps(file: File): Promise<{
         return {
             operationTypeMap: new Map(),
             csetStandardCHMap: new Map(),
+            wallCsetStandardCHMap: new Map(),
             wallAggregatePartMap: new Map(),
         }
     }
@@ -1067,8 +1296,44 @@ export async function extractDoorAnalyzerSidecarMaps(file: File): Promise<{
         return {
             operationTypeMap: extractDoorOperationTypesFromOpenModel(api, modelID),
             csetStandardCHMap: extractDoorCsetStandardCHFromOpenModel(api, modelID),
+            wallCsetStandardCHMap: extractWallCsetStandardCHFromOpenModel(api, modelID),
             wallAggregatePartMap: extractWallAggregatePartsFromOpenModel(api, modelID),
         }
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+/**
+ * Standalone layer-assignment extractor for the electrical IFC. Returns
+ * `Map<expressID, layerNames[]>` — the renderer's safety classifier accepts
+ * this as-is. Covers IfcElectricAppliance / IfcLamp / IfcSwitchingDevice /
+ * IfcOutlet / IfcJunctionBox, which is the same set we show as devices.
+ */
+export async function extractElectricalLayerAssignments(file: File): Promise<Map<number, string[]>> {
+    const api = await initializeIFCAPI()
+    const data = new Uint8Array(await file.arrayBuffer())
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for layer extraction')
+        return new Map()
+    }
+    try {
+        const typeCodes: number[] = []
+        for (const typeName of [
+            'IFCELECTRICAPPLIANCE',
+            'IFCLAMP',
+            'IFCSWITCHINGDEVICE',
+            'IFCOUTLET',
+            'IFCJUNCTIONBOX',
+            'IFCFLOWTERMINAL',
+            'IFCDISTRIBUTIONELEMENT',
+            'IFCBUILDINGELEMENTPROXY',
+        ]) {
+            const code = (WebIFC as any)[typeName]
+            if (typeof code === 'number') typeCodes.push(code)
+        }
+        return extractElementLayerAssignmentsFromOpenModel(api, modelID, typeCodes)
     } finally {
         api.CloseModel(modelID)
     }

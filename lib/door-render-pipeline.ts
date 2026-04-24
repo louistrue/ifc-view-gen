@@ -6,6 +6,7 @@ import {
     extractDoorAnalyzerSidecarMaps,
     extractDoorHostRelationships,
     extractDoorLeafMetadata,
+    extractElectricalLayerAssignments,
     extractElementStoreyElevationMap,
     extractElementStoreyMap,
     extractSlabAggregateParts,
@@ -23,8 +24,8 @@ export const DEFAULT_ROUND_RENDER_OPTIONS: SVGRenderOptions = {
     height: 1000,
     margin: 0.5,
     lineWidth: 1.5,
-    showLegend: true,
-    showLabels: true,
+    showLegend: false,
+    showLabels: false,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
 }
@@ -77,11 +78,12 @@ export async function renderDoorsFromIfc(
     // Load the electrical IFC as a secondary model so analyzeDoors can harvest
     // nearby-device candidates from it (the AR IFC never contributes devices).
     const secondaryModel = elecFile ? await loadIFCModelWithMetadata(elecFile) : undefined
-    const { operationTypeMap, csetStandardCHMap, wallAggregatePartMap } =
+    const { operationTypeMap, csetStandardCHMap, wallCsetStandardCHMap, wallAggregatePartMap } =
         await extractDoorAnalyzerSidecarMaps(archFile)
     const doorLeafMetadataMap = await extractDoorLeafMetadata(archFile)
     const hostRelationshipMap = await extractDoorHostRelationships(archFile)
     const slabAggregatePartMap = await extractSlabAggregateParts(archFile)
+    const deviceLayerMap = elecFile ? await extractElectricalLayerAssignments(elecFile) : new Map<number, string[]>()
 
     // Merge storey elevations from arch + elec so the nearby-device storey
     // filter can match a door's storey to the elec element's storey.
@@ -105,7 +107,9 @@ export async function renderDoorsFromIfc(
         hostRelationshipMap,
         slabAggregatePartMap,
         wallAggregatePartMap,
-        storeyElevationMap
+        storeyElevationMap,
+        wallCsetStandardCHMap,
+        deviceLayerMap
     )
 
     // The browser pipeline fills storeyName from the Fragments spatial tree;

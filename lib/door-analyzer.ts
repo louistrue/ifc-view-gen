@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
 import * as WebIFC from 'web-ifc'
-import type { DoorCsetStandardCHData, DoorLeafMetadata } from './ifc-loader'
+import type { DoorCsetStandardCHData, DoorLeafMetadata, WallCsetStandardCHData } from './ifc-loader'
 
 /** Parts from `extractWallAggregateParts` may have no `LoadedIFCModel.elements` entry (fragments scope); geometry still loads by expressID. */
 function createWallAggregatePartStub(partExpressID: number): ElementInfo {
@@ -93,6 +93,21 @@ export interface DoorContext {
      * pass through the IFC.
      */
     nearbyDoorBKP: Map<number, string | null>
+    /**
+     * Raw Cset_StandardCH CFC/BKP string per wall-side element in the drawing
+     * — keyed by host wall expressID, every nearbyWall expressID, and every
+     * IfcBuildingElementPart reachable via `wallAggregatePartLinks`. The
+     * renderer uses this to pick the drywall vs. default wall colour (both in
+     * plan cut and elevation). Walls without a CFC are stored as `null`.
+     */
+    wallBKP: Map<number, string | null>
+    /**
+     * Presentation-layer / IfcSystem names per electrical device (keyed by
+     * device expressID). Populated from the ELEC IFC so the renderer can
+     * classify safety devices by layer (`E_Sicherheit`) instead of relying
+     * only on name-keyword heuristics.
+     */
+    deviceLayers: Map<number, readonly string[]>
     /** IfcWindow (and similar) instances in the same plan band as {@link nearbyWalls} — plan / elevation context. */
     nearbyWindows: ElementInfo[]
     /**
@@ -2453,7 +2468,13 @@ export async function analyzeDoors(
     /** expressID → IfcBuildingStorey.Elevation (metres) for both arch and elec
      *  elements. Used to drop devices whose storey doesn't match the door's.
      */
-    elementStoreyElevationMap?: Map<number, number>
+    elementStoreyElevationMap?: Map<number, number>,
+    /** Wall / IfcBuildingElementPart expressID → Cset_StandardCH row — used by
+     *  the renderer to colour drywall walls differently from default walls. */
+    wallCsetStandardCHMap?: Map<number, WallCsetStandardCHData>,
+    /** Electrical-device expressID → presentation layer / IfcSystem names.
+     *  Enables layer-based safety classification (E_Sicherheit etc.). */
+    deviceLayerMap?: Map<number, string[]>
 ): Promise<DoorContext[]> {
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure)
@@ -2699,6 +2720,8 @@ export async function analyzeDoors(
             hostCeilings,
             nearbyDoors: [],
             nearbyDoorBKP: new Map<number, string | null>(),
+            wallBKP: new Map<number, string | null>(),
+            deviceLayers: new Map<number, readonly string[]>(),
             nearbyWindows,
             nearbyWalls,
             wallAggregatePartLinks,
@@ -2739,6 +2762,37 @@ export async function analyzeDoors(
             if (bkpMap.has(nearbyDoor.expressID)) continue
             const nearbyBKP = csetStandardCHMap?.get(nearbyDoor.expressID)?.cfcBkpCccBcc ?? null
             bkpMap.set(nearbyDoor.expressID, nearbyBKP)
+        }
+
+        // Walls: host + every nearbyWall + every aggregate part. The renderer
+        // looks up by the actual element it drew (wall OR part). Parts missing
+        // their own CFC fall through to the parent wall's CFC so a single
+        // drywall tag on the wall still coloursthe child skins correctly.
+        const wallBKP = context.wallBKP
+        wallBKP.clear()
+        const recordWallBKP = (expressID: number, fallbackParentId?: number) => {
+            if (wallBKP.has(expressID)) return
+            let cfc = wallCsetStandardCHMap?.get(expressID)?.cfcBkpCccBcc ?? null
+            if (!cfc && typeof fallbackParentId === 'number') {
+                cfc = wallCsetStandardCHMap?.get(fallbackParentId)?.cfcBkpCccBcc ?? null
+            }
+            wallBKP.set(expressID, cfc)
+        }
+        if (context.hostWall) recordWallBKP(context.hostWall.expressID)
+        for (const wall of context.nearbyWalls) recordWallBKP(wall.expressID)
+        for (const link of context.wallAggregatePartLinks) {
+            recordWallBKP(link.part.expressID, link.parentWallExpressID)
+        }
+
+        // Device layer map — carried verbatim from the elec extractor so the
+        // renderer can match E_Sicherheit (or whatever the model calls it).
+        const devLayers = context.deviceLayers
+        devLayers.clear()
+        if (deviceLayerMap && deviceLayerMap.size > 0) {
+            for (const device of context.nearbyDevices) {
+                const layers = deviceLayerMap.get(device.expressID)
+                if (layers && layers.length > 0) devLayers.set(device.expressID, layers)
+            }
         }
     }
 

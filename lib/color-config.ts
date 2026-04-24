@@ -8,16 +8,21 @@
  *
  * `DoorBKPCategory` ships with this module because it's what `elevation.door.byBKP`
  * keys on — kept here so the classifier and the palette stay in one place.
+ *
+ * `WallBKPCategory` is the wall analog (CFC 2711 gypsum/drywall vs. default
+ * concrete-ish). Classifier lives alongside the door one.
  */
 import { readFileSync } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
 
 export type DoorBKPCategory = 'metal' | 'wood' | 'context'
+export type WallBKPCategory = 'drywall'
 
 interface RenderColorsConfig {
     palette: Record<string, string>
     plan: {
         wallCut: string
+        wallCutByBKP?: Partial<Record<WallBKPCategory, string>>
         ceilingCut: string
         suspendedCeilingCut: string
         windowContext: string
@@ -28,6 +33,7 @@ interface RenderColorsConfig {
     }
     elevation: {
         wall: string
+        wallByBKP?: Partial<Record<WallBKPCategory, string>>
         suspendedCeiling: string
         glass: string
         electrical: string
@@ -37,6 +43,9 @@ interface RenderColorsConfig {
             byBKP: Record<DoorBKPCategory, string>
         }
     }
+    safety?: {
+        layerKeywords?: string[]
+    }
     strokes: {
         outline: string
     }
@@ -45,26 +54,33 @@ interface RenderColorsConfig {
 /** Matches `config/render-colors.json` one-to-one. Kept in sync manually. */
 const FALLBACK_CONFIG: RenderColorsConfig = {
     palette: {
-        grau:       '#9E9E9E',
-        hellgrau:   '#E3E3E3',
-        gelb:       '#F4B400',
-        pink:       '#E91E63',
-        anthrazit:  '#3A3A3A',
-        hellbraun:  '#C19A6B',
-        hellblau:   '#D3E4F5',
+        grau:       '#E0E0E0',
+        hellgrau:   '#D9CBBA',
+        gelb:       '#FAC846',
+        pink:       '#FA467F',
+        anthrazit:  '#B8B8B8',
+        hellbraun:  '#D19D5A',
+        hellblau:   '#B5E1F7',
+        graubraun:  '#D9CBBA',
     },
     plan: {
         wallCut:             'grau',
+        wallCutByBKP: {
+            drywall: 'graubraun',
+        },
         ceilingCut:          'grau',
         suspendedCeilingCut: 'grau',
-        windowContext:       'hellgrau',
-        doorContext:         'hellgrau',
-        currentDoor:         'hellgrau',
+        windowContext:       'anthrazit',
+        doorContext:         'anthrazit',
+        currentDoor:         'anthrazit',
         electrical:          'gelb',
         safety:              'pink',
     },
     elevation: {
         wall:             'grau',
+        wallByBKP: {
+            drywall: 'graubraun',
+        },
         suspendedCeiling: 'grau',
         glass:            'hellblau',
         electrical:       'gelb',
@@ -77,6 +93,9 @@ const FALLBACK_CONFIG: RenderColorsConfig = {
                 context: 'hellgrau',
             },
         },
+    },
+    safety: {
+        layerKeywords: ['e_sicherheit', 'sicherheit'],
     },
     strokes: {
         outline: '#000000',
@@ -99,6 +118,7 @@ function resolvePaletteName(config: RenderColorsConfig, name: string): string {
 export interface RenderColors {
     plan: {
         wallCut:             string
+        wallCutByBKP:        Record<WallBKPCategory, string>
         ceilingCut:          string
         suspendedCeilingCut: string
         windowContext:       string
@@ -109,6 +129,7 @@ export interface RenderColors {
     }
     elevation: {
         wall:             string
+        wallByBKP:        Record<WallBKPCategory, string>
         suspendedCeiling: string
         glass:            string
         electrical:       string
@@ -118,6 +139,9 @@ export interface RenderColors {
             byBKP: Record<DoorBKPCategory, string>
         }
     }
+    safety: {
+        layerKeywords: readonly string[]
+    }
     strokes: {
         outline: string
     }
@@ -125,9 +149,19 @@ export interface RenderColors {
 
 function resolveColors(config: RenderColorsConfig): RenderColors {
     const P = (name: string) => resolvePaletteName(config, name)
+    const resolveWallBKP = (
+        map: Partial<Record<WallBKPCategory, string>> | undefined,
+        fallback: string,
+    ): Record<WallBKPCategory, string> => ({
+        drywall: map?.drywall ? P(map.drywall) : P(fallback),
+    })
+    const layerKeywords = (config.safety?.layerKeywords ?? FALLBACK_CONFIG.safety!.layerKeywords!)
+        .map((k) => k.toLowerCase())
+        .filter((k) => k.length > 0)
     return {
         plan: {
             wallCut:             P(config.plan.wallCut),
+            wallCutByBKP:        resolveWallBKP(config.plan.wallCutByBKP, config.plan.wallCut),
             ceilingCut:          P(config.plan.ceilingCut),
             suspendedCeilingCut: P(config.plan.suspendedCeilingCut),
             windowContext:       P(config.plan.windowContext),
@@ -138,6 +172,7 @@ function resolveColors(config: RenderColorsConfig): RenderColors {
         },
         elevation: {
             wall:             P(config.elevation.wall),
+            wallByBKP:        resolveWallBKP(config.elevation.wallByBKP, config.elevation.wall),
             suspendedCeiling: P(config.elevation.suspendedCeiling),
             glass:            P(config.elevation.glass),
             electrical:       P(config.elevation.electrical),
@@ -150,6 +185,9 @@ function resolveColors(config: RenderColorsConfig): RenderColors {
                     context: P(config.elevation.door.byBKP.context),
                 },
             },
+        },
+        safety: {
+            layerKeywords,
         },
         strokes: {
             outline: P(config.strokes.outline),
@@ -201,6 +239,27 @@ export function classifyDoorBKP(cfcBkpCccBcc: string | null | undefined): DoorBK
     return null
 }
 
+/**
+ * Map the same `'CFC / BKP / CCC / BCC'` string to wall categories.
+ *
+ * Confirmed CFC codes for walls in the Flu21 model:
+ *   CFC 2711  Construction à sec en plâtre / Trockenbau Gipserarbeiten  → drywall
+ *
+ * Unknown / missing values return null, which the renderer treats as the
+ * default `wall` / `plan.wallCut` colour.
+ */
+export function classifyWallBKP(cfcBkpCccBcc: string | null | undefined): WallBKPCategory | null {
+    if (!cfcBkpCccBcc) return null
+    const code = cfcBkpCccBcc.toUpperCase()
+    if (/\bCFC\s*2711\b/.test(code)
+        || code.includes('TROCKENBAU')
+        || code.includes('GIPSER')
+        || code.includes('GIPSPLATTE')
+        || code.includes('PLÂTRE')
+        || code.includes('PLATRE')) return 'drywall'
+    return null
+}
+
 /** Pick the elevation door-leaf colour from the door's BKP classification. */
 export function resolveElevationDoorColor(
     cfcBkpCccBcc: string | null | undefined,
@@ -208,6 +267,24 @@ export function resolveElevationDoorColor(
 ): string {
     const category = classifyDoorBKP(cfcBkpCccBcc)
     return category ? colors.elevation.door.byBKP[category] : colors.elevation.door.default
+}
+
+/** Pick the plan-view wall-cut colour from a wall's BKP classification. */
+export function resolveWallCutColor(
+    cfcBkpCccBcc: string | null | undefined,
+    colors: RenderColors = loadRenderColors()
+): string {
+    const category = classifyWallBKP(cfcBkpCccBcc)
+    return category ? colors.plan.wallCutByBKP[category] : colors.plan.wallCut
+}
+
+/** Pick the elevation wall-face colour from a wall's BKP classification. */
+export function resolveWallElevationColor(
+    cfcBkpCccBcc: string | null | undefined,
+    colors: RenderColors = loadRenderColors()
+): string {
+    const category = classifyWallBKP(cfcBkpCccBcc)
+    return category ? colors.elevation.wallByBKP[category] : colors.elevation.wall
 }
 
 /**
@@ -241,4 +318,38 @@ export function isSafetyDeviceName(name: string | null | undefined): boolean {
     if (!name) return false
     const lower = name.toLowerCase()
     return SAFETY_NAME_KEYWORDS.some((kw) => lower.includes(kw))
+}
+
+/**
+ * Layer-based safety classification. The Flu21 spec says safety-relevant
+ * devices live on layer `E_Sicherheit` (system/layer name may vary). We
+ * lowercase-match against `colors.safety.layerKeywords`, so either the
+ * presentation-layer name or the IfcSystem name is enough to trigger.
+ */
+export function isSafetyDeviceByLayer(
+    layers: readonly string[] | null | undefined,
+    colors: RenderColors = loadRenderColors()
+): boolean {
+    if (!layers || layers.length === 0) return false
+    const keywords = colors.safety.layerKeywords
+    if (keywords.length === 0) return false
+    for (const layer of layers) {
+        if (!layer) continue
+        const lower = layer.toLowerCase()
+        if (keywords.some((kw) => lower.includes(kw))) return true
+    }
+    return false
+}
+
+/**
+ * Combined safety classifier: prefer layer assignment (reliable in models
+ * that author it) and fall back to the name-keyword heuristic (Flu21 today).
+ */
+export function isSafetyDevice(
+    name: string | null | undefined,
+    layers: readonly string[] | null | undefined,
+    colors: RenderColors = loadRenderColors()
+): boolean {
+    if (isSafetyDeviceByLayer(layers, colors)) return true
+    return isSafetyDeviceName(name)
 }
