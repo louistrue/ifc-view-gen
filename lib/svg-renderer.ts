@@ -17,6 +17,7 @@ import {
     INTER_WOFF2_LATIN_600_BASE64,
     INTER_WOFF2_LATIN_700_BASE64,
 } from './inter-svg-font-embed-data'
+import { loadRenderColors } from './color-config'
 
 export interface SVGRenderOptions {
     width?: number
@@ -91,20 +92,25 @@ export function planSvgCanvasHeight(canvasWidth: number): number {
     return Math.round(canvasWidth * PLAN_SVG_HEIGHT_RATIO)
 }
 
+// Colour defaults are resolved once from `config/render-colors.json` (palette-
+// based). The renderer still accepts per-call overrides via SVGRenderOptions;
+// anything not supplied falls back to the palette value below.
+const COLORS = loadRenderColors()
+
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
     margin: 0.5,
     planCropMarginMeters: 0.5,
-    doorColor: '#dedede',
-    wallColor: '#e3e3e3',
-    floorSlabColor: '#e3e3e3',
-    deviceColor: '#fcc647',
-    glassColor: '#b8d4e8',
+    doorColor: COLORS.elevation.door.default,
+    wallColor: COLORS.elevation.wall,
+    floorSlabColor: COLORS.plan.wallCut,
+    deviceColor: COLORS.plan.electrical,
+    glassColor: COLORS.elevation.glass,
     glassFillOpacity: 0.32,
-    backgroundColor: '#fff', // Light gray background
+    backgroundColor: '#fff',
     lineWidth: 1.5,
-    lineColor: '#000000',
+    lineColor: COLORS.strokes.outline,
     showFills: true,
     showLegend: true,
     showLabels: true,
@@ -163,8 +169,8 @@ const WALL_EDGE_STROKE_FACTOR = 1.15
 const PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS = 0.025
 const DEVICE_EDGE_STROKE_FACTOR = 1.0
 const CONTEXT_DOOR_EDGE_STROKE_FACTOR = 0.55
-const CONTEXT_DOOR_FILL_COLOR = '#d1d5db'
-const CONTEXT_DOOR_LINE_COLOR = '#6b7280'
+const CONTEXT_DOOR_FILL_COLOR = COLORS.plan.doorContext
+const CONTEXT_DOOR_LINE_COLOR = COLORS.strokes.outline
 const CONTEXT_DOOR_FILL_OPACITY = 0.32
 
 const DEBUG_ELEVATION_COLORS =

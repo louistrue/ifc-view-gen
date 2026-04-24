@@ -1,0 +1,39 @@
+{
+  "palette": {
+    "grau":       "#9E9E9E",
+    "hellgrau":   "#E3E3E3",
+    "gelb":       "#F4B400",
+    "pink":       "#E91E63",
+    "anthrazit":  "#3A3A3A",
+    "hellbraun":  "#C19A6B",
+    "hellblau":   "#D3E4F5"
+  },
+  "plan": {
+    "wallCut":             "grau",
+    "ceilingCut":          "grau",
+    "suspendedCeilingCut": "grau",
+    "windowContext":       "hellgrau",
+    "doorContext":         "hellgrau",
+    "currentDoor":         "hellgrau",
+    "electrical":          "gelb",
+    "safety":              "pink"
+  },
+  "elevation": {
+    "wall":             "grau",
+    "suspendedCeiling": "grau",
+    "glass":            "hellblau",
+    "electrical":       "gelb",
+    "safety":           "pink",
+    "door": {
+      "default": "hellgrau",
+      "byBKP": {
+        "metal":   "anthrazit",
+        "wood":    "hellbraun",
+        "context": "hellgrau"
+      }
+    }
+  },
+  "strokes": {
+    "outline": "#000000"
+  }
+}
