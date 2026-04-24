@@ -91,18 +91,25 @@ function svgWebFontDefs(fontFamily: string): string {
 
 /**
  * Elevation rendering policy (single mode, always on):
- *   - vertical: slab-to-slab content (10 cm of upper slab + floor + 10 cm of
- *     lower slab, as defined by `getElevationHostClipBounds`) fits the full
- *     available picture height. Content top sits a few px below the picture
- *     top (narrow whitespace), bottom lands on the title-block separator.
- *     Scale is derived per door from the storey clip so the 10 cm slab rule
- *     is ALWAYS visible (no overflow).
+ *   - scale: FIXED at `FIXED_PX_PER_METER` for every door + every view so the
+ *     same wall thickness reads the same pixel width across the fleet. Picked
+ *     so a 4 m slab-to-slab storey (10 cm upper slab + 3.8 m floor + 10 cm
+ *     lower slab — the design max) fits the available picture height exactly.
+ *   - vertical: content top anchored near the picture top (narrow whitespace
+ *     above). The 10 cm upper-slab and 10 cm lower-slab crop from
+ *     `getElevationHostClipBounds` is always drawn in full — no overflow for
+ *     storeys up to 4 m. Shorter storeys leave continuous-wall backdrop
+ *     between the lower slab and the title block.
  *   - horizontal: door frame origin anchored to the canvas width centre so
  *     front/back/plan agree on the door's X position. Wall panels and slab
  *     strips extend to the canvas edges (no side gutter, no white border).
  *   - plan: fits bounds centred, uses its own scale, but door X still lines
  *     up with the elevations.
  */
+
+/** Fixed drawing scale in SVG pixels per metre. 215 × 4.0 m = 860 SVG px,
+ * matching the available drawing height (866 px at the pads below). */
+export const FIXED_PX_PER_METER = 215
 
 /** Narrow top/bottom breathing room inside the drawing area (SVG px). */
 export const ELEVATION_TOP_PAD_PX = 12
@@ -2167,24 +2174,13 @@ function createProjectedElevationWallBackdropGeometry(
     const wallMinY = clipBounds.minY
     const wallMaxY = clipBounds.maxY
 
-    // Clamp the backdrop's horizontal extent to the real wall footprint along
-    // the door's widthAxis. This stops the fill at T-junctions / L-corners /
-    // the end of a storefront instead of bleeding across the whole clip band
-    // into open space that has no actual wall behind it.
-    //
-    // Fixed-scale mode: intentionally skip the footprint clamp so the backdrop
-    // panels (and their outlines) extend to the full clipBounds (= canvas
-    // viewport), matching the "picture edge to picture edge" expectation.
-    let wallMinX = clipBounds.minX
-    let wallMaxX = clipBounds.maxX
-    if (footprintLocalA && !isFixedScaleMode()) {
-        const leftPt = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(footprintLocalA.minA))
-        const rightPt = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(footprintLocalA.maxA))
-        const leftPx = projectPoint(leftPt, camera, width, height).x
-        const rightPx = projectPoint(rightPt, camera, width, height).x
-        wallMinX = Math.max(clipBounds.minX, Math.min(leftPx, rightPx))
-        wallMaxX = Math.min(clipBounds.maxX, Math.max(leftPx, rightPx))
-    }
+    // Backdrop extends to the full clipBounds so wall panels and their
+    // outlines reach the picture edges. The wall-footprint clamp used to
+    // stop the fill at T-junctions / storefront ends, but that left white
+    // gutters at the canvas sides — we now prefer the "continuous wall to
+    // the picture edge" read.
+    const wallMinX = clipBounds.minX
+    const wallMaxX = clipBounds.maxX
 
     const doorBounds = projectElevationDoorBounds(frame, camera, width, height)
     // If the door pokes outside the wall footprint (shouldn't normally, but be
@@ -3178,9 +3174,11 @@ function computeViewTransform(
         return { scale, offsetX, offsetY, viewHeight }
     }
 
-    // Elevations: fit to HEIGHT (10 cm slab rule filled), top-anchor with
-    // small breather, door horizontally centred.
-    const scale = availHeight / (contentHeight || 1)
+    // Elevations: FIXED scale (same px/m for every door), top-anchor with
+    // small breather, door horizontally centred. Picked so 4 m slab-to-slab
+    // content fits availHeight exactly; shorter storeys leave continuous-wall
+    // backdrop between the lower slab and the title block.
+    const scale = FIXED_PX_PER_METER
     const offsetX = doorAnchor
         ? options.width / 2 - (doorAnchor.x - fitBounds.minX) * scale
         : sidePad + (availWidth - contentWidth * scale) / 2
@@ -3314,13 +3312,12 @@ function getElevationHostClipBounds(
     bounds.minY = Math.min(projectedTop.y, projectedBottom.y)
     bounds.maxY = Math.max(projectedTop.y, projectedBottom.y)
 
-    // Clamp horizontal extent wide enough that host-wall panels, slab strips
-    // and outlines all reach the picture's left and right edges at the
-    // per-door fit-to-height scale used by the elevation renderer. We don't
-    // know the scale here, so use a generous world window (2.5 m door-reveal
-    // each side plus the door itself) — the eventual SVG transform still
-    // clips at the canvas edge, so overshoot is free.
-    const lateralGap = Math.max(THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5), 3.0)
+    // Extend the lateral clip to exactly half the canvas width at the fixed
+    // drawing scale, so host-wall panels and slab strips reach the picture's
+    // left/right edges. Falls back to a generous world window if the canvas
+    // width is unavailable here (shouldn't happen in practice).
+    const halfCanvasMetres = (options.width / 2) / FIXED_PX_PER_METER
+    const lateralGap = Math.max(halfCanvasMetres - frame.width / 2, 1.0)
     const leftPoint = frame.origin.clone().add(
         frame.widthAxis.clone().multiplyScalar(-frame.width / 2 - lateralGap)
     )
@@ -3956,27 +3953,26 @@ function generateSVGString(
     </clipPath>
   </defs>
 `
-    // Fixed-scale elevations: fill the strip ABOVE the content bounds with
-    // wall colour so short-storey doors still read as a continuous wall up to
-    // the picture's top edge. Everything below content top is left alone so
-    // glass transparency and title-block separator keep working normally.
-    let elevationTopFill = ''
-    if (
-        isFixedScaleMode()
-        && !isPlanView
-        && currentViewType !== ''
-        && Number.isFinite(minX)
-    ) {
+    // Fill the strip ABOVE content (top-pad breather) and BELOW content
+    // (for short storeys, the gap between the lower slab and the title
+    // block) with wall colour so elevations read as continuous wall to
+    // both picture edges. Plan view stays on the standard background.
+    let elevationBackdropFill = ''
+    if (!isPlanView && currentViewType !== '' && Number.isFinite(minX)) {
         const contentTop = offsetY
+        const contentBottom = offsetY + (maxY - minY) * scale
         if (contentTop > 0.5) {
-            elevationTopFill = `  <rect x="0" y="0" width="${width}" height="${contentTop.toFixed(2)}" fill="${options.wallColor}"/>\n`
+            elevationBackdropFill += `  <rect x="0" y="0" width="${width}" height="${contentTop.toFixed(2)}" fill="${options.wallColor}"/>\n`
+        }
+        if (viewHeight - contentBottom > 0.5) {
+            elevationBackdropFill += `  <rect x="0" y="${contentBottom.toFixed(2)}" width="${width}" height="${(viewHeight - contentBottom).toFixed(2)}" fill="${options.wallColor}"/>\n`
         }
     }
 
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
 ${fontDefs}${drawingClipDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
-${elevationTopFill}  <g id="fills">
+${elevationBackdropFill}  <g id="fills">
   <g clip-path="url(#drawing-clip)">
 ${wallBandsSvg}
 `
@@ -4922,12 +4918,8 @@ function renderElevationFromMeshes(
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
 
-    const doorAnchor = isFixedScaleMode()
-        ? (() => {
-            const p = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
-            return { x: p.x, y: p.y }
-        })()
-        : undefined
+    const doorAnchorProjected = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
+    const doorAnchor = { x: doorAnchorProjected.x, y: doorAnchorProjected.y }
 
     return generateSVGString(
         renderGeometry.edges,
@@ -4942,7 +4934,7 @@ function renderElevationFromMeshes(
             suppressSyntheticWallBands: true,
             storeyMarkerProjectedY: projectStoreyMarkerLevelY(context, camera, frustumWidth, frustumHeight),
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
-            ...(doorAnchor ? { doorAnchor } : {}),
+            doorAnchor,
         }
     )
 }
@@ -5857,22 +5849,18 @@ function renderPlanFromMeshes(
         ? meshPlanSectionGeometry
         : createSemanticPlanWallGeometry(context, camera, frustumWidth, frustumHeight, opts)
 
-    const hostGeometry = (planWallGeometry.edges.length > 0 || planWallGeometry.polygons.length > 0)
-        ? clipProjectedGeometryToBounds(
-            planWallGeometry,
-            getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
-        )
-        : { edges: [], polygons: [] }
+    // Walls in plan are no longer clipped to a viewport rectangle — polygons
+    // that extend past the plan "fit box" used to get closed by a synthetic
+    // vertical jamb, which showed up as a dark line terminating the wall on
+    // one side. The SVG viewBox itself still clips anything off-canvas, which
+    // is the picture border the spec asks for.
+    const hostGeometry = planWallGeometry
     renderGeometry.edges.push(...hostGeometry.edges)
     renderGeometry.polygons.push(...hostGeometry.polygons)
     const hasPlanWallGeometry = hostGeometry.edges.length > 0 || hostGeometry.polygons.length > 0
 
-    const doorAnchor = isFixedScaleMode()
-        ? (() => {
-            const p = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
-            return { x: p.x, y: p.y }
-        })()
-        : undefined
+    const doorAnchorProjected = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
+    const doorAnchor = { x: doorAnchorProjected.x, y: doorAnchorProjected.y }
 
     return generateSVGString(
         renderGeometry.edges,
@@ -5887,7 +5875,7 @@ function renderPlanFromMeshes(
             planDoorBounds,
             planWallBandBounds: { minY: planWallBandBounds.minY, maxY: planWallBandBounds.maxY },
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
-            ...(doorAnchor ? { doorAnchor } : {}),
+            doorAnchor,
         }
     )
 }
