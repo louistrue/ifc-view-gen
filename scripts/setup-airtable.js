@@ -74,9 +74,9 @@ function desiredFields() {
         {
             name: 'Valid',
             type: 'singleSelect',
-            description: 'Human review verdict. Round script renders everything where Valid != "yes".',
+            description: 'Human review verdict. Round script renders every row where Valid="no", then sets Valid="check" so the reviewer sees fresh renders pending another look.',
             options: {
-                choices: [{ name: 'yes' }, { name: 'no' }],
+                choices: [{ name: 'yes' }, { name: 'no' }, { name: 'check' }],
             },
         },
         {

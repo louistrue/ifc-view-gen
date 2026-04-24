@@ -1,19 +1,24 @@
 /**
  * Airtable render round.
  *
- * Pull every Doors row where Valid != yes (or a subset via --guids/--guid-file),
+ * Pull every Doors row where Valid = 'no' (or a subset via --guids/--guid-file),
  * render front/back/plan from the IFC pair in .env, rasterise to PNG @ 1400 w,
- * keep a local backup, and overwrite the Plan/Front/Back attachments on each
- * Airtable record. Idempotent — re-running the same non-yes queue is safe.
+ * keep a local backup, overwrite the Plan/Front/Back attachments on each
+ * Airtable record, and set Valid = 'check' so the reviewer sees the row has
+ * been re-rendered and is waiting for another look.
+ *
+ * Default filter: Valid = 'no' (explicit). Rows with Valid empty or any other
+ * value are ignored unless --force is passed.
  *
  * Flags:
  *   --guids=a,b,c        subset
  *   --guid-file=path     subset from file (one per line, or comma/space/semicolon)
- *   --force              include Valid=yes too (for regression reruns)
+ *   --force              include every row regardless of Valid (for regression reruns)
  *   --dry-run            print the plan, render nothing
  *   --local-only         render + rasterise + local backup, skip Airtable
  *   --only=front,plan    limit views (default: front,back,plan)
  *   --limit=N            smoke test — only render the first N targets
+ *   --no-mark-check      don't flip Valid to 'check' after upload
  *
  * Env:
  *   AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME
@@ -24,7 +29,9 @@ import { resolve } from 'node:path'
 import { renderDoorsFromIfc, type DoorView } from '../lib/door-render-pipeline'
 import { rasterizeSvgToPng, DEFAULT_RASTER_WIDTH_PX } from '../lib/png-rasterize'
 import {
+    batchUpdateRecords,
     clearAttachments,
+    closeAirtableClient,
     listDoors,
     uploadAttachment,
     type AirtableConfig,
@@ -51,6 +58,7 @@ interface CliFlags {
     localOnly: boolean
     views: readonly DoorView[]
     limit: number | null
+    markCheck: boolean
 }
 
 function parseCsvGuids(raw: string): string[] {
@@ -69,6 +77,7 @@ function parseFlags(argv: string[]): CliFlags {
         localOnly: false,
         views: ALL_VIEWS,
         limit: null,
+        markCheck: true,
     }
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i]
@@ -84,6 +93,8 @@ function parseFlags(argv: string[]): CliFlags {
             flags.dryRun = true
         } else if (arg === '--local-only') {
             flags.localOnly = true
+        } else if (arg === '--no-mark-check') {
+            flags.markCheck = false
         } else if (arg.startsWith('--guids=')) {
             flags.guids = parseCsvGuids(arg.slice('--guids='.length))
         } else if (arg === '--guids' && i + 1 < argv.length) {
@@ -112,14 +123,19 @@ function parseFlags(argv: string[]): CliFlags {
 function printHelp(): void {
     console.log(`airtable-render-round — render Doors table images
 
+Default queue: Valid = 'no' (explicit). After a successful render+upload the
+row's Valid flips to 'check' so the reviewer sees fresh renders pending
+another look.
+
 Flags:
   --guids=a,b,c        subset (comma/space/semicolon separated)
   --guid-file=path     subset from file (same separators, newlines ok)
-  --force              include Valid=yes (re-render everything)
+  --force              include every row regardless of Valid
   --dry-run            list targets and exit
   --local-only         render locally; skip Airtable writes
   --only=front,plan    subset of views (default all three)
   --limit=N            only render first N targets
+  --no-mark-check      don't set Valid='check' after successful upload
 
 Env:
   AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME
@@ -187,8 +203,9 @@ async function main(): Promise<void> {
         console.log(`Round backup dir: ${backupRoot}`)
 
         // 1. Fetch candidates
-        console.log(`\nFetching Airtable records (onlyNonValid=${!flags.force})...`)
-        const allDoors = await listDoors(airtable, { onlyNonValid: !flags.force })
+        const queueDescription = flags.force ? 'all records (--force)' : "Valid='no' only"
+        console.log(`\nFetching Airtable records (${queueDescription})...`)
+        const allDoors = await listDoors(airtable, flags.force ? {} : { onlyNo: true })
         const airtableByGuid = new Map(allDoors.map((d) => [d.guid, d]))
         console.log(`  ${allDoors.length} record(s) in queue`)
 
@@ -245,9 +262,101 @@ async function main(): Promise<void> {
             `  rendered=${result.rendered.size} renderErrors=${result.renderErrors.size} notInIfc=${result.notInIfc.length}`
         )
 
-        // 4. Per-GUID: local backup + Airtable writes
+        // 4a. Per-GUID local work (rasterise + write backup PNG/SVG) feeds a
+        // shared queue that upload workers consume concurrently — rasterising
+        // and uploading overlap so the 5 req/s upload bucket stays saturated
+        // from second 1, saving several minutes over strict phase-ordering.
         const ok: string[] = []
         const failed: Array<{ guid: string; reason: string }> = []
+        interface ReadyForUpload {
+            target: { id: string; guid: string }
+            guidDir: string
+            pngByView: Partial<Record<DoorView, Buffer>>
+        }
+        const uploadQueue: ReadyForUpload[] = []
+        let rasterisationComplete = false
+        const queueWaiters: Array<() => void> = []
+        const notifyWaiters = () => {
+            while (queueWaiters.length > 0) {
+                const w = queueWaiters.shift()!
+                w()
+            }
+        }
+        const takeFromQueue = async (): Promise<ReadyForUpload | null> => {
+            while (true) {
+                if (uploadQueue.length > 0) return uploadQueue.shift()!
+                if (rasterisationComplete) return null
+                await new Promise<void>((resolve) => queueWaiters.push(resolve))
+            }
+        }
+
+        // Crash diagnostics: catch anything that would otherwise kill the
+        // process without a summary, and reveal whether the round is blocking
+        // on a pending Promise when Node decides to exit.
+        process.on('uncaughtException', (err) => {
+            console.error('[uncaughtException]', err)
+        })
+        process.on('unhandledRejection', (reason) => {
+            console.error('[unhandledRejection]', reason)
+        })
+        process.on('beforeExit', (code) => {
+            console.log(`[beforeExit] code=${code} queue=${uploadQueue.length} rasterDone=${rasterisationComplete} uploadCount=${uploadCount()}`)
+        })
+        process.on('exit', (code) => {
+            // Last-gasp line, synchronous — this should always reach the log.
+            process.stdout.write(`[exit] code=${code} queue=${uploadQueue.length} rasterDone=${rasterisationComplete} uploadCount=${uploadCount()}\n`)
+        })
+
+        // 4b. Start upload workers BEFORE rasterisation begins so the first
+        // rasterised door is already uploaded while the rest are still being
+        // converted. Each worker serialises its own HTTPS calls (1 clear + 3
+        // uploads) so Node's connection pool stays happy.
+        const UPLOAD_CONCURRENCY = 4
+        const successfulRecordIds: string[] = []
+        let uploadProgress = 0
+        const uploadCount = () => uploadProgress
+
+        const uploadOne = async (item: ReadyForUpload): Promise<void> => {
+            const { target, guidDir, pngByView } = item
+            try {
+                const fieldsToClear = flags.views.map((v) => VIEW_TO_FIELD[v])
+                await clearAttachments(airtable, target.id, fieldsToClear)
+                for (const view of flags.views) {
+                    const png = pngByView[view]
+                    if (!png) continue
+                    await uploadAttachment(airtable, target.id, VIEW_TO_FIELD[view], {
+                        filename: `${sanitize(target.guid)}-${view}.png`,
+                        contentType: 'image/png',
+                        bytes: png,
+                    })
+                }
+                successfulRecordIds.push(target.id)
+                ok.push(target.guid)
+                uploadProgress++
+                console.log(`  [upload ${uploadProgress}] ok ${target.guid}`)
+            } catch (err) {
+                const msg = err instanceof Error ? (err.stack ?? err.message) : String(err)
+                writeFileSync(resolve(guidDir, 'upload-error.txt'), `${msg}\n`)
+                failed.push({
+                    guid: target.guid,
+                    reason: `upload failed: ${err instanceof Error ? err.message : String(err)}`,
+                })
+                uploadProgress++
+                console.log(`  [upload ${uploadProgress}] FAILED ${target.guid}: ${err instanceof Error ? err.message : String(err)}`)
+            }
+        }
+
+        const uploadWorkersPromise: Promise<void> = flags.localOnly
+            ? Promise.resolve()
+            : Promise.all(
+                Array.from({ length: UPLOAD_CONCURRENCY }, async () => {
+                    while (true) {
+                        const item = await takeFromQueue()
+                        if (!item) break
+                        await uploadOne(item)
+                    }
+                })
+            ).then(() => undefined)
 
         for (const target of targets) {
             const guid = target.guid
@@ -270,7 +379,6 @@ async function main(): Promise<void> {
                 continue
             }
 
-            // Write SVG + PNG backup for every rendered view before touching Airtable.
             const pngByView: Partial<Record<DoorView, Buffer>> = {}
             let rasterFailed = false
             for (const view of flags.views) {
@@ -289,7 +397,6 @@ async function main(): Promise<void> {
                     break
                 }
                 if (png.byteLength > MAX_ATTACHMENT_BYTES) {
-                    // Retry smaller once; if still oversized, give up on this view.
                     try {
                         png = rasterizeSvgToPng(svg, 1000)
                     } catch (err) {
@@ -322,30 +429,35 @@ async function main(): Promise<void> {
                 continue
             }
 
+            uploadQueue.push({ target, guidDir, pngByView })
+            notifyWaiters()
+        }
+        rasterisationComplete = true
+        notifyWaiters()
+
+        // Wait for upload workers to drain the queue.
+        try {
+            await uploadWorkersPromise
+        } catch (err) {
+            console.error('Upload worker loop crashed:', err instanceof Error ? err.message : err)
+        }
+
+        // 4c. Batched Valid='check' patch (10 records/call).
+        if (flags.markCheck && successfulRecordIds.length > 0) {
             try {
-                const fieldsToClear = flags.views.map((v) => VIEW_TO_FIELD[v])
-                await clearAttachments(airtable, target.id, fieldsToClear)
-                for (const view of flags.views) {
-                    const png = pngByView[view]
-                    if (!png) continue
-                    await uploadAttachment(airtable, target.id, VIEW_TO_FIELD[view], {
-                        filename: `${sanitize(guid)}-${view}.png`,
-                        contentType: 'image/png',
-                        bytes: png,
-                    })
-                }
-                ok.push(guid)
-                process.stdout.write(`\r  uploaded ${ok.length}/${targets.length}`)
+                await batchUpdateRecords(
+                    airtable,
+                    successfulRecordIds.map((id) => ({ id, fields: { Valid: 'check' } }))
+                )
+                console.log(`  marked ${successfulRecordIds.length} record(s) Valid='check'`)
             } catch (err) {
-                const msg = err instanceof Error ? (err.stack ?? err.message) : String(err)
-                writeFileSync(resolve(guidDir, 'upload-error.txt'), `${msg}\n`)
-                failed.push({ guid, reason: `upload failed: ${err instanceof Error ? err.message : String(err)}` })
+                console.error('Batch mark failed:', err instanceof Error ? err.message : err)
             }
         }
-        if (ok.length > 0) process.stdout.write('\n')
 
-        // 5. Summary
+        // 5. Summary — always print, even on partial failure.
         console.log(`\n--- summary ---`)
+        console.log(`  rendered: ${uploadCount()} uploaded, ${failed.length} failed`)
         console.log(`  ok:     ${ok.length}`)
         console.log(`  failed: ${failed.length}`)
         for (const f of failed) console.log(`    - ${f.guid}: ${f.reason}`)
@@ -354,6 +466,7 @@ async function main(): Promise<void> {
         if (failed.length > 0) process.exitCode = 1
     } finally {
         releaseLock()
+        closeAirtableClient()
     }
 }
 
