@@ -17,7 +17,7 @@ import {
     INTER_WOFF2_LATIN_600_BASE64,
     INTER_WOFF2_LATIN_700_BASE64,
 } from './inter-svg-font-embed-data'
-import { loadRenderColors } from './color-config'
+import { loadRenderColors, resolveElevationDoorColor } from './color-config'
 
 export interface SVGRenderOptions {
     width?: number
@@ -4108,7 +4108,11 @@ export async function renderDoorElevationSVG(
     isBackView: boolean = false,
     options: SVGRenderOptions = {}
 ): Promise<string> {
-    const opts = normalizeRenderOptions(options)
+    // Elevation door-leaf colour depends on the door's BKP / material class
+    // (CFC 2720 → anthrazit, 2730 → hellbraun, unknown → hellgrau). Caller
+    // overrides via `options.doorColor` still win.
+    const bkpDoorColor = resolveElevationDoorColor(context.csetStandardCH?.cfcBkpCccBcc)
+    const opts = normalizeRenderOptions({ doorColor: bkpDoorColor, ...options })
     const { width: doorWidth, height: doorHeight } = context.viewFrame
 
     // Check if we have detailed geometry

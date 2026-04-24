@@ -180,3 +180,32 @@ export function loadRenderColors(): RenderColors {
 export function __resetRenderColorsCache(): void {
     cachedColors = null
 }
+
+/**
+ * Map the free-text `'CFC / BKP / CCC / BCC'` property from
+ * `Cset_StandardCH` to one of the known door categories.
+ *
+ * Confirmed CFC codes in the Flu21 model:
+ *   CFC 2216  Portes extérieurs metal / Aussentüren, Tore aus Metall  → metal
+ *   CFC 2720  Portes intérieurs en métal / Innentüren aus Metall      → metal
+ *   CFC 2730  Portes intérieurs en bois / Innentüren aus Holz         → wood
+ *
+ * Unknown / missing values return null, which the renderer treats as
+ * `elevation.door.default`.
+ */
+export function classifyDoorBKP(cfcBkpCccBcc: string | null | undefined): DoorBKPCategory | null {
+    if (!cfcBkpCccBcc) return null
+    const code = cfcBkpCccBcc.toUpperCase()
+    if (/\bCFC\s*2(216|720)\b/.test(code) || code.includes('METAL') || code.includes('MÉTAL')) return 'metal'
+    if (/\bCFC\s*2730\b/.test(code) || code.includes('BOIS') || code.includes('HOLZ')) return 'wood'
+    return null
+}
+
+/** Pick the elevation door-leaf colour from the door's BKP classification. */
+export function resolveElevationDoorColor(
+    cfcBkpCccBcc: string | null | undefined,
+    colors: RenderColors = loadRenderColors()
+): string {
+    const category = classifyDoorBKP(cfcBkpCccBcc)
+    return category ? colors.elevation.door.byBKP[category] : colors.elevation.door.default
+}
