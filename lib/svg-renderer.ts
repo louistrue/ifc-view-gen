@@ -89,11 +89,38 @@ function svgWebFontDefs(fontFamily: string): string {
 `
 }
 
+/**
+ * Fixed-scale rendering mode (gated by RENDER_FIXED_SCALE=1).
+ *
+ * When enabled, every door/view uses the same drawing scale and the door is
+ * anchored to the canvas centre horizontally (and vertically in elevations).
+ * Slab-to-slab vertical content (≈10 cm intrusion top + floor + 10 cm bottom)
+ * fills most of the picture height at 210 px/m for a 4 m design-max floor.
+ *
+ * See scripts/airtable-render-round.ts + lib/svg-renderer.ts for the trigger
+ * points. Legacy per-door fit-to-bounds path is preserved when the flag is
+ * off (zero-regression).
+ */
+export function isFixedScaleMode(): boolean {
+    return process.env.RENDER_FIXED_SCALE === '1'
+}
+
+/** px per metre in fixed-scale mode. 4.0 m fits 842 SVG px avail height. */
+export const FIXED_PX_PER_METER = 210
+
+/** Viewport pads used in fixed-scale mode (legacy mode keeps uniform 80 px). */
+export const FIXED_SIDE_PAD_PX = 0
+export const FIXED_TOP_PAD_PX = 24
+export const FIXED_BOTTOM_PAD_PX = 16
+
 /** Plan SVG canvas height = `width × PLAN_SVG_HEIGHT_RATIO` (Grundriss is wider-than-tall, not square). */
 export const PLAN_SVG_HEIGHT_RATIO = 0.5
+/** Slightly taller plan canvas in fixed-scale mode so 1.7 m content fits at 210 px/m. */
+export const PLAN_SVG_HEIGHT_RATIO_FIXED = 0.55
 
 export function planSvgCanvasHeight(canvasWidth: number): number {
-    return Math.round(canvasWidth * PLAN_SVG_HEIGHT_RATIO)
+    const ratio = isFixedScaleMode() ? PLAN_SVG_HEIGHT_RATIO_FIXED : PLAN_SVG_HEIGHT_RATIO
+    return Math.round(canvasWidth * ratio)
 }
 
 // Colour defaults are resolved once from `config/render-colors.json` (palette-
@@ -3048,6 +3075,69 @@ interface RenderMeta {
     planDoorBounds?: ProjectedBounds
     planWallBandBounds?: { minY: number; maxY: number }
     storeyMarkerProjectedY?: number
+    /** Door frame origin projected into the current view (x, y). Used in fixed-scale
+     * mode to anchor the door to the canvas centre so front/back/plan agree on its
+     * horizontal (and elevation-vertical) position. */
+    doorAnchor?: { x: number; y: number }
+}
+
+/**
+ * Pick the drawing scale + offsets for a view.
+ *
+ * Legacy mode: fit-to-bounds (min of availW/contentW, availH/contentH), content
+ * centred in the available area. Matches prior behaviour byte-for-byte.
+ *
+ * Fixed mode (`RENDER_FIXED_SCALE=1`): uses `FIXED_PX_PER_METER`, anchors the
+ * door frame origin to the canvas centre horizontally, and (for elevations)
+ * vertically too — so the same door lands at the same X across front/back/plan.
+ */
+function computeViewTransform(
+    fitBounds: ProjectedBounds,
+    options: Required<SVGRenderOptions>,
+    context: DoorContext | null,
+    sharedDrawingScale: number | undefined,
+    viewType: 'Front' | 'Back' | 'Plan' | '',
+    doorAnchor: { x: number; y: number } | undefined
+): {
+    scale: number
+    offsetX: number
+    offsetY: number
+    viewHeight: number
+} {
+    const metrics = getSvgViewportMetrics(options, context, viewType)
+    const { viewHeight, sidePad, topPad, availWidth, availHeight } = metrics
+    const contentWidth = fitBounds.maxX - fitBounds.minX
+    const contentHeight = fitBounds.maxY - fitBounds.minY
+    const fixed = isFixedScaleMode()
+
+    if (fixed && doorAnchor) {
+        const scale = FIXED_PX_PER_METER
+        // Centre the door's projected origin on the canvas horizontally.
+        const offsetX = options.width / 2 - (doorAnchor.x - fitBounds.minX) * scale
+        // Elevations: centre the door vertically in the available area too.
+        // Plan: keep the traditional "centre the fit bounds" vertical placement so
+        // wall + swing arc remain balanced (plan uses horizontal door anchor only).
+        let offsetY: number
+        if (viewType === 'Plan') {
+            const scaledHeight = contentHeight * scale
+            offsetY = topPad + (availHeight - scaledHeight) / 2
+        } else {
+            offsetY = topPad + availHeight / 2 - (doorAnchor.y - fitBounds.minY) * scale
+        }
+        return { scale, offsetX, offsetY, viewHeight }
+    }
+
+    // Legacy fit-to-bounds path — preserved exactly.
+    const naturalScale = Math.min(
+        availWidth / (contentWidth || 1),
+        availHeight / (contentHeight || 1)
+    )
+    const scale = sharedDrawingScale ?? naturalScale
+    const scaledWidth = contentWidth * scale
+    const scaledHeight = contentHeight * scale
+    const offsetX = sidePad + (availWidth - scaledWidth) / 2
+    const offsetY = topPad + (availHeight - scaledHeight) / 2
+    return { scale, offsetX, offsetY, viewHeight }
 }
 
 function resolveSvgViewTransform(
@@ -3055,7 +3145,8 @@ function resolveSvgViewTransform(
     options: Required<SVGRenderOptions>,
     context: DoorContext | null,
     sharedDrawingScale?: number,
-    viewType: 'Front' | 'Back' | 'Plan' | '' = ''
+    viewType: 'Front' | 'Back' | 'Plan' | '' = '',
+    doorAnchor?: { x: number; y: number }
 ): {
     scale: number
     offsetX: number
@@ -3066,19 +3157,7 @@ function resolveSvgViewTransform(
     // differ between Front/Back/Plan). Passing the actual viewType keeps the precomputed
     // scale consistent with the eventual `generateSVGString` call, otherwise the elevation
     // scale can diverge from the plan scale whenever device/legend visibility changes.
-    const { viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(options, context, viewType)
-    const contentWidth = fitBounds.maxX - fitBounds.minX
-    const contentHeight = fitBounds.maxY - fitBounds.minY
-    const naturalScale = Math.min(
-        availWidth / (contentWidth || 1),
-        availHeight / (contentHeight || 1)
-    )
-    const scale = sharedDrawingScale ?? naturalScale
-    const scaledWidth = contentWidth * scale
-    const scaledHeight = contentHeight * scale
-    const offsetX = padding + (availWidth - scaledWidth) / 2
-    const offsetY = padding + (availHeight - scaledHeight) / 2
-    return { scale, offsetX, offsetY, viewHeight }
+    return computeViewTransform(fitBounds, options, context, sharedDrawingScale, viewType, doorAnchor)
 }
 
 function getViewportClipBounds(
@@ -3384,6 +3463,9 @@ function getSvgViewportMetrics(
     titleBlockHeight: number
     viewHeight: number
     padding: number
+    sidePad: number
+    topPad: number
+    bottomPad: number
     availWidth: number
     availHeight: number
 } {
@@ -3399,10 +3481,15 @@ function getSvgViewportMetrics(
         ? Math.ceil(30 + options.fontSize + Math.max(0, rowCount - 1) * lineStep)
         : 0
     const viewHeight = options.height - titleBlockHeight
-    const padding = 80
-    const availWidth = options.width - padding * 2
-    const availHeight = viewHeight - padding * 2
-    return { titleBlockHeight, viewHeight, padding, availWidth, availHeight }
+    const fixed = isFixedScaleMode()
+    const sidePad = fixed ? FIXED_SIDE_PAD_PX : 80
+    const topPad = fixed ? FIXED_TOP_PAD_PX : 80
+    const bottomPad = fixed ? FIXED_BOTTOM_PAD_PX : 80
+    // `padding` is retained for the legacy call sites that treat it as uniform.
+    const padding = fixed ? Math.max(sidePad, topPad, bottomPad) : 80
+    const availWidth = options.width - sidePad * 2
+    const availHeight = viewHeight - topPad - bottomPad
+    return { titleBlockHeight, viewHeight, padding, sidePad, topPad, bottomPad, availWidth, availHeight }
 }
 
 function createElevationOrthographicCamera(
@@ -3723,7 +3810,7 @@ function generateSVGString(
     const hasSlabs = hasVisibleSlabsForView(renderMeta.context, currentViewType)
     const showLegendActual = showLegend && (hasDevices || hasWall || hasSlabs)
 
-    const { titleBlockHeight, viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(
+    const { titleBlockHeight, viewHeight } = getSvgViewportMetrics(
         options,
         renderMeta.context,
         currentViewType
@@ -3774,17 +3861,17 @@ function generateSVGString(
     const contentWidth = maxX - minX
     const contentHeight = maxY - minY
 
-    const naturalScale = Math.min(
-        availWidth / (contentWidth || 1),
-        availHeight / (contentHeight || 1)
+    const { scale, offsetX, offsetY } = computeViewTransform(
+        { minX, maxX, minY, maxY },
+        options,
+        renderMeta.context,
+        renderMeta.sharedDrawingScale,
+        currentViewType,
+        renderMeta.doorAnchor
     )
-    const scale = renderMeta.sharedDrawingScale ?? naturalScale
 
-    // Calculate offset to center content in the view area
     const scaledWidth = contentWidth * scale
     const scaledHeight = contentHeight * scale
-    const offsetX = padding + (availWidth - scaledWidth) / 2
-    const offsetY = padding + (availHeight - scaledHeight) / 2
 
     // Transform function
     const transformX = (x: number) => (x - minX) * scale + offsetX
@@ -4773,6 +4860,13 @@ function renderElevationFromMeshes(
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
 
+    const doorAnchor = isFixedScaleMode()
+        ? (() => {
+            const p = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
+            return { x: p.x, y: p.y }
+        })()
+        : undefined
+
     return generateSVGString(
         renderGeometry.edges,
         renderGeometry.polygons,
@@ -4786,6 +4880,7 @@ function renderElevationFromMeshes(
             suppressSyntheticWallBands: true,
             storeyMarkerProjectedY: projectStoreyMarkerLevelY(context, camera, frustumWidth, frustumHeight),
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
+            ...(doorAnchor ? { doorAnchor } : {}),
         }
     )
 }
@@ -4964,7 +5059,11 @@ export async function renderDoorPlanSVG(
     /** When rendering with `renderDoorViews`, pass front elevation scale so plan matches Vorderansicht. */
     sharedScaleFromFront?: number
 ): Promise<string> {
-    const merged = normalizeRenderOptions(options)
+    // Plan door leaf follows the same BKP classification as elevation, so a
+    // metal door reads anthrazit in all three views (spec says "fully
+    // consistent colours"). Caller overrides via options.doorColor still win.
+    const bkpDoorColor = resolveElevationDoorColor(context.csetStandardCH?.cfcBkpCccBcc)
+    const merged = normalizeRenderOptions({ doorColor: bkpDoorColor, ...options })
     const opts: Required<SVGRenderOptions> = {
         ...merged,
         height: planSvgCanvasHeight(merged.width),
@@ -5700,6 +5799,13 @@ function renderPlanFromMeshes(
     renderGeometry.polygons.push(...hostGeometry.polygons)
     const hasPlanWallGeometry = hostGeometry.edges.length > 0 || hostGeometry.polygons.length > 0
 
+    const doorAnchor = isFixedScaleMode()
+        ? (() => {
+            const p = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
+            return { x: p.x, y: p.y }
+        })()
+        : undefined
+
     return generateSVGString(
         renderGeometry.edges,
         renderGeometry.polygons,
@@ -5713,6 +5819,7 @@ function renderPlanFromMeshes(
             planDoorBounds,
             planWallBandBounds: { minY: planWallBandBounds.minY, maxY: planWallBandBounds.maxY },
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
+            ...(doorAnchor ? { doorAnchor } : {}),
         }
     )
 }
