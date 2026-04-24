@@ -6,14 +6,18 @@
  * whole drawing shifts. If the JSON is missing or malformed we fall back to
  * the hardcoded defaults embedded below so renders never break.
  *
+ * The JSON is imported as a module (bundled by webpack for the browser, read
+ * by Node for scripts) — no `node:fs` at runtime, so this module stays
+ * bundleable from `components/IFCViewer.tsx` without pulling server-only
+ * schemes into the browser build.
+ *
  * `DoorBKPCategory` ships with this module because it's what `elevation.door.byBKP`
  * keys on — kept here so the classifier and the palette stay in one place.
  *
  * `WallBKPCategory` is the wall analog (CFC 2711 gypsum/drywall vs. default
  * concrete-ish). Classifier lives alongside the door one.
  */
-import { readFileSync } from 'node:fs'
-import { resolve as resolvePath } from 'node:path'
+import renderColorsJson from '../config/render-colors.json'
 
 export type DoorBKPCategory = 'metal' | 'wood' | 'context'
 export type WallBKPCategory = 'drywall'
@@ -201,14 +205,10 @@ export function loadRenderColors(): RenderColors {
     if (cachedColors) return cachedColors
     let config: RenderColorsConfig = FALLBACK_CONFIG
     try {
-        const jsonPath = resolvePath(process.cwd(), 'config/render-colors.json')
-        const raw = readFileSync(jsonPath, 'utf8')
-        config = JSON.parse(raw) as RenderColorsConfig
+        // The JSON is bundled at build time — no fs read at runtime.
+        config = renderColorsJson as RenderColorsConfig
     } catch (err) {
-        // File missing in a deployment bundle, or JSON malformed — keep defaults.
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-            console.warn('[color-config] failed to load config/render-colors.json; using built-in defaults:', err)
-        }
+        console.warn('[color-config] failed to parse bundled render-colors.json; using built-in defaults:', err)
     }
     cachedColors = resolveColors(config)
     return cachedColors
