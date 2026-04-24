@@ -15,14 +15,13 @@ import { renderDoorViews, type SVGRenderOptions } from './svg-renderer'
 
 export type DoorView = 'front' | 'back' | 'plan'
 
+// Colour defaults come from `config/render-colors.json` (see DEFAULT_OPTIONS in
+// svg-renderer.ts). Do NOT hardcode colour fields here — they would override
+// the palette and silently undo Phases 1–5 of the colour-config rollout.
 export const DEFAULT_ROUND_RENDER_OPTIONS: SVGRenderOptions = {
     width: 1000,
     height: 1000,
     margin: 0.5,
-    doorColor: '#dedede',
-    wallColor: '#e3e3e3',
-    deviceColor: '#fcc647',
-    lineColor: '#000000',
     lineWidth: 1.5,
     showLegend: true,
     showLabels: true,
