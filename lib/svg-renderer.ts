@@ -1931,6 +1931,11 @@ function createSemanticElevationNearbyDoorGeometry(
     const nearbyDoorMeshes = getNearbyDoorMeshes(context)
 
     if (nearbyDoorMeshes.length > 0) {
+        // `cullMode: 'none'` so single-sided glazing panels render in BOTH
+        // front and back views. With 'camera-facing' their outward-facing
+        // normal gets culled on whichever side faces away from the camera,
+        // which is why adjacent doors rendered blue glass on one view and
+        // grey frame-only on the other (0OLNP8lGUkIgzNri… case).
         const projected = collectProjectedGeometry(
             nearbyDoorMeshes,
             context,
@@ -1940,7 +1945,7 @@ function createSemanticElevationNearbyDoorGeometry(
             height,
             false,
             -0.25,
-            'camera-facing',
+            'none',
             true,
             DOOR_EDGE_STROKE_FACTOR
         )
@@ -4888,7 +4893,14 @@ function filterContextForElevationOcclusion(
     // keep genuine cut walls on both views while still dropping parallel
     // walls that live fully behind/in front of the host wall plane (the
     // 00u5qp… tan-rect case).
-    const isWallOccluded = (bbox: THREE.Box3 | null | undefined): boolean => {
+    // Band-intersection drop: a cut wall/door at the door jamb has its bbox
+    // CENTRE deep into one room but its bbox STRADDLES the host wall plane
+    // (min near -tol, max far on one side). Dropping by centre hides the cut
+    // face from the view "behind" it. Testing whether the bbox touches the
+    // straddle band keeps genuine cut elements on both views while still
+    // dropping parallel elements that live fully behind/in front of the host
+    // wall plane.
+    const isElementOccluded = (bbox: THREE.Box3 | null | undefined): boolean => {
         if (!bbox) return false
         let sideMin = Infinity
         let sideMax = -Infinity
@@ -4898,17 +4910,21 @@ function filterContextForElevationOcclusion(
             if (s > sideMax) sideMax = s
         }
         if (!Number.isFinite(sideMin)) return false
-        // Intersects the straddle band → cut wall, keep on both views.
         if (sideMin <= +tol && sideMax >= -tol) return false
-        // Entirely on one side → drop from the opposite view.
         const side = sideMin > +tol ? +1 : sideMax < -tol ? -1 : 0
         return side === sideToDrop
     }
-    const filteredWalls = context.nearbyWalls.filter((w) => !isWallOccluded(w.boundingBox ?? null))
+    const filteredWalls = context.nearbyWalls.filter((w) => !isElementOccluded(w.boundingBox ?? null))
+    // Adjacent doors need band-intersection too: a cut-door embedded in the
+    // host wall has a thin glazing sub-mesh entirely on one side of the
+    // plane. With centre-based per-mesh filtering the glazing gets dropped
+    // from the opposite view and the door reads as solid wall-colour on one
+    // side and glass-colour on the other (0OLNP8lGUkIgzNri… case).
+    const filteredNearbyDoors = context.nearbyDoors.filter((d) => !isElementOccluded(d.boundingBox ?? null))
 
     const filteredContext: DoorContext = {
         ...context,
-        nearbyDoors: filterElements(context.nearbyDoors, 'nearbyDoor'),
+        nearbyDoors: filteredNearbyDoors,
         nearbyWindows: context.nearbyWindows ? filterElements(context.nearbyWindows, 'nearbyWindow') : context.nearbyWindows,
         nearbyWalls: filteredWalls,
         nearbyStairs: filterElements(context.nearbyStairs, 'nearbyStair'),
@@ -4931,7 +4947,17 @@ function filterContextForElevationOcclusion(
                     return typeof id === 'number' && keptIds.has(id)
                 })
             })(),
-            nearbyDoorMeshes: filterMeshes(context.detailedGeometry.nearbyDoorMeshes),
+            // Keep ALL sub-meshes of kept adjacent doors — a thin glazing
+            // panel's own bbox can classify as -1/+1 even when the parent
+            // door straddles, and dropping it leaves the door with no glass
+            // colour on one of the two views.
+            nearbyDoorMeshes: (() => {
+                const keptIds = new Set(filteredNearbyDoors.map((d) => d.expressID))
+                return context.detailedGeometry.nearbyDoorMeshes.filter((m) => {
+                    const id = m.userData?.expressID
+                    return typeof id === 'number' && keptIds.has(id)
+                })
+            })(),
             nearbyWindowMeshes: filterMeshes(context.detailedGeometry.nearbyWindowMeshes),
             stairMeshes: filterMeshes(context.detailedGeometry.stairMeshes),
             deviceMeshes: filterMeshes(context.detailedGeometry.deviceMeshes),
