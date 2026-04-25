@@ -2899,8 +2899,147 @@ export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
         )
     )
     const partMeshes = getWallAggregatePartMeshesForParent(context, hostWallExpressID)
-    const merged = [...direct, ...partMeshes]
+    // Filter out parts that don't actually live in the host wall's plane.
+    // 2Rm25Ks_f5J case: the host wall has 5 IfcBuildingElementParts whose
+    // 3D bboxes extend 3–7 m perpendicular to the wall (mullions or auxiliary
+    // geometry the modeller attached to the wall). Their projection in
+    // elevation appears as vertical "ghost frame" strips next to the door.
+    const filteredParts = filterCoplanarPartMeshes(context, partMeshes)
+    const merged = [...direct, ...filteredParts]
     return merged
+}
+
+function filterCoplanarPartMeshes(context: DoorContext, parts: THREE.Mesh[]): THREE.Mesh[] {
+    const host = context.hostWall
+    if (!host?.boundingBox) return parts
+    const facing = context.viewFrame.semanticFacing
+
+    const measureDepth = (bb: THREE.Box3): { min: number; max: number } => {
+        const corners = [
+            new THREE.Vector3(bb.min.x, bb.min.y, bb.min.z),
+            new THREE.Vector3(bb.max.x, bb.min.y, bb.min.z),
+            new THREE.Vector3(bb.min.x, bb.max.y, bb.min.z),
+            new THREE.Vector3(bb.max.x, bb.max.y, bb.min.z),
+            new THREE.Vector3(bb.min.x, bb.min.y, bb.max.z),
+            new THREE.Vector3(bb.max.x, bb.min.y, bb.max.z),
+            new THREE.Vector3(bb.min.x, bb.max.y, bb.max.z),
+            new THREE.Vector3(bb.max.x, bb.max.y, bb.max.z),
+        ]
+        let mn = Infinity, mx = -Infinity
+        for (const c of corners) {
+            const v = c.dot(facing)
+            if (v < mn) mn = v
+            if (v > mx) mx = v
+        }
+        return { min: mn, max: mx }
+    }
+
+    const hostDepth = measureDepth(host.boundingBox)
+    const hostExtent = hostDepth.max - hostDepth.min
+    const tol = Math.max(hostExtent, 0.1)
+    const out: THREE.Mesh[] = []
+    for (const mesh of parts) {
+        const geom = mesh.geometry as THREE.BufferGeometry | undefined
+        if (!geom) { out.push(mesh); continue }
+        if (!geom.boundingBox) geom.computeBoundingBox()
+        const local = geom.boundingBox
+        if (!local) { out.push(mesh); continue }
+        mesh.updateMatrixWorld(true)
+        const world = local.clone().applyMatrix4(mesh.matrixWorld)
+        const partDepth = measureDepth(world)
+        // Drop if the part lies entirely outside the host wall's depth band
+        // (centre well off plane) OR its depth extent dwarfs the wall's.
+        const partCenter = (partDepth.min + partDepth.max) / 2
+        const hostCenter = (hostDepth.min + hostDepth.max) / 2
+        if (Math.abs(partCenter - hostCenter) > tol) continue
+        const partExtent = partDepth.max - partDepth.min
+        if (partExtent > Math.max(hostExtent * 3, 0.6)) continue
+        out.push(mesh)
+    }
+    return out
+}
+
+/**
+ * Express IDs of nearby walls that are coplanar with the host wall. These
+ * walls share the same plane as the host (storefront / curtain-wall layouts
+ * commonly use multiple IfcWalls sharing one plane, with the door hosted by
+ * a tiny stub) and should be treated as part of the host for corridor and
+ * footprint calculations — without this, doors like 03X27dQWY render with
+ * whitespace next to the door because the stub's mesh-cut extent is only a
+ * few centimetres wide.
+ */
+export function getCoplanarHostWallExpressIDs(context: DoorContext): Set<number> {
+    const out = new Set<number>()
+    const host = context.hostWall
+    if (!host?.boundingBox) return out
+    const frame = context.viewFrame
+    const facing = frame.semanticFacing
+
+    const measureDepth = (bb: THREE.Box3): { min: number; max: number } => {
+        const corners = [
+            new THREE.Vector3(bb.min.x, bb.min.y, bb.min.z),
+            new THREE.Vector3(bb.max.x, bb.min.y, bb.min.z),
+            new THREE.Vector3(bb.min.x, bb.max.y, bb.min.z),
+            new THREE.Vector3(bb.max.x, bb.max.y, bb.min.z),
+            new THREE.Vector3(bb.min.x, bb.min.y, bb.max.z),
+            new THREE.Vector3(bb.max.x, bb.min.y, bb.max.z),
+            new THREE.Vector3(bb.min.x, bb.max.y, bb.max.z),
+            new THREE.Vector3(bb.max.x, bb.max.y, bb.max.z),
+        ]
+        let minC = Infinity, maxC = -Infinity
+        for (const c of corners) {
+            const v = c.dot(facing)
+            if (v < minC) minC = v
+            if (v > maxC) maxC = v
+        }
+        return { min: minC, max: maxC }
+    }
+
+    const hostDepth = measureDepth(host.boundingBox)
+    const hostExtent = hostDepth.max - hostDepth.min
+    const hostCenter = (hostDepth.max + hostDepth.min) / 2
+    // Coplanar = same plane: thin (wall-thickness scale) AND centred near
+    // the host's plane. A perpendicular wall extending through rooms also
+    // overlaps the host plane in bbox sense, but its depth extent is room-
+    // sized, not wall-thickness — including those would render the whole
+    // perpendicular wall mesh as part of the elevation backdrop, which
+    // shows up as parallel vertical "ghost frame" strips next to the door
+    // (3wtKbl_FJ case).
+    const MAX_COPLANAR_EXTENT = Math.max(hostExtent * 2, 0.6)
+    const CENTER_TOL = Math.max(hostExtent, 0.1)
+    for (const wall of context.nearbyWalls) {
+        if (!wall.boundingBox || wall.expressID === host.expressID) continue
+        const wd = measureDepth(wall.boundingBox)
+        const wallExtent = wd.max - wd.min
+        if (wallExtent > MAX_COPLANAR_EXTENT) continue
+        const wallCenter = (wd.max + wd.min) / 2
+        if (Math.abs(wallCenter - hostCenter) > CENTER_TOL) continue
+        out.add(wall.expressID)
+    }
+    return out
+}
+
+/**
+ * Like getHostWallMeshes but additionally pulls coplanar nearby-wall meshes
+ * (and their aggregate parts). Used for computing the wall corridor extent
+ * and the elevation footprint so storefront / curtain-wall layouts render
+ * the full continuous wall, not just the door-hosting stub.
+ */
+export function getHostAndCoplanarWallMeshes(context: DoorContext): THREE.Mesh[] {
+    const host = getHostWallMeshes(context)
+    const coplanarIDs = getCoplanarHostWallExpressIDs(context)
+    if (coplanarIDs.size === 0 || !context.detailedGeometry) return host
+    const out: THREE.Mesh[] = [...host]
+    for (const m of context.detailedGeometry.nearbyWallMeshes) {
+        const eid = m.userData?.expressID
+        if (typeof eid === 'number' && coplanarIDs.has(eid)) out.push(m)
+    }
+    for (const m of context.detailedGeometry.wallAggregatePartMeshes ?? []) {
+        const partId = m.userData?.expressID
+        const link = context.wallAggregatePartLinks?.find((l) => l.part.expressID === partId)
+        if (link && coplanarIDs.has(link.parentWallExpressID)) out.push(m)
+    }
+    return out
 }
 
 /**

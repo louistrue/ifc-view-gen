@@ -6,6 +6,8 @@ import {
     getHostCeilingMeshes,
     getHostSlabMeshes,
     getHostWallMeshes,
+    getHostAndCoplanarWallMeshes,
+    getCoplanarHostWallExpressIDs,
     getNearbyDoorMeshes,
     getNearbyWindowMeshes,
     getNearbyStairMeshes,
@@ -18,6 +20,7 @@ import {
     INTER_WOFF2_LATIN_700_BASE64,
 } from './inter-svg-font-embed-data'
 import {
+    classifyDoorBKP,
     isSafetyDevice,
     loadRenderColors,
     resolveElevationDoorColor,
@@ -2168,8 +2171,12 @@ function createSemanticElevationNearbyWallGeometry(
     const depthHalfWidth = Math.max(frame.thickness, 0.20) + 0.20
 
     const nearbyWallMeshesAll = getNearbyWallMeshes(context)
+    // Coplanar nearby walls are rendered as part of the host wall (mesh fill +
+    // edges); skipping them here avoids duplicate "schematic rect" overlays.
+    const coplanarHostWallIDs = getCoplanarHostWallExpressIDs(context)
 
     for (const wall of context.nearbyWalls) {
+        if (coplanarHostWallIDs.has(wall.expressID)) continue
         // Prefer true cross-section from mesh vertices within the door's
         // depth band — matches what's actually visible at the cut plane.
         // Falls back to the element bbox if no mesh is available.
@@ -2967,7 +2974,10 @@ function getSharedLateralExtentLocal(
     // the rendered footprint. Falls back to all segments if no closed loops
     // emerge (sparse meshes).
     const allSegs: Array<{ a: THREE.Vector3; b: THREE.Vector3 }> = []
-    for (const mesh of getHostWallMeshes(context)) {
+    // Include coplanar nearby walls so the corridor extent reflects the FULL
+    // wall in storefront / curtain-wall layouts where the door is hosted by
+    // a tiny stub (03X27dQWY: 8 cm host stub plus 40 m coplanar wall).
+    for (const mesh of getHostAndCoplanarWallMeshes(context)) {
         allSegs.push(...extractMeshSectionSegments(mesh, cutY))
     }
     if (allSegs.length === 0) return null
@@ -3266,6 +3276,100 @@ function clipEdgeToBounds(edge: ProjectedEdge, bounds: ProjectedBounds): Project
     }
 }
 
+/**
+ * Subtract `rect` from `edge`: returns 0–2 segments of the original edge that
+ * fall OUTSIDE the rect. Edges entirely inside the rect produce []; edges
+ * that don't touch the rect produce the input edge unchanged. Used to occlude
+ * background mesh edges (e.g. host wall jamb verticals continuing through
+ * the floor build-up below the door bottom) by foreground polygon AABBs
+ * (slab/ceiling/perpendicular wall rects). Mirrors the user's mental model
+ * for the elevation: lines "behind" a foreground element are hidden.
+ */
+function subtractRectFromEdge(edge: ProjectedEdge, rect: ProjectedBounds): ProjectedEdge[] {
+    const dx = edge.x2 - edge.x1
+    const dy = edge.y2 - edge.y1
+
+    let t0 = 0
+    let t1 = 1
+
+    const test = (p: number, q: number): boolean => {
+        if (Math.abs(p) < 1e-9) return q >= 0
+        const r = q / p
+        if (p < 0) {
+            if (r > t1) return false
+            if (r > t0) t0 = r
+        } else {
+            if (r < t0) return false
+            if (r < t1) t1 = r
+        }
+        return true
+    }
+
+    if (
+        !test(-dx, edge.x1 - rect.minX)
+        || !test(dx, rect.maxX - edge.x1)
+        || !test(-dy, edge.y1 - rect.minY)
+        || !test(dy, rect.maxY - edge.y1)
+    ) {
+        return [edge]
+    }
+
+    const out: ProjectedEdge[] = []
+    const TOL = 1e-3
+    if (t0 > TOL) {
+        out.push({
+            ...edge,
+            x2: edge.x1 + t0 * dx,
+            y2: edge.y1 + t0 * dy,
+        })
+    }
+    if (t1 < 1 - TOL) {
+        out.push({
+            ...edge,
+            x1: edge.x1 + t1 * dx,
+            y1: edge.y1 + t1 * dy,
+        })
+    }
+    return out
+}
+
+function getPolygonAABB(points: { x: number; y: number }[]): ProjectedBounds | null {
+    if (points.length === 0) return null
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const p of points) {
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+        if (p.y < minY) minY = p.y
+        if (p.y > maxY) maxY = p.y
+    }
+    if (maxX - minX < 1e-3 || maxY - minY < 1e-3) return null
+    return { minX, maxX, minY, maxY }
+}
+
+function occludeEdgesByPolygons(
+    edges: ProjectedEdge[],
+    occluderPolygons: ProjectedPolygon[]
+): ProjectedEdge[] {
+    if (edges.length === 0 || occluderPolygons.length === 0) return edges
+    const rects: ProjectedBounds[] = []
+    for (const poly of occluderPolygons) {
+        const aabb = getPolygonAABB(poly.points)
+        if (aabb) rects.push(aabb)
+    }
+    if (rects.length === 0) return edges
+    let working = edges
+    for (const rect of rects) {
+        const next: ProjectedEdge[] = []
+        for (const edge of working) {
+            for (const seg of subtractRectFromEdge(edge, rect)) {
+                next.push(seg)
+            }
+        }
+        working = next
+    }
+    return working
+}
+
 function clipPolygonToBounds(points: { x: number; y: number }[], bounds: ProjectedBounds): { x: number; y: number }[] {
     type Point2D = { x: number; y: number }
 
@@ -3467,10 +3571,30 @@ function clipProjectedGeometryToBounds(
         }
     }
 
+    // Drop edges that lie EXACTLY on the lateral crop boundary (minX or
+    // maxX). When the corridor cuts content mid-extent, the cut should be
+    // invisible — no black "closing line" along the lateral crop. Edges
+    // are in PROJECTED METRES (output of `projectPoint(... frustumWidth ...)`),
+    // not pixels, so the eps must be a tight metre value: 1 mm matches
+    // floating-point clipping precision without flagging real geometry that
+    // happens to live near the boundary (e.g. a perpendicular wall's near
+    // face ~3 cm inside the corridor).
+    const BOUNDARY_EPS = 0.001
+    const isOnLateralBoundary = (e: ProjectedEdge): boolean => {
+        if (Math.abs(e.x1 - e.x2) > BOUNDARY_EPS) return false
+        const onMinX =
+            Math.abs(e.x1 - bounds.minX) < BOUNDARY_EPS
+            && Math.abs(e.x2 - bounds.minX) < BOUNDARY_EPS
+        const onMaxX =
+            Math.abs(e.x1 - bounds.maxX) < BOUNDARY_EPS
+            && Math.abs(e.x2 - bounds.maxX) < BOUNDARY_EPS
+        return onMinX || onMaxX
+    }
+
     const edges: ProjectedEdge[] = []
     for (const edge of geometry.edges) {
         const clippedEdge = clipEdgeToBounds(edge, bounds)
-        if (clippedEdge) {
+        if (clippedEdge && !isOnLateralBoundary(clippedEdge)) {
             edges.push({ ...clippedEdge, skipClip: true })
         }
     }
@@ -3677,10 +3801,16 @@ function projectStoreyMarkerLevelY(
     width: number,
     height: number
 ): number {
+    const offset = getStoreyMarkerLevelOffsetMeters(context)
     const markerPoint = context.viewFrame.origin.clone().add(
-        context.viewFrame.upAxis.clone().multiplyScalar(getStoreyMarkerLevelOffsetMeters(context))
+        context.viewFrame.upAxis.clone().multiplyScalar(offset)
     )
-    return projectPoint(markerPoint, camera, width, height).y
+    const projected = projectPoint(markerPoint, camera, width, height)
+    if (process.env.DEBUG_MARKER === '1') {
+        const originB = context.viewFrame.origin.dot(context.viewFrame.upAxis)
+        console.log(`[marker] door=${context.doorId} storey=${context.storeyName} storeyElevation=${context.storeyElevation} originB=${originB.toFixed(3)} offset=${offset.toFixed(3)} markerWorld.y=${markerPoint.y.toFixed(2)}`)
+    }
+    return projected.y
 }
 
 function renderStoreyMarkerSvg(
@@ -3847,19 +3977,13 @@ function collectFrontElevationFitGeometry(
     return elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry
 }
 
-function computeFrontElevationScale(context: DoorContext, opts: Required<SVGRenderOptions>): number | undefined {
-    const fit = collectFrontElevationFitGeometry(context, opts)
-    if (!fit) {
-        return undefined
-    }
-    const fitBounds = getBoundsFromProjectedGeometry(fit.edges, fit.polygons)
-    if (!fitBounds) {
-        return undefined
-    }
-    const { availWidth, availHeight } = getSvgViewportMetrics(opts, context, 'Front')
-    const contentWidth = fitBounds.maxX - fitBounds.minX
-    const contentHeight = fitBounds.maxY - fitBounds.minY
-    return Math.min(availWidth / (contentWidth || 1), availHeight / (contentHeight || 1))
+function computeFrontElevationScale(_context: DoorContext, _opts: Required<SVGRenderOptions>): number | undefined {
+    // The front elevation always renders at FIXED_PX_PER_METER (see
+    // `computeViewTransform` for non-Plan views). Plan must match so the door
+    // sits at exactly the same canvas size — otherwise stacking plan above
+    // elevation left-aligned shows the door drifting (especially in -1 UG
+    // where the storey-clip content height makes natural-fit ≠ FIXED).
+    return FIXED_PX_PER_METER
 }
 
 interface WallRevealRect {
@@ -4585,17 +4709,21 @@ function collectDoorMeshGeometry(
 
     // Fills: every door sub-mesh (frame, leaf, glazing…) projects its real
     // footprint so the door reads as a continuous shape in the door-colour.
-    // Frame / header / jamb sub-meshes paint anthrazit (metal frame, BKP
-    // 2720) regardless of the leaf's BKP, so a wood door's leaf still reads
-    // hellbraun while its frame reads anthrazit ('missing anthrazit in
-    // rahmen' fix). Glazing keeps glass colour. Leaf keeps the BKP-resolved
+    // Frame / header / jamb sub-meshes paint anthrazit (metal frame) when
+    // the door is metal or has no BKP, since real-world frames around glass
+    // / steel doors are metal. Wood-BKP doors get a wood frame too — typical
+    // residential / interior construction is wood-on-wood, not wood leaf in
+    // a metal frame. Glazing keeps glass colour. Leaf keeps the BKP-resolved
     // doorColor.
     // Edges: web-ifc splits the door into several sub-meshes and each one
     // contributes its own silhouette rectangle, which layered on top of each
     // other looked like multiple schematic frame outlines. Instead, draw ONE
     // outer silhouette (union of all door meshes, via a frame-axis-aligned
     // rect from the real projected footprint) + the leaf silhouette inside.
-    const frameColor = COLORS.elevation.door.byBKP.metal
+    const doorBKPCategory = classifyDoorBKP(context.csetStandardCH?.cfcBkpCccBcc)
+    const frameColor = doorBKPCategory === 'wood'
+        ? COLORS.elevation.door.byBKP.wood
+        : COLORS.elevation.door.byBKP.metal
     for (const mesh of doorMeshes) {
         const expressID = mesh.userData.expressID
         const style = getMeshPolygonStyle(mesh, expressID, context, options, true)
@@ -4950,8 +5078,15 @@ function filterContextForElevationOcclusion(
             if (s > sideMax) sideMax = s
         }
         if (!Number.isFinite(sideMin)) return false
-        if (sideMin <= +tol && sideMax >= -tol) return false
-        const side = sideMin > +tol ? +1 : sideMax < -tol ? -1 : 0
+        // Strict straddle: the bbox must span CLEARLY past both sides of the
+        // band, not merely touch one edge. The previous loose check (any
+        // overlap with the band) kept doors fully in the back room whose
+        // near-face barely poked into the band — they appeared as adjacent
+        // doors in elevation even though they're "behind" the cut plane.
+        const trulyStraddles = sideMin < -tol && sideMax > +tol
+        if (trulyStraddles) return false
+        const center = (sideMin + sideMax) / 2
+        const side = center > +tol ? +1 : center < -tol ? -1 : 0
         return side === sideToDrop
     }
     const filteredWalls = context.nearbyWalls.filter((w) => !isElementOccluded(w.boundingBox ?? null))
@@ -4960,7 +5095,30 @@ function filterContextForElevationOcclusion(
     // plane. With centre-based per-mesh filtering the glazing gets dropped
     // from the opposite view and the door reads as solid wall-colour on one
     // side and glass-colour on the other (0OLNP8lGUkIgzNri… case).
-    const filteredNearbyDoors = context.nearbyDoors.filter((d) => !isElementOccluded(d.boundingBox ?? null))
+    // BUT: an "adjacent door" must actually be NEAR the host wall plane.
+    // Doors deep in the room (e.g. 0TwHxk1LH at depth 1.6 m off plane)
+    // pass the half-space test (camera side) but architecturally belong to
+    // a different wall — projecting their meshes from inside the room
+    // creates a "ghost" door overlay (3wtKbl_FJ case). Require the bbox
+    // centre to be within ~door-thickness of the host plane.
+    const NEARBY_DOOR_DEPTH_TOLERANCE = Math.max(context.viewFrame.thickness, 0.08) + 0.10
+    const isFarFromWallPlane = (bbox: THREE.Box3 | null | undefined): boolean => {
+        if (!bbox) return false
+        let mn = Infinity, mx = -Infinity
+        for (const corner of box3Corners(bbox)) {
+            const s = corner.dot(normal) - planeD
+            if (s < mn) mn = s
+            if (s > mx) mx = s
+        }
+        if (!Number.isFinite(mn)) return false
+        const center = (mn + mx) / 2
+        return Math.abs(center) > NEARBY_DOOR_DEPTH_TOLERANCE
+    }
+    const filteredNearbyDoors = context.nearbyDoors.filter((d) => {
+        if (isElementOccluded(d.boundingBox ?? null)) return false
+        if (isFarFromWallPlane(d.boundingBox ?? null)) return false
+        return true
+    })
     // Devices straddling the host wall plane (mounted in/at the door jamb)
     // belong on both views — surface socket on one side, J-box flush in the
     // wall, etc. Centre-based filter drops them from one view; band-
@@ -5156,8 +5314,9 @@ function renderElevationFromMeshes(
     // `extractEdges`' 30° sharp-edge filter, which drops the coplanar seams
     // web-ifc's door-opening boolean cut produces at the jamb x-coordinates.
     // Keeping silhouette edges is what makes a T-junction perpendicular wall
-    // visible in elevation (its end-face rectangle).
-    const wallMeshes = getHostWallMeshes(context)
+    // visible in elevation (its end-face rectangle). Includes coplanar
+    // nearby walls so storefront layouts render as one continuous wall.
+    const wallMeshes = getHostAndCoplanarWallMeshes(context)
     const wallProjected = wallMeshes.length > 0
         ? clipProjectedGeometryToBounds(
             collectProjectedGeometry(
@@ -5176,11 +5335,30 @@ function renderElevationFromMeshes(
             elevationHostClipBounds
         )
         : { edges: [] as ProjectedEdge[], polygons: [] as ProjectedPolygon[] }
+    // Compute foreground geometries first so we can occlude wall mesh edges
+    // by them. The user's mental model: cut at the door plane, show what's
+    // at the cut + within view depth, hide things further behind. So lines
+    // from the host wall that fall inside the projected footprint of a
+    // foreground polygon (slab/ceiling/perpendicular wall) are hidden — the
+    // foreground element "covers" the wall there. Devices/safety symbols are
+    // pushed AFTER (and remain on top) since they're the only background
+    // elements the user explicitly wants visible through walls.
+    const clippedNearbyWallGeometry = tagEdges(clipProjectedGeometryToBounds(
+        nearbyWallGeometry,
+        elevationHostClipBounds
+    ), '#3b82f6') // blue = nearby walls
+    const slabGeometry = tagEdges(clipProjectedGeometryToBounds(slabGeometryRaw, elevationHostClipBounds), '#eab308') // yellow = slab
+    const ceilingGeometry = tagEdges(clipProjectedGeometryToBounds(ceilingGeometryRaw, elevationHostClipBounds), '#ec4899') // pink = ceiling
+    const wallEdgeOccluders: ProjectedPolygon[] = [
+        ...slabGeometry.polygons,
+        ...ceilingGeometry.polygons,
+        ...clippedNearbyWallGeometry.polygons,
+    ]
     // Force host-wall fills to full opacity — elevation shows solid geometry,
     // not a translucent ghosting of the mesh.
     const wallGeometry = tagEdges(
         {
-            edges: wallProjected.edges,
+            edges: occludeEdgesByPolygons(wallProjected.edges, wallEdgeOccluders),
             polygons: wallProjected.polygons.map((p) => ({ ...p, fillOpacity: 1 })),
         },
         '#ef4444'
@@ -5189,16 +5367,10 @@ function renderElevationFromMeshes(
     // user wants only real 3D mesh silhouettes in elevation, no artificial lines.
     renderGeometry.edges.push(...wallGeometry.edges)
     renderGeometry.polygons.push(...wallGeometry.polygons)
-    const clippedNearbyWallGeometry = tagEdges(clipProjectedGeometryToBounds(
-        nearbyWallGeometry,
-        elevationHostClipBounds
-    ), '#3b82f6') // blue = nearby walls
     renderGeometry.edges.push(...clippedNearbyWallGeometry.edges)
     renderGeometry.polygons.push(...clippedNearbyWallGeometry.polygons)
-    const slabGeometry = tagEdges(clipProjectedGeometryToBounds(slabGeometryRaw, elevationHostClipBounds), '#eab308') // yellow = slab
     renderGeometry.edges.push(...slabGeometry.edges)
     renderGeometry.polygons.push(...slabGeometry.polygons)
-    const ceilingGeometry = tagEdges(clipProjectedGeometryToBounds(ceilingGeometryRaw, elevationHostClipBounds), '#ec4899') // pink = ceiling
     renderGeometry.edges.push(...ceilingGeometry.edges)
     renderGeometry.polygons.push(...ceilingGeometry.polygons)
     const stairGeometry = tagEdges(clipProjectedGeometryToBounds(stairGeometryRaw, elevationHostClipBounds), '#6366f1') // indigo = stair
@@ -6118,21 +6290,38 @@ function renderPlanFromMeshes(
         const rightPt = frame.origin.clone().add(widthAxisN.clone().multiplyScalar(planLatMax))
         const leftProj = projectPoint(leftPt, camera, frustumWidth, frustumHeight).x
         const rightProj = projectPoint(rightPt, camera, frustumWidth, frustumHeight).x
+        // Depth-axis (perpendicular to wall) clip: same idea as lateral —
+        // anything outside the wall thickness band (+ swing arc on the open
+        // side) is in another room and shouldn't appear. 1zXqD3S6hGHA3…
+        // case: an adjacent door body sat below the wall band in plan and
+        // bled into open space because plan only clipped horizontally.
+        const depthBackPad = halfT + planCropM
+        const depthFrontPad = hasSwingArc
+            ? Math.max(arcReach, halfT + planCropM)
+            : halfT + planCropM
+        const facing = frame.semanticFacing.clone().normalize()
+        const opening = openAxisFit.clone().normalize()
+        const backPt = frame.origin.clone().add(facing.clone().multiplyScalar(-depthBackPad))
+        const frontPt = frame.origin.clone().add(opening.clone().multiplyScalar(depthFrontPad))
+        const backProj = projectPoint(backPt, camera, frustumWidth, frustumHeight).y
+        const frontProj = projectPoint(frontPt, camera, frustumWidth, frustumHeight).y
         planViewportClip = {
             minX: Math.max(planViewportClip.minX, Math.min(leftProj, rightProj)),
             maxX: Math.min(planViewportClip.maxX, Math.max(leftProj, rightProj)),
-            minY: planViewportClip.minY,
-            maxY: planViewportClip.maxY,
+            minY: Math.max(planViewportClip.minY, Math.min(backProj, frontProj)),
+            maxY: Math.min(planViewportClip.maxY, Math.max(backProj, frontProj)),
         }
     }
 
     // Plan door rendering: same frame-vs-leaf split as elevation so the
-    // metal frame paints anthrazit while the leaf paints its BKP colour
-    // (e.g. wood door → hellbraun leaf + anthrazit frame). Without the
-    // override the entire door went BKP-colour and frame was not visible
-    // distinctly in plan.
+    // frame paints its BKP colour (anthrazit for metal/default, hellbraun
+    // for wood) and the leaf paints its BKP colour. Wood door = wood leaf +
+    // wood frame; metal/glass door = anthrazit frame around the glass leaf.
     const planLeafMeshes = new Set(pickDoorLeafMeshes(doorMeshes, frame))
-    const planFrameColor = COLORS.elevation.door.byBKP.metal
+    const planDoorBKP = classifyDoorBKP(context.csetStandardCH?.cfcBkpCccBcc)
+    const planFrameColor = planDoorBKP === 'wood'
+        ? COLORS.elevation.door.byBKP.wood
+        : COLORS.elevation.door.byBKP.metal
     const renderGeometry = { edges: [] as ProjectedEdge[], polygons: [] as ProjectedPolygon[] }
     for (const mesh of doorMeshes) {
         const expressID = mesh.userData.expressID

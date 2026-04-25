@@ -85,16 +85,21 @@ export async function renderDoorsFromIfc(
     const slabAggregatePartMap = await extractSlabAggregateParts(archFile)
     const deviceLayerMap = elecFile ? await extractElectricalLayerAssignments(elecFile) : new Map<number, string[]>()
 
-    // Merge storey elevations from arch + elec so the nearby-device storey
-    // filter can match a door's storey to the elec element's storey.
+    // Storey elevations from arch + elec. Arch entries take precedence —
+    // expressIDs are file-local, so the same numeric ID in elec refers to a
+    // completely unrelated element. The previous merge overwrote door
+    // (arch) elevations with elec elevations whenever IDs collided, which
+    // surfaced as the storey ▼ marker pointing at the WRONG storey for
+    // some doors (0TwHxk1LH… case: 01OG door with storey-elevation 17.8 m
+    // pulled from an elec element).
     const storeyElevationMap = new Map<number, number>()
-    for (const [id, elev] of await extractElementStoreyElevationMap(archFile)) {
-        storeyElevationMap.set(id, elev)
-    }
     if (elecFile) {
         for (const [id, elev] of await extractElementStoreyElevationMap(elecFile)) {
             storeyElevationMap.set(id, elev)
         }
+    }
+    for (const [id, elev] of await extractElementStoreyElevationMap(archFile)) {
+        storeyElevationMap.set(id, elev)
     }
 
     const contexts = await analyzeDoors(
