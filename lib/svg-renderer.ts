@@ -123,9 +123,11 @@ export const ELEVATION_TOP_PAD_PX = 0
 export const ELEVATION_BOTTOM_PAD_PX = 0
 export const ELEVATION_SIDE_PAD_PX = 0
 
-/** Plan SVG canvas height = `width × PLAN_SVG_HEIGHT_RATIO`. 0.55 ensures
- * the door + swing arc + thickness fit without overflowing. */
-export const PLAN_SVG_HEIGHT_RATIO = 0.55
+/** Plan SVG canvas is square (1.0) to match elevation dimensions, so when the
+ * three views are stacked in Airtable's grid the door anchor lines up across
+ * all three at the same X. Plan content is vertically centred inside the
+ * square; extra whitespace top/bottom is the trade-off. Set < 1 to crop. */
+export const PLAN_SVG_HEIGHT_RATIO = 1.0
 
 export function planSvgCanvasHeight(canvasWidth: number): number {
     return Math.round(canvasWidth * PLAN_SVG_HEIGHT_RATIO)
@@ -4546,16 +4548,27 @@ function collectDoorMeshGeometry(
 
     // Fills: every door sub-mesh (frame, leaf, glazing…) projects its real
     // footprint so the door reads as a continuous shape in the door-colour.
+    // Frame / header / jamb sub-meshes paint anthrazit (metal frame, BKP
+    // 2720) regardless of the leaf's BKP, so a wood door's leaf still reads
+    // hellbraun while its frame reads anthrazit ('missing anthrazit in
+    // rahmen' fix). Glazing keeps glass colour. Leaf keeps the BKP-resolved
+    // doorColor.
     // Edges: web-ifc splits the door into several sub-meshes and each one
     // contributes its own silhouette rectangle, which layered on top of each
     // other looked like multiple schematic frame outlines. Instead, draw ONE
     // outer silhouette (union of all door meshes, via a frame-axis-aligned
     // rect from the real projected footprint) + the leaf silhouette inside.
+    const frameColor = COLORS.elevation.door.byBKP.metal
     for (const mesh of doorMeshes) {
         const expressID = mesh.userData.expressID
         const style = getMeshPolygonStyle(mesh, expressID, context, options, true)
-        const color = style.color
+        const isGlazing = isLikelyGlazingPanelMesh(mesh)
+        const isLeaf = leafMeshes.has(mesh)
+        let color = style.color
         const fillOpacity = style.fillOpacity ?? 1
+        if (!isGlazing && !isLeaf && expressID === context.door.expressID) {
+            color = frameColor
+        }
         const posCount = mesh.geometry?.attributes?.position?.count || 0
         if (posCount === 0) continue
         if (options.showFills) {
