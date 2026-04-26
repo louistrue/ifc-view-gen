@@ -1811,7 +1811,13 @@ function getNearbyDoorPlanRects(context: DoorContext, cutHeight: number): AxisRe
     const frame = context.viewFrame
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.semanticFacing)
-    const tolerance = Math.max(0.08, frame.thickness)
+    // Strict cut-plane crossing test — a door must straddle cutHeight to be
+    // drawn in plan. Previous code used `max(0.08, frame.thickness)` as
+    // tolerance which mixes wall-thickness units into a Y check and let
+    // revision openings (Revisionsöffnung) at ceiling height appear in plan
+    // even though the section plane never cuts them. Keep a small ε for
+    // floating-point slop.
+    const tolerance = 0.05
     const nearbyDoorMeshes = getNearbyDoorMeshes(context)
     const rects: AxisRect[] = []
     const seenIDs = new Set<number>()
@@ -1893,7 +1899,8 @@ function getNearbyWindowPlanRects(context: DoorContext, cutHeight: number): Axis
     const frame = context.viewFrame
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.semanticFacing)
-    const tolerance = Math.max(0.08, frame.thickness)
+    // See getNearbyDoorPlanRects — strict cut crossing.
+    const tolerance = 0.05
     const nearbyWindowMeshes = getNearbyWindowMeshes(context)
     const rects: AxisRect[] = []
     const seenIDs = new Set<number>()
@@ -3051,6 +3058,30 @@ function getSharedLateralExtentLocal(
         console.log(`[shared] door=${context.doorId} closedLoops=${closedLoops.length} openChains=${openChains.length} extent=[${minLocal.toFixed(3)}, ${maxLocal.toFixed(3)}]`)
     }
     return { minLocal, maxLocal }
+}
+
+/**
+ * Effective lateral half-window in meters around the door anchor that BOTH
+ * plan and elevation must use. Combines `getSharedLateralExtentLocal` (the
+ * mesh-cut extent) with the door-anchored lateralGap clamp. Returns the
+ * larger of |min| and max so a symmetric window covers the worst-case extent
+ * (elevation centres on door anchor, so a symmetric window is safe).
+ */
+function getEffectiveLateralHalfMeters(context: DoorContext): number {
+    const frame = context.viewFrame
+    const halfDoorWidth = frame.width / 2
+    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.5, 0.5, 1.5)
+    const sharedExtent = getSharedLateralExtentLocal(context)
+    let localMinW: number
+    let localMaxW: number
+    if (sharedExtent) {
+        localMinW = Math.min(Math.max(sharedExtent.minLocal, -halfDoorWidth - lateralGap), -halfDoorWidth)
+        localMaxW = Math.max(Math.min(sharedExtent.maxLocal, halfDoorWidth + lateralGap), halfDoorWidth)
+    } else {
+        localMinW = -halfDoorWidth - lateralGap
+        localMaxW = halfDoorWidth + lateralGap
+    }
+    return Math.max(Math.abs(localMinW), Math.abs(localMaxW))
 }
 
 function deviceVisibleInPlan(context: DoorContext, device: THREE.Box3): boolean {
@@ -5616,18 +5647,6 @@ function renderElevationFromMeshes(
         },
         '#ef4444'
     )
-    // Ceiling-only occlusion: ceiling edges that pass BEHIND the host wall
-    // (or the nearby perpendicular wall meshes) must not "ghost" through the
-    // wall fill (1mRZBdiTM, 03X27dQWY case — pink horizontal ceiling lines
-    // showing across the wall above the door head). SLAB edges are NOT
-    // occluded — the slab top line at floor level is the architectural floor
-    // reference and must stay visible as a continuous horizontal across the
-    // entire view, even where the wall fill is in front of it (Unterlagsboden
-    // visibility requirement).
-    const ceilingEdgeOccluders: ProjectedPolygon[] = [
-        ...wallProjected.polygons,
-        ...clippedNearbyWallGeometry.polygons,
-    ]
     const slabGeometry = tagEdges(slabGeometryClipped, '#eab308') // yellow = slab
     // Side-filtered host-ceiling edges are the actual cut lines we want to see
     // on the elevation. Host-wall polygons overlap those lines by definition,
@@ -6528,7 +6547,15 @@ function renderPlanFromMeshes(
         return { x1: proj.x, y1: proj.y, x2: proj.x, y2: proj.y, color: 'none', depth: 0, layer: 0 }
     }
 
-    const fitW = halfW + planCropM
+    // Plan lateral extent must match the elevation's canvas window so the two
+    // views read as the same drawing at the same scale (`Kontext nicht gleich
+    // breit wie grundriss/ ansicht` in v3 reviewer feedback). The elevation
+    // pins its window at min(canvas-half, sharedExtent ± lateralGap) — use
+    // the same formula here so the door anchor and viewport width line up
+    // exactly when the two views are stacked.
+    const elevationCanvasHalfMeters = opts.width / FIXED_PX_PER_METER / 2
+    const elevHalfWMeters = getEffectiveLateralHalfMeters(context)
+    const fitW = Math.max(halfW + planCropM, Math.min(elevationCanvasHalfMeters, elevHalfWMeters))
     const fitD = halfT + planCropM
     const fitGeometry = {
         edges: [
