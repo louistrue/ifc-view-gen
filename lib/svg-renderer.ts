@@ -1620,7 +1620,24 @@ function measureMeshesOrBoxInAxes(
         ?? (fallbackBox ? measureBoundingBoxInAxes(fallbackBox, axisA, axisB, axisC) : null)
 }
 
-function getHostCeilingAxisRects(context: DoorContext): AxisRect[] {
+function shouldRenderHostCeilingInElevation(
+    context: DoorContext,
+    ceilingExpressID: number,
+    isBackView: boolean
+): boolean {
+    const side = context.hostCeilingVisibility?.find(
+        (entry) => entry.ceilingExpressID === ceilingExpressID
+    )?.side
+
+    if (side === 'front') return !isBackView
+    if (side === 'back') return isBackView
+    if (side === 'both' || side === 'unknown') return true
+
+    // Legacy contexts do not carry per-covering side metadata.
+    return true
+}
+
+function getHostCeilingAxisRects(context: DoorContext, isBackView: boolean): AxisRect[] {
     const frame = context.viewFrame
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.upAxis)
@@ -1637,6 +1654,8 @@ function getHostCeilingAxisRects(context: DoorContext): AxisRect[] {
 
     for (const ceiling of context.hostCeilings) {
         if (!ceiling.boundingBox || seenIDs.has(ceiling.expressID)) continue
+        const visibleForView = shouldRenderHostCeilingInElevation(context, ceiling.expressID, isBackView)
+        if (!visibleForView) continue
         seenIDs.add(ceiling.expressID)
         const meshes = meshQueue.filter((mesh) => mesh.userData.expressID === ceiling.expressID)
         const bounds = measureMeshesOrBoxInAxes(
@@ -1646,14 +1665,18 @@ function getHostCeilingAxisRects(context: DoorContext): AxisRect[] {
             frame.upAxis,
             frame.semanticFacing
         )
-        if (!bounds || bounds.maxA <= bounds.minA || bounds.maxB <= bounds.minB) continue
+        if (!bounds || bounds.maxA <= bounds.minA || bounds.maxB <= bounds.minB) {
+            continue
+        }
         let minA = bounds.minA - originA
         let maxA = bounds.maxA - originA
         if (footprint) {
             minA = Math.max(minA, footprint.minA)
             maxA = Math.min(maxA, footprint.maxA)
         }
-        if (maxA <= minA) continue
+        if (maxA <= minA) {
+            continue
+        }
         rects.push({
             minA,
             maxA,
@@ -2113,12 +2136,13 @@ function createSemanticElevationCeilingGeometry(
     camera: THREE.OrthographicCamera,
     width: number,
     height: number,
-    options: Required<SVGRenderOptions>
+    options: Required<SVGRenderOptions>,
+    isBackView: boolean
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
 
-    for (const rect of getHostCeilingAxisRects(context)) {
+    for (const rect of getHostCeilingAxisRects(context, isBackView)) {
         const corners = createRectPoints3D(
             frame.origin,
             frame.widthAxis,
@@ -5476,7 +5500,7 @@ function renderElevationFromMeshes(
         opts
     )
     const slabGeometryRaw = createSemanticElevationSlabGeometry(context, camera, frustumWidth, frustumHeight, opts)
-    const ceilingGeometryRaw = createSemanticElevationCeilingGeometry(context, camera, frustumWidth, frustumHeight, opts)
+    const ceilingGeometryRaw = createSemanticElevationCeilingGeometry(context, camera, frustumWidth, frustumHeight, opts, isBackView)
     const stairGeometryRaw = createSemanticElevationStairGeometry(context, camera, frustumWidth, frustumHeight, opts)
     const fitGeometry = boundsToFitGeometry(
         projectElevationDoorBounds(frame, camera, frustumWidth, frustumHeight)
@@ -5605,8 +5629,12 @@ function renderElevationFromMeshes(
         ...clippedNearbyWallGeometry.polygons,
     ]
     const slabGeometry = tagEdges(slabGeometryClipped, '#eab308') // yellow = slab
+    // Side-filtered host-ceiling edges are the actual cut lines we want to see
+    // on the elevation. Host-wall polygons overlap those lines by definition,
+    // so using them as occluders removes the legitimate IfcCovering section.
+    const ceilingEdgesAfterOcclusion = ceilingGeometryClipped.edges
     const ceilingGeometry = tagEdges({
-        edges: occludeEdgesByPolygons(ceilingGeometryClipped.edges, ceilingEdgeOccluders),
+        edges: ceilingEdgesAfterOcclusion,
         polygons: ceilingGeometryClipped.polygons,
     }, '#ec4899') // pink = ceiling
     // Semantic wall geometry (synthetic opening outlines / lintel lines) removed —

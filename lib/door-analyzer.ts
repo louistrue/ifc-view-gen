@@ -41,6 +41,7 @@ export interface OperableDoorLeaves {
 }
 
 export type DeviceVisibilitySide = 'front' | 'back' | 'unknown'
+export type HostCeilingVisibilitySide = 'front' | 'back' | 'both' | 'unknown'
 
 export interface NearbyDeviceVisibility {
     deviceExpressID: number
@@ -49,6 +50,14 @@ export interface NearbyDeviceVisibility {
     signedDepth: number
     frontOverlapScore: number
     backOverlapScore: number
+}
+
+export interface HostCeilingVisibility {
+    ceilingExpressID: number
+    side: HostCeilingVisibilitySide
+    signedDepth: number
+    frontFaceGap: number
+    backFaceGap: number
 }
 
 export type DoorContextHostSource = 'ifc-relation' | 'bbox-fallback' | 'none'
@@ -126,6 +135,7 @@ export interface DoorContext {
     nearbyStairs: ElementInfo[]
     nearbyDevices: ElementInfo[]
     nearbyDeviceVisibility: NearbyDeviceVisibility[]
+    hostCeilingVisibility: HostCeilingVisibility[]
     geometricNormal: THREE.Vector3
     semanticFacing: THREE.Vector3
     viewFrame: DoorViewFrame
@@ -1110,6 +1120,16 @@ function getIntervalOverlapLength(
     return Math.max(0, Math.min(maxA, maxB) - Math.max(minA, minB))
 }
 
+function getIntervalGapLength(
+    minA: number,
+    maxA: number,
+    minB: number,
+    maxB: number
+): number {
+    if (Math.min(maxA, maxB) >= Math.max(minA, minB)) return 0
+    return Math.max(minB - maxA, minA - maxB, 0)
+}
+
 function classifyNearbyDeviceVisibility(
     device: ElementInfo,
     hostWall: ElementInfo | null,
@@ -1215,6 +1235,68 @@ function classifyNearbyDeviceVisibility(
         signedDepth,
         frontOverlapScore,
         backOverlapScore,
+    }
+}
+
+function classifyHostCeilingVisibility(
+    ceiling: ElementInfo,
+    hostWall: ElementInfo | null,
+    viewFrame: DoorViewFrame
+): HostCeilingVisibility {
+    const fallback: HostCeilingVisibility = {
+        ceilingExpressID: ceiling.expressID,
+        side: 'unknown',
+        signedDepth: 0,
+        frontFaceGap: Infinity,
+        backFaceGap: Infinity,
+    }
+
+    const ceilingBox = ceiling.boundingBox
+    if (!ceilingBox) return fallback
+
+    const facingAxis = viewFrame.semanticFacing.clone().normalize()
+    const ceilingInterval = measureBoxAlongAxis(ceilingBox, facingAxis)
+    const ceilingMid = (ceilingInterval.min + ceilingInterval.max) / 2
+    const originDepth = viewFrame.origin.dot(facingAxis)
+
+    if (!hostWall?.boundingBox) {
+        const signedDepth = ceilingMid - originDepth
+        const threshold = Math.max(viewFrame.thickness * 0.25, 0.03)
+        return {
+            ceilingExpressID: ceiling.expressID,
+            side: signedDepth > threshold ? 'front' : signedDepth < -threshold ? 'back' : 'both',
+            signedDepth,
+            frontFaceGap: 0,
+            backFaceGap: 0,
+        }
+    }
+
+    const wallInterval = measureBoxAlongAxis(hostWall.boundingBox, facingAxis)
+    const wallMid = (wallInterval.min + wallInterval.max) / 2
+    const signedDepth = ceilingMid - wallMid
+    const frontFaceGap = Math.min(
+        Math.abs(ceilingInterval.min - wallInterval.max),
+        Math.abs(ceilingInterval.max - wallInterval.max)
+    )
+    const backFaceGap = Math.min(
+        Math.abs(ceilingInterval.min - wallInterval.min),
+        Math.abs(ceilingInterval.max - wallInterval.min)
+    )
+    const sideDecisionTolerance = Math.max(viewFrame.thickness * 0.08, 0.02)
+
+    let side: HostCeilingVisibilitySide = 'both'
+    if (frontFaceGap + sideDecisionTolerance < backFaceGap) {
+        side = 'front'
+    } else if (backFaceGap + sideDecisionTolerance < frontFaceGap) {
+        side = 'back'
+    }
+
+    return {
+        ceilingExpressID: ceiling.expressID,
+        side,
+        signedDepth,
+        frontFaceGap,
+        backFaceGap,
     }
 }
 
@@ -1644,15 +1726,18 @@ function findHostCeilings(
             max: originDepth + Math.max(viewFrame.thickness / 2, 0.12),
         }
     const widthPadding = Math.max(viewFrame.width * 0.18, 0.12)
-    const depthPadding = Math.max(viewFrame.thickness * 0.3, 0.18)
+    const depthPadding = Math.max(viewFrame.thickness * 0.5, 0.24)
+    const faceTouchTolerance = Math.max(viewFrame.thickness * 0.6, 0.15)
+    const nearDoorDistance = Math.max(viewFrame.width * 1.2, 1.5)
 
-    return coverings
+    const selected = coverings
         .filter((covering) => Boolean(covering.boundingBox))
         .map((covering) => {
             const box = covering.boundingBox!
             const widthRange = measureBoxAlongAxis(box, widthAxis)
             const depthRange = measureBoxAlongAxis(box, depthAxis)
             const upRange = measureBoxAlongAxis(box, upAxis)
+            const bboxGap = boxDistance(doorBox, box)
             const localDepthMin = depthRange.min - originDepth
             const localDepthMax = depthRange.max - originDepth
             if (
@@ -1668,7 +1753,9 @@ function findHostCeilings(
                 doorWidth.min - widthPadding,
                 doorWidth.max + widthPadding
             )
-            if (widthOverlap <= 0.04) return null
+            if (widthOverlap <= 0.04) {
+                return null
+            }
 
             const depthOverlap = getIntervalOverlapLength(
                 depthRange.min,
@@ -1676,14 +1763,36 @@ function findHostCeilings(
                 hostDepth.min - depthPadding,
                 hostDepth.max + depthPadding
             )
-            if (depthOverlap <= 0.01) return null
+            const depthGap = getIntervalGapLength(
+                depthRange.min,
+                depthRange.max,
+                hostDepth.min,
+                hostDepth.max
+            )
+            const frontFaceGap = Math.min(
+                Math.abs(depthRange.min - hostDepth.max),
+                Math.abs(depthRange.max - hostDepth.max)
+            )
+            const backFaceGap = Math.min(
+                Math.abs(depthRange.min - hostDepth.min),
+                Math.abs(depthRange.max - hostDepth.min)
+            )
+            const touchesWallFace = Math.min(frontFaceGap, backFaceGap, depthGap) <= faceTouchTolerance
+            if (depthOverlap <= 0.005 && !touchesWallFace) {
+                return null
+            }
 
             const gapAboveDoor = upRange.min - doorHeight.max
-            if (gapAboveDoor < -0.2 || gapAboveDoor > 1.8) return null
+            if (gapAboveDoor < -0.2 || gapAboveDoor > 1.8) {
+                return null
+            }
+            if (bboxGap > nearDoorDistance && widthOverlap < viewFrame.width * 0.35) {
+                return null
+            }
 
             return {
                 element: covering,
-                score: gapAboveDoor - (widthOverlap + depthOverlap) * 0.2,
+                score: gapAboveDoor + Math.min(frontFaceGap, backFaceGap) - (widthOverlap + depthOverlap) * 0.2,
                 upRange,
             }
         })
@@ -1704,6 +1813,7 @@ function findHostCeilings(
                 || Math.abs(entry.upRange.max - primary.upRange.max) <= SAME_BAND_TOLERANCE_METERS
         })
         .map((entry) => entry.element)
+    return selected
 }
 
 function findNearbyStairs(
@@ -2592,6 +2702,9 @@ export async function analyzeDoors(
             aboveAll: hostSlabsAbove,
         } = findHostSlabs(door, hostWall, slabs, viewFrame, slabAggregatePartMap)
         const hostCeilings = findHostCeilings(door, hostWall, coverings, viewFrame)
+        const hostCeilingVisibility = hostCeilings.map((ceiling) =>
+            classifyHostCeilingVisibility(ceiling, hostWall, viewFrame)
+        )
         const nearbyStairs = findNearbyStairs(door, stairs, viewFrame)
         const doorStoreyElev = elementStoreyElevationMap?.get(door.expressID)
         const nearbyDevices = findNearbyDevices(
@@ -2730,6 +2843,7 @@ export async function analyzeDoors(
             nearbyStairs,
             nearbyDevices,
             nearbyDeviceVisibility,
+            hostCeilingVisibility,
             geometricNormal,
             semanticFacing,
             viewFrame,

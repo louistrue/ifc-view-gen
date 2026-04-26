@@ -64,6 +64,7 @@ async function buildContext(options?: {
     csetStandardCH?: Partial<DoorCsetStandardCHData>
     doorLeafMetadata?: DoorLeafMetadata
     includeCeiling?: boolean
+    ceilingDepthOffset?: number
     includeStair?: boolean
 }): Promise<DoorContext> {
     const {
@@ -77,6 +78,7 @@ async function buildContext(options?: {
         csetStandardCH,
         doorLeafMetadata,
         includeCeiling = false,
+        ceilingDepthOffset = 0,
         includeStair = false,
     } = options ?? {}
 
@@ -92,7 +94,9 @@ async function buildContext(options?: {
     const doorMesh = createBoxMesh(1, 1, 2.1, 0.12, doorCenter, rotationY)
     const wallMesh = createBoxMesh(2, 40, 3, wallThickness, wallCenter, rotationY)
     const deviceMesh = createBoxMesh(3, 0.12, 0.12, 0.08, deviceCenter)
-    const ceilingMesh = createBoxMesh(4, 4, 0.14, 1.2, new THREE.Vector3(0, 2.45, 0), rotationY)
+    const localCeilingCenter = new THREE.Vector3(0, 0, ceilingDepthOffset)
+    const rotatedCeilingCenter = rotateHorizontalPoint(localCeilingCenter, rotationY)
+    const ceilingMesh = createBoxMesh(4, 4, 0.14, 1.2, new THREE.Vector3(rotatedCeilingCenter.x, 2.45, rotatedCeilingCenter.z), rotationY)
     const stairMesh = createBoxMesh(5, 1.6, 0.4, 1.4, new THREE.Vector3(-0.95, 0.25, 0.55), rotationY)
 
     const door = makeElement(1, 'IFCDOOR', doorMesh)
@@ -820,12 +824,17 @@ async function main() {
     // assertions measure real slab-context fills. If we re-used the default
     // (which falls back to wallColor), the host-wall fill alone would satisfy
     // the area threshold and mask slab-rendering regressions.
-    const highMountedOptions = { ...options, floorSlabColor: '#6EAF72' }
+    const highMountedOptions = { ...options, floorSlabColor: '#6EAF72', suspendedCeilingColor: '#6EAF72' }
     const highMountedDeviceViews = await renderDoorViews(highMountedDeviceContext, highMountedOptions)
     const highMountedPlanDevicePaths = extractPathDataByFill(highMountedDeviceViews.plan, highMountedOptions.deviceColor!)
     assert.ok(
         highMountedDeviceContext.hostCeilings.length > 0,
         'Expected IFCCOVERING elements to be collected as host ceilings'
+    )
+    assert.equal(
+        highMountedDeviceContext.hostCeilingVisibility[0]?.side,
+        'both',
+        'Expected straddling IFCCOVERING to render on both elevations'
     )
     assert.ok(
         highMountedDeviceContext.nearbyStairs.length > 0,
@@ -844,6 +853,39 @@ async function main() {
     assert.ok(
         getWallFilledArea(highMountedDeviceViews.back, slabColor) > 1200,
         'Back elevation should render ceiling/stair slab-color context'
+    )
+
+    const frontCeilingOnlyContext = await buildContext({
+        includeWall: true,
+        includeCeiling: true,
+        includeStair: false,
+        ceilingDepthOffset: 0.72,
+    })
+    const backCeilingOnlyContext = await buildContext({
+        includeWall: true,
+        includeCeiling: true,
+        includeStair: false,
+        ceilingDepthOffset: -0.72,
+    })
+    const frontCeilingOnlyViews = await renderDoorViews(frontCeilingOnlyContext, highMountedOptions)
+    const backCeilingOnlyViews = await renderDoorViews(backCeilingOnlyContext, highMountedOptions)
+    assert.equal(frontCeilingOnlyContext.hostCeilingVisibility[0]?.side, 'front', 'Expected front-side IFCCOVERING metadata')
+    assert.equal(backCeilingOnlyContext.hostCeilingVisibility[0]?.side, 'back', 'Expected back-side IFCCOVERING metadata')
+    assert.ok(
+        getWallFilledArea(frontCeilingOnlyViews.front, slabColor) > 1200,
+        'Front elevation should render front-side IFCCOVERING'
+    )
+    assert.ok(
+        getWallFilledArea(frontCeilingOnlyViews.back, slabColor) < 1,
+        'Back elevation should hide front-side IFCCOVERING'
+    )
+    assert.ok(
+        getWallFilledArea(backCeilingOnlyViews.front, slabColor) < 1,
+        'Front elevation should hide back-side IFCCOVERING'
+    )
+    assert.ok(
+        getWallFilledArea(backCeilingOnlyViews.back, slabColor) > 1200,
+        'Back elevation should render back-side IFCCOVERING'
     )
 
     // ── Mesh-based plan section: L-corner + adjacent doors ────────────────────
