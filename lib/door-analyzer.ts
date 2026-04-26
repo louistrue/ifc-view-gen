@@ -1019,7 +1019,7 @@ function calculateElementNormal(element: ElementInfo): THREE.Vector3 {
     return fallback
 }
 
-function boxDistance(a: THREE.Box3, b: THREE.Box3): number {
+export function boxDistance(a: THREE.Box3, b: THREE.Box3): number {
     const dx = Math.max(0, a.min.x - b.max.x, b.min.x - a.max.x)
     const dy = Math.max(0, a.min.y - b.max.y, b.min.y - a.max.y)
     const dz = Math.max(0, a.min.z - b.max.z, b.min.z - a.max.z)

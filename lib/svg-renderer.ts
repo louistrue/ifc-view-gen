@@ -1818,6 +1818,7 @@ function getNearbyDoorPlanRects(context: DoorContext, cutHeight: number): AxisRe
     // even though the section plane never cuts them. Keep a small ε for
     // floating-point slop.
     const tolerance = 0.05
+    const planVis = getPlanVisibility(context)
     const nearbyDoorMeshes = getNearbyDoorMeshes(context)
     const rects: AxisRect[] = []
     const seenIDs = new Set<number>()
@@ -1828,6 +1829,9 @@ function getNearbyDoorPlanRects(context: DoorContext, cutHeight: number): AxisRe
         if (nearbyDoor.boundingBox.min.y > cutHeight + tolerance || nearbyDoor.boundingBox.max.y < cutHeight - tolerance) {
             continue
         }
+        // Plan-as-truth gate — drop doors that strictly straddle cutY but sit
+        // outside the plan corridor (lateral or behind perpendicular walls).
+        if (!planVis.doorIDs.has(nearbyDoor.expressID)) continue
 
         const meshes = nearbyDoorMeshes.filter((mesh) => mesh.userData.expressID === nearbyDoor.expressID)
         const bounds = measureMeshesOrBoxInAxes(
@@ -2903,16 +2907,25 @@ function createMeshPlanSectionGeometry(
     const groups: THREE.Mesh[][] = []
     if (hostMeshes.length > 0) groups.push(hostMeshes)
     if (nearbyMeshes.length > 0) {
-        // Group nearby meshes per parent wall via expressID so each adjacent
-        // wall's parts merge with itself but not with another wall.
+        // Group nearby meshes per *parent* wall — both the wall's own mesh
+        // and its IfcBuildingElementPart meshes go in the same bucket so
+        // closed-loop reconstruction can merge their seams. Without this
+        // rollup, parts get their own group, often produce only open chains,
+        // and the wall renders as outline-only thin lines (0e50Gp / 0tozBW6
+        // / 03Ah missing-perpendicular-wall in v3 feedback).
+        const partToParent = new Map<number, number>()
+        for (const link of context.wallAggregatePartLinks ?? []) {
+            partToParent.set(link.part.expressID, link.parentWallExpressID)
+        }
         const byParent = new Map<number, THREE.Mesh[]>()
         const orphan: THREE.Mesh[] = []
         for (const mesh of nearbyMeshes) {
             const id = mesh.userData?.expressID
             if (typeof id !== 'number') { orphan.push(mesh); continue }
-            const arr = byParent.get(id) ?? []
+            const parentID = partToParent.get(id) ?? id
+            const arr = byParent.get(parentID) ?? []
             arr.push(mesh)
-            byParent.set(id, arr)
+            byParent.set(parentID, arr)
         }
         for (const meshes of byParent.values()) groups.push(meshes)
         if (orphan.length > 0) groups.push(orphan)
@@ -3084,6 +3097,150 @@ function getEffectiveLateralHalfMeters(context: DoorContext): number {
     return Math.max(Math.abs(localMinW), Math.abs(localMaxW))
 }
 
+interface PlanVisibility {
+    /** ExpressIDs of nearby walls whose mesh-section at cutY survives the plan corridor. Always includes hostWall. */
+    wallIDs: Set<number>
+    /** ExpressIDs of nearby doors actually crossed by the plan cut plane and inside the corridor. */
+    doorIDs: Set<number>
+    /** ExpressIDs of nearby devices within proximity of a plan-visible wall (i.e., wall-attached). */
+    deviceIDs: Set<number>
+}
+
+/**
+ * Does the device's plan footprint (XZ-projected bbox) overlap the wall's
+ * plan footprint? Used as the wall-attachment test instead of 3D
+ * `boxDistance` because freestanding equipment (USV cabinet, water-heater,
+ * gas tank) often sits on the floor next to a wall — boxDistance returns
+ * ~0 even when the device's plan footprint is 0.5 m off the wall and reads
+ * as a "floating yellow box" in plan view (0eMcA5 / 0pATJh9w v3 feedback).
+ */
+function bboxOverlapsXZ(a: THREE.Box3, b: THREE.Box3): boolean {
+    return (
+        a.max.x >= b.min.x && a.min.x <= b.max.x &&
+        a.max.z >= b.min.z && a.min.z <= b.max.z
+    )
+}
+
+/**
+ * Compute the set of nearby walls / doors / devices that are "real" for this
+ * door's plan view. Used as the source-of-truth for elevation rendering too:
+ * the user's principle is "WALLS AND DOORS SHOULD BE IDENTICAL between plan
+ * and elevation". A wall that doesn't appear in plan (because its mesh
+ * doesn't section at cutY inside the corridor) must not appear in elevation
+ * either; same for doors. Devices count as visible only when they're close
+ * enough to a plan-visible wall to plausibly be wall-mounted — free-standing
+ * equipment that the IFC tagged as IfcElectricAppliance / IfcAlarm / etc
+ * (0eMcA5UMVHHPbTsvAupZHz / 0pATJh9wKcHhIvti0oA9Nh in v3 feedback) are
+ * dropped.
+ *
+ * Cached on the context so repeated reads (plan + front + back rendering of
+ * the same door) only pay the section cost once.
+ */
+function computePlanVisibility(context: DoorContext): PlanVisibility {
+    const frame = context.viewFrame
+    const cutY = frame.origin.y - frame.height / 2 + PLAN_CUT_HEIGHT_METERS
+    const corridorHalf = getEffectiveLateralHalfMeters(context)
+    const originW = frame.origin.dot(frame.widthAxis)
+
+    const wallIDs = new Set<number>()
+    if (context.hostWall) wallIDs.add(context.hostWall.expressID)
+    for (const id of getCoplanarHostWallExpressIDs(context)) wallIDs.add(id)
+
+    // Bucket nearby wall meshes by their OWN expressID — parts each form
+    // their own bucket and contribute to their part-id only. We intentionally
+    // do NOT roll parts under the parent wall here: rolling causes parents
+    // with disconnected parts (e.g. wall stubs scattered across the corridor)
+    // to all read as "plan-visible", and once they enter the elevation
+    // filter their bbox-based strips render as a forest of thin overlapping
+    // rectangles ("lines all over" regression on 0Q6xEX6n).
+    const meshByID = new Map<number, THREE.Mesh[]>()
+    for (const mesh of getNearbyWallMeshes(context)) {
+        const id = mesh.userData?.expressID
+        if (typeof id !== 'number') continue
+        const arr = meshByID.get(id)
+        if (arr) arr.push(mesh)
+        else meshByID.set(id, [mesh])
+    }
+    const dbg = process.env.DEBUG_PLAN_VIS === '1'
+    for (const [id, meshes] of meshByID) {
+        if (wallIDs.has(id)) continue
+        let inCorridor = false
+        let segCount = 0
+        let lo = Infinity, hi = -Infinity
+        outer: for (const mesh of meshes) {
+            for (const seg of extractMeshSectionSegments(mesh, cutY)) {
+                segCount++
+                const a = seg.a.dot(frame.widthAxis) - originW
+                const b = seg.b.dot(frame.widthAxis) - originW
+                const segLo = Math.min(a, b)
+                const segHi = Math.max(a, b)
+                if (segLo < lo) lo = segLo
+                if (segHi > hi) hi = segHi
+                if (segHi >= -corridorHalf && segLo <= corridorHalf) {
+                    inCorridor = true
+                    if (!dbg) break outer
+                }
+            }
+        }
+        if (dbg) console.error(`[plan-vis] door=${context.doorId} wall=${id} segs=${segCount} widthAxis=[${lo === Infinity ? '?' : lo.toFixed(3)}, ${hi === -Infinity ? '?' : hi.toFixed(3)}] inCorridor=${inCorridor} corridorHalf=${corridorHalf.toFixed(3)}`)
+        if (inCorridor) wallIDs.add(id)
+    }
+    // Walls without any mesh entry — keep (legacy / sparse-mesh fallback).
+    for (const wall of context.nearbyWalls ?? []) {
+        if (!meshByID.has(wall.expressID)) wallIDs.add(wall.expressID)
+    }
+
+    const doorIDs = new Set<number>()
+    const cutTolerance = 0.05
+    for (const door of context.nearbyDoors ?? []) {
+        const bbox = door.boundingBox
+        if (!bbox) continue
+        if (bbox.min.y > cutY + cutTolerance) continue
+        if (bbox.max.y < cutY - cutTolerance) continue
+        let lo = Infinity
+        let hi = -Infinity
+        for (const corner of box3Corners(bbox)) {
+            const w = corner.dot(frame.widthAxis) - originW
+            if (w < lo) lo = w
+            if (w > hi) hi = w
+        }
+        if (hi >= -corridorHalf && lo <= corridorHalf) doorIDs.add(door.expressID)
+    }
+
+    const deviceIDs = new Set<number>()
+    const visibleWallBoxes: THREE.Box3[] = []
+    if (context.hostWall?.boundingBox) visibleWallBoxes.push(context.hostWall.boundingBox)
+    for (const wall of context.nearbyWalls ?? []) {
+        if (wall.boundingBox && wallIDs.has(wall.expressID)) {
+            visibleWallBoxes.push(wall.boundingBox)
+        }
+    }
+    for (const link of context.wallAggregatePartLinks ?? []) {
+        if (link.part.boundingBox && wallIDs.has(link.parentWallExpressID)) {
+            visibleWallBoxes.push(link.part.boundingBox)
+        }
+    }
+    for (const dev of context.nearbyDevices ?? []) {
+        if (!dev.boundingBox) continue
+        for (const wb of visibleWallBoxes) {
+            if (bboxOverlapsXZ(dev.boundingBox, wb)) {
+                deviceIDs.add(dev.expressID)
+                break
+            }
+        }
+    }
+
+    return { wallIDs, doorIDs, deviceIDs }
+}
+
+function getPlanVisibility(context: DoorContext): PlanVisibility {
+    const cached = (context as DoorContext & { __planVisibility?: PlanVisibility }).__planVisibility
+    if (cached) return cached
+    const result = computePlanVisibility(context)
+    ;(context as DoorContext & { __planVisibility?: PlanVisibility }).__planVisibility = result
+    return result
+}
+
 function deviceVisibleInPlan(context: DoorContext, device: THREE.Box3): boolean {
     const frame = context.viewFrame
     const cutHeight = frame.origin.y - frame.height / 2 + PLAN_CUT_HEIGHT_METERS
@@ -3103,6 +3260,11 @@ function shouldRenderDeviceInPlan(
     if (!device?.boundingBox || !context.door.boundingBox) {
         return false
     }
+
+    // Wall-attachment gate — drop free-standing equipment the IFC tagged as a
+    // device but that doesn't sit on / in any plan-visible wall (0eMcA5 +
+    // 0pATJh9w "weird electro colored object" in v3 feedback).
+    if (!getPlanVisibility(context).deviceIDs.has(deviceExpressID)) return false
 
     const side = (context.nearbyDeviceVisibility || []).find(
         (entry) => entry.deviceExpressID === deviceExpressID
@@ -5367,7 +5529,19 @@ function filterContextForElevationOcclusion(
         const side = center > +tol ? +1 : center < -tol ? -1 : 0
         return side === sideToDrop
     }
-    const filteredWalls = context.nearbyWalls.filter((w) => !isElementOccluded(w.boundingBox ?? null))
+    // Plan-as-truth: a wall must appear in plan AND pass the half-space
+    // occlusion test to appear in elevation. Both directions of "WALLS AND
+    // DOORS SHOULD BE IDENTICAL between plan and elevation":
+    //   • Plan-vis drop: walls outside the plan corridor (ghost edges from
+    //     the back room) — fixes 0pATJh9w back.
+    //   • Half-space drop: walls whose bbox sits entirely behind the host
+    //     wall plane (back-room interior) — fixes ghost depth in elevation.
+    const planVisibility = getPlanVisibility(context)
+    const filteredWalls = context.nearbyWalls.filter((w) => {
+        if (isElementOccluded(w.boundingBox ?? null)) return false
+        if (!planVisibility.wallIDs.has(w.expressID)) return false
+        return true
+    })
     // Adjacent doors need band-intersection too: a cut-door embedded in the
     // host wall has a thin glazing sub-mesh entirely on one side of the
     // plane. With centre-based per-mesh filtering the glazing gets dropped
@@ -5395,13 +5569,23 @@ function filterContextForElevationOcclusion(
     const filteredNearbyDoors = context.nearbyDoors.filter((d) => {
         if (isElementOccluded(d.boundingBox ?? null)) return false
         if (isFarFromWallPlane(d.boundingBox ?? null)) return false
+        // Plan-as-truth: only adjacent doors whose body is actually crossed
+        // by the plan cut survive. Catches revisionsöffnung at ceiling /
+        // floor height that v13.C's bbox tolerance could still let through
+        // when the bbox slightly overlaps cutY (0pATJh9w right hatch).
+        if (!planVisibility.doorIDs.has(d.expressID)) return false
         return true
     })
     // Devices straddling the host wall plane (mounted in/at the door jamb)
     // belong on both views — surface socket on one side, J-box flush in the
     // wall, etc. Centre-based filter drops them from one view; band-
     // intersection keeps them on both ('fehlende elektro-elemente' fix).
-    const filteredNearbyDevices = context.nearbyDevices.filter((d) => !isElementOccluded(d.boundingBox ?? null))
+    const filteredNearbyDevices = context.nearbyDevices.filter((d) => {
+        if (isElementOccluded(d.boundingBox ?? null)) return false
+        // Wall-attachment gate — see computePlanVisibility comment.
+        if (!planVisibility.deviceIDs.has(d.expressID)) return false
+        return true
+    })
 
     const filteredContext: DoorContext = {
         ...context,
