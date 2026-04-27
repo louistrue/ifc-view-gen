@@ -2245,6 +2245,8 @@ function createSemanticElevationNearbyWallGeometry(
         }
     }
 
+    interface StripRect { rect: AxisRect; bkpKey: number }
+    const stripRects: StripRect[] = []
     for (const strip of strips) {
         let bounds: AxisBounds | null = null
         if (strip.meshes.length > 0) {
@@ -2284,8 +2286,35 @@ function createSemanticElevationNearbyWallGeometry(
             rect.maxB = Math.min(rect.maxB + expand, maxB)
         }
         if (rect.maxA <= rect.minA || rect.maxB <= rect.minB) continue
-        const corners = createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, rect.minA, rect.maxA, rect.minB, rect.maxB)
-        const wallCfc = context.wallBKP?.get(strip.bkpKey) ?? null
+        stripRects.push({ rect, bkpKey: strip.bkpKey })
+    }
+
+    // Cluster strip rects whose widthAxis ranges overlap into a single
+    // outlined rect — physically distinct walls / parts that crowd the same
+    // door-plane cross-section produce stacked 4-side outlines that the
+    // reviewer reads as "random lines" (1kG0vWG3kQGefpLvmHgezd v15).
+    // Pixel dedup downstream catches truly identical lines; this catches the
+    // close-but-distinct case. Clustering is by widthAxis only; the merged
+    // rect's vertical extent is the union (worst-case slightly taller, never
+    // shorter, so we don't lose visible wall area).
+    const STRIP_MERGE_TOL = 0.05  // 5 cm gap is still "the same wall band"
+    stripRects.sort((a, b) => a.rect.minA - b.rect.minA)
+    const mergedRects: StripRect[] = []
+    for (const sr of stripRects) {
+        const last = mergedRects[mergedRects.length - 1]
+        if (last && sr.rect.minA <= last.rect.maxA + STRIP_MERGE_TOL) {
+            last.rect.minA = Math.min(last.rect.minA, sr.rect.minA)
+            last.rect.maxA = Math.max(last.rect.maxA, sr.rect.maxA)
+            last.rect.minB = Math.min(last.rect.minB, sr.rect.minB)
+            last.rect.maxB = Math.max(last.rect.maxB, sr.rect.maxB)
+        } else {
+            mergedRects.push({ rect: { ...sr.rect }, bkpKey: sr.bkpKey })
+        }
+    }
+
+    for (const sr of mergedRects) {
+        const corners = createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, sr.rect.minA, sr.rect.maxA, sr.rect.minB, sr.rect.maxB)
+        const wallCfc = context.wallBKP?.get(sr.bkpKey) ?? null
         const wallFill = resolveWallElevationColor(wallCfc) ?? options.wallColor
         appendProjectedFillPolygon(geometry, corners, camera, width, height, wallFill, -0.8, 1)
         for (let i = 0; i < corners.length; i++) {
@@ -4796,16 +4825,26 @@ ${wallBandsSvg}
   <g clip-path="url(#drawing-clip)">
 `
 
-    // Draw edges with transformed coordinates
+    // Draw edges with transformed coordinates. Dedupe identical line segments
+    // in pixel space — multiple wall strips with overlapping widthAxis ranges
+    // (e.g. parent wall + aggregate parts that all start at the same edge)
+    // emit identical outlines that visually stack into "random lines"
+    // (1kG0vWG3kQGefpLvmHgezd v15 reviewer feedback). Direction-agnostic key.
     let dashedCount = 0
+    const emittedEdgeKeys = new Set<string>()
     for (const edge of renderEdges) {
         const x1 = transformX(edge.x1)
         const y1 = transformY(edge.y1)
         const x2 = transformX(edge.x2)
         const y2 = transformY(edge.y2)
         const dashAttr = edge.isDashed ? ' stroke-dasharray="4,2"' : ''
-        if (edge.isDashed) dashedCount++
         const strokeWidth = lineWidth * (edge.strokeWidthFactor ?? (edge.isDashed ? 0.75 : 1))
+        const ax = x1.toFixed(1), ay = y1.toFixed(1), bx = x2.toFixed(1), by = y2.toFixed(1)
+        const lo = ax < bx || (ax === bx && ay < by) ? `${ax},${ay}|${bx},${by}` : `${bx},${by}|${ax},${ay}`
+        const dedupKey = `${lo}|${edge.color}|${strokeWidth.toFixed(2)}|${edge.isDashed ? 'd' : 's'}`
+        if (emittedEdgeKeys.has(dedupKey)) continue
+        emittedEdgeKeys.add(dedupKey)
+        if (edge.isDashed) dashedCount++
         svg += `    <line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${edge.color}" stroke-width="${strokeWidth}" stroke-linecap="round"${dashAttr} opacity="${edge.isDashed ? 0.7 : 1}"/>\n`
     }
 
