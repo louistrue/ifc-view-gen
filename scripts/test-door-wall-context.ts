@@ -66,6 +66,7 @@ async function buildContext(options?: {
     includeCeiling?: boolean
     ceilingDepthOffset?: number
     includeStair?: boolean
+    includeFarSlabPart?: boolean
 }): Promise<DoorContext> {
     const {
         includeWall = true,
@@ -80,6 +81,7 @@ async function buildContext(options?: {
         includeCeiling = false,
         ceilingDepthOffset = 0,
         includeStair = false,
+        includeFarSlabPart = false,
     } = options ?? {}
 
     const doorCenter = new THREE.Vector3(0, 1.05, 0)
@@ -118,6 +120,19 @@ async function buildContext(options?: {
     }
     if (includeStair) {
         elements.push(makeElement(5, 'IFCSTAIR', stairMesh))
+    }
+    let slabAggregatePartMap: Map<number, number> | undefined
+    if (includeFarSlabPart) {
+        const farSlabPartMesh = createBoxMesh(6, 0.5, 0.1, 0.5, new THREE.Vector3(4, 2.25, 0))
+        const farSlabPart = makeElement(6, 'IFCBUILDINGELEMENTPART', farSlabPartMesh)
+        // Simulate an inflated/aggregate bbox that overlaps the door corridor
+        // while the original mesh geometry is far away from the door.
+        farSlabPart.boundingBox = new THREE.Box3(
+            new THREE.Vector3(-0.4, 2.2, -0.08),
+            new THREE.Vector3(4.25, 2.3, 0.08)
+        )
+        elements.push(farSlabPart)
+        slabAggregatePartMap = new Map([[farSlabPart.expressID, 600]])
     }
 
     const model: LoadedIFCModel = {
@@ -161,7 +176,9 @@ async function buildContext(options?: {
         undefined,
         new Map([[door.expressID, openingDirection]]),
         csetStandardCHMap,
-        doorLeafMetadataMap
+        doorLeafMetadataMap,
+        undefined,
+        slabAggregatePartMap
     )
 
     assert.ok(context, 'Expected analyzeDoors to produce a door context')
@@ -522,6 +539,7 @@ async function main() {
     const withoutWall = await buildContext({ includeWall: false })
     const backMounted = await buildContext({ includeWall: true, deviceDepthOffset: -0.08 })
     const centerMounted = await buildContext({ includeWall: true, deviceDepthOffset: 0 })
+    const farSlabPartContext = await buildContext({ includeWall: true, includeFarSlabPart: true })
     const withWallViews = await renderDoorViews(withWall, options)
     const withoutWallViews = await renderDoorViews(withoutWall, options)
     const backMountedViews = await renderDoorViews(backMounted, options)
@@ -566,6 +584,11 @@ async function main() {
     assert.equal(withWall.nearbyDeviceVisibility[0].side, 'front', 'Expected positive-depth device to classify to the front wall face')
     assert.equal(backMounted.nearbyDeviceVisibility[0]?.side, 'back', 'Expected negative-depth device to classify to the back wall face')
     assert.equal(centerMounted.nearbyDeviceVisibility[0]?.side, 'unknown', 'Expected center-mounted device to remain ambiguous')
+    assert.equal(
+        farSlabPartContext.hostSlabsAbove.length,
+        0,
+        'A slab aggregate part whose bbox overlaps the door but whose mesh is far away must not be selected as host slab context'
+    )
 
     assert.ok(frontDevicePathsWithWall.length > 0, 'Front elevation should render a front-mounted electrical device')
     assert.deepEqual(backDevicePathsWithWall, [], 'Back elevation should hide a front-mounted electrical device')

@@ -1120,6 +1120,84 @@ function getIntervalOverlapLength(
     return Math.max(0, Math.min(maxA, maxB) - Math.max(minA, minB))
 }
 
+function measureElementMeshOverlapInAxes(
+    element: ElementInfo,
+    widthAxis: THREE.Vector3,
+    depthAxis: THREE.Vector3,
+    upAxis: THREE.Vector3,
+    widthMin: number,
+    widthMax: number,
+    depthMin: number,
+    depthMax: number
+): { hasGeometry: boolean; widthOverlap: number; depthOverlap: number; minUp: number; maxUp: number } {
+    const meshes = collectMeshesFromElement(element)
+    let hasGeometry = false
+    let bestWidthOverlap = 0
+    let bestDepthOverlap = 0
+    let minUp = Infinity
+    let maxUp = -Infinity
+    const p1 = new THREE.Vector3()
+    const p2 = new THREE.Vector3()
+    const p3 = new THREE.Vector3()
+
+    const measureTriangle = (a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) => {
+        hasGeometry = true
+        const widthA = a.dot(widthAxis)
+        const widthB = b.dot(widthAxis)
+        const widthC = c.dot(widthAxis)
+        const depthA = a.dot(depthAxis)
+        const depthB = b.dot(depthAxis)
+        const depthC = c.dot(depthAxis)
+        const upA = a.dot(upAxis)
+        const upB = b.dot(upAxis)
+        const upC = c.dot(upAxis)
+        const triWidthMin = Math.min(widthA, widthB, widthC)
+        const triWidthMax = Math.max(widthA, widthB, widthC)
+        const triDepthMin = Math.min(depthA, depthB, depthC)
+        const triDepthMax = Math.max(depthA, depthB, depthC)
+        const widthOverlap = getIntervalOverlapLength(triWidthMin, triWidthMax, widthMin, widthMax)
+        const depthOverlap = getIntervalOverlapLength(triDepthMin, triDepthMax, depthMin, depthMax)
+        if (widthOverlap > 0 && depthOverlap > 0) {
+            bestWidthOverlap = Math.max(bestWidthOverlap, widthOverlap)
+            bestDepthOverlap = Math.max(bestDepthOverlap, depthOverlap)
+            minUp = Math.min(minUp, upA, upB, upC)
+            maxUp = Math.max(maxUp, upA, upB, upC)
+        }
+    }
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.getAttribute('position')
+        if (!geometry || !positions || positions.count < 3) continue
+        mesh.updateMatrixWorld(true)
+        const index = geometry.getIndex()
+        const processTriangle = (i1: number, i2: number, i3: number) => {
+            p1.set(positions.getX(i1), positions.getY(i1), positions.getZ(i1)).applyMatrix4(mesh.matrixWorld)
+            p2.set(positions.getX(i2), positions.getY(i2), positions.getZ(i2)).applyMatrix4(mesh.matrixWorld)
+            p3.set(positions.getX(i3), positions.getY(i3), positions.getZ(i3)).applyMatrix4(mesh.matrixWorld)
+            measureTriangle(p1, p2, p3)
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i + 2 < index.count; i += 3) {
+                processTriangle(index.getX(i), index.getX(i + 1), index.getX(i + 2))
+            }
+        } else {
+            for (let i = 0; i + 2 < positions.count; i += 3) {
+                processTriangle(i, i + 1, i + 2)
+            }
+        }
+    }
+
+    return {
+        hasGeometry,
+        widthOverlap: bestWidthOverlap,
+        depthOverlap: bestDepthOverlap,
+        minUp,
+        maxUp,
+    }
+}
+
 function getIntervalGapLength(
     minA: number,
     maxA: number,
@@ -1573,7 +1651,7 @@ function findHostSlabs(
 
         const slabWidth = measureBoxAlongAxis(slabBox, widthAxis)
         const slabDepth = measureBoxAlongAxis(slabBox, depthAxis)
-        const slabHeight = measureBoxAlongAxis(slabBox, upAxis)
+        let slabHeight = measureBoxAlongAxis(slabBox, upAxis)
         const localDepthMin = slabDepth.min - originDepth
         const localDepthMax = slabDepth.max - originDepth
         if (
@@ -1583,21 +1661,47 @@ function findHostSlabs(
             continue
         }
 
-        const widthOverlap = getIntervalOverlapLength(
+        const targetWidthMin = doorWidth.min - widthPadding
+        const targetWidthMax = doorWidth.max + widthPadding
+        const targetDepthMin = hostDepth.min - depthPadding
+        const targetDepthMax = hostDepth.max + depthPadding
+
+        let widthOverlap = getIntervalOverlapLength(
             slabWidth.min,
             slabWidth.max,
-            doorWidth.min - widthPadding,
-            doorWidth.max + widthPadding
+            targetWidthMin,
+            targetWidthMax
         )
         if (widthOverlap <= 0.02) continue
 
-        const depthOverlap = getIntervalOverlapLength(
+        let depthOverlap = getIntervalOverlapLength(
             slabDepth.min,
             slabDepth.max,
-            hostDepth.min - depthPadding,
-            hostDepth.max + depthPadding
+            targetDepthMin,
+            targetDepthMax
         )
         if (depthOverlap <= 0.005) continue
+
+        if (slabAggregatePartMap?.has(slab.expressID)) {
+            const meshOverlap = measureElementMeshOverlapInAxes(
+                slab,
+                widthAxis,
+                depthAxis,
+                upAxis,
+                targetWidthMin,
+                targetWidthMax,
+                targetDepthMin,
+                targetDepthMax
+            )
+            if (meshOverlap.hasGeometry) {
+                if (meshOverlap.widthOverlap <= 0.02 || meshOverlap.depthOverlap <= 0.005) continue
+                widthOverlap = meshOverlap.widthOverlap
+                depthOverlap = meshOverlap.depthOverlap
+                if (Number.isFinite(meshOverlap.minUp) && Number.isFinite(meshOverlap.maxUp)) {
+                    slabHeight = { min: meshOverlap.minUp, max: meshOverlap.maxUp }
+                }
+            }
+        }
 
         const overlapScore = widthOverlap + depthOverlap
         const belowGap = doorHeight.min - slabHeight.max
