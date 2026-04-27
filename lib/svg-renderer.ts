@@ -5534,38 +5534,14 @@ function filterContextForElevationOcclusion(
     }
 
     const hostWallExpressID = context.hostWall?.expressID
-    // Override-aware part filter: a part is kept when (a) its parent is the
-    // host wall, or (b) the part's own bbox passes the half-space test, or
-    // (c) the part bbox is a narrow perpendicular T-stub close to the host
-    // wall plane (sharing the same override the parent wall gets in the
-    // elevation filter — otherwise the parent passes but its right-side
-    // parts get dropped, leaving an empty wall area on 0e50Gp / 03Ah /
-    // 1$4oG4LJ / 0mwF46yfq).
-    const PARTS_PERPENDICULAR_NEAR_FACE_TOL = 0.30
-    const PARTS_PERPENDICULAR_WIDTH_LIMIT = 0.40
-    const _widthAxis = context.viewFrame.widthAxis
-    const _originW = context.viewFrame.origin.dot(_widthAxis)
-    const partOverridesOcclusion = (bbox: THREE.Box3 | null | undefined): boolean => {
-        if (!bbox) return false
-        let sideMin = Infinity, sideMax = -Infinity
-        let widthMin = Infinity, widthMax = -Infinity
-        for (const corner of box3Corners(bbox)) {
-            const s = corner.dot(normal) - planeD
-            if (s < sideMin) sideMin = s
-            if (s > sideMax) sideMax = s
-            const w = corner.dot(_widthAxis) - _originW
-            if (w < widthMin) widthMin = w
-            if (w > widthMax) widthMax = w
-        }
-        if (!Number.isFinite(sideMin)) return false
-        if ((widthMax - widthMin) > PARTS_PERPENDICULAR_WIDTH_LIMIT) return false
-        return Math.min(Math.abs(sideMin), Math.abs(sideMax)) <= PARTS_PERPENDICULAR_NEAR_FACE_TOL
-    }
+    // Camera-true: a part is visible iff its parent is the host wall (host
+    // wall + its layered parts always render together) OR the part's own
+    // bbox is on the camera side of the host wall plane. No "perpendicular
+    // T-stub" override — a part that lives entirely behind the host wall
+    // would be hidden by a real camera, so we hide it too.
     const filteredLinks = context.wallAggregatePartLinks.filter((link) => {
-        // Host wall aggregate parts are part of the host wall drawing — keep them.
         if (hostWallExpressID !== undefined && link.parentWallExpressID === hostWallExpressID) return true
-        if (!isOccludedElement(link.part)) return true
-        return partOverridesOcclusion(link.part.boundingBox ?? null)
+        return !isOccludedElement(link.part)
     })
     const allowedPartIds = new Set(filteredLinks.map((l) => l.part.expressID))
 
@@ -5605,75 +5581,13 @@ function filterContextForElevationOcclusion(
         const side = center > +tol ? +1 : center < -tol ? -1 : 0
         return side === sideToDrop
     }
-    // Plan-as-truth: a wall must appear in plan AND pass the half-space
-    // occlusion test to appear in elevation. Both directions of "WALLS AND
-    // DOORS SHOULD BE IDENTICAL between plan and elevation":
-    //   • Plan-vis drop: walls outside the plan corridor (ghost edges from
-    //     the back room) — fixes 0pATJh9w back.
-    //   • Half-space drop: walls whose bbox sits entirely behind the host
-    //     wall plane (back-room interior) — fixes ghost depth in elevation.
-    //
-    // Plane-touch exception: a plan-visible wall whose bbox INCLUDES the
-    // host wall plane (within 5 cm) bypasses the half-space drop. T-junction
-    // perpendicular walls extending into the back room have sideMin ≈ 0 and
-    // sideMax ≫ 0 — `isElementOccluded` would drop them for the front view
-    // even though architecturally they need to render their stirnseite at
-    // the door jamb (03Ah / 0eMcA5 / 1_4oG4LJ / 1$4oG4LJ / 0mwF46yfq v3
-    // feedback). The 5 cm tolerance is intentionally tight: a previous
-    // attempt at 20 cm pulled in walls 10–15 cm behind the host plane and
-    // produced "lines all over" clutter on 0Q6xEX6n.
-    const planVisibility = getPlanVisibility(context)
-    // Two exceptions to the half-space drop, both for plan-visible walls only:
-    //   1. PLANE_TOUCH_TOL (5 cm): catches walls whose bbox sits across the
-    //      host wall plane — coplanar continuations + the wall's own thin
-    //      thickness band.
-    //   2. PERPENDICULAR_NEAR_FACE_TOL (30 cm): a narrow wall (widthAxis
-    //      extent ≤ PERPENDICULAR_WIDTH_LIMIT) is a T-junction by shape.
-    //      Allow it through if its near face is within 30 cm of the host
-    //      plane — that catches wall stubs behind the host wall whose
-    //      stirnseite reads in the front elevation but whose centre is
-    //      "occluded" (0e50Gp / 03Ah / 1$4oG4LJ / 0mwF46yfq right
-    //      perpendicular walls in v3 reviewer feedback). Wider walls don't
-    //      get this exception, so deep parallel partitions stay dropped.
-    const PLANE_TOUCH_TOL = 0.05
-    const PERPENDICULAR_NEAR_FACE_TOL = 0.30
-    const PERPENDICULAR_WIDTH_LIMIT = 0.40
-    const widthAxisLocal = context.viewFrame.widthAxis
-    const originWidthLocal = context.viewFrame.origin.dot(widthAxisLocal)
-    const wallShouldOverrideOcclusion = (bbox: THREE.Box3 | null | undefined): boolean => {
-        if (!bbox) return false
-        let sideMin = Infinity
-        let sideMax = -Infinity
-        let widthMin = Infinity
-        let widthMax = -Infinity
-        for (const corner of box3Corners(bbox)) {
-            const s = corner.dot(normal) - planeD
-            if (s < sideMin) sideMin = s
-            if (s > sideMax) sideMax = s
-            const w = corner.dot(widthAxisLocal) - originWidthLocal
-            if (w < widthMin) widthMin = w
-            if (w > widthMax) widthMax = w
-        }
-        if (!Number.isFinite(sideMin)) return false
-        // Coplanar / wall-thickness-thin walls touch the host plane.
-        if (sideMin <= PLANE_TOUCH_TOL && sideMax >= -PLANE_TOUCH_TOL) return true
-        // Perpendicular walls: narrow widthAxis footprint AND a face close
-        // to the host plane.
-        const widthExt = widthMax - widthMin
-        if (widthExt <= PERPENDICULAR_WIDTH_LIMIT) {
-            if (Math.min(Math.abs(sideMin), Math.abs(sideMax)) <= PERPENDICULAR_NEAR_FACE_TOL) {
-                return true
-            }
-        }
-        return false
-    }
-    const filteredWalls = context.nearbyWalls.filter((w) => {
-        if (!planVisibility.wallIDs.has(w.expressID)) return false
-        if (isElementOccluded(w.boundingBox ?? null) && !wallShouldOverrideOcclusion(w.boundingBox ?? null)) {
-            return false
-        }
-        return true
-    })
+    // Camera-true: a nearby wall is kept iff its bbox is on the camera side
+    // of the host wall plane (or genuinely straddles it — a coplanar
+    // continuation or the wall's own thickness band). No plan-visibility
+    // gate, no perpendicular / plane-touch override: a perpendicular wall
+    // that extends entirely behind the host wall is occluded by the host
+    // wall, so we don't paint its cross-section onto the elevation.
+    const filteredWalls = context.nearbyWalls.filter((w) => !isElementOccluded(w.boundingBox ?? null))
     // Adjacent doors need band-intersection too: a cut-door embedded in the
     // host wall has a thin glazing sub-mesh entirely on one side of the
     // plane. With centre-based per-mesh filtering the glazing gets dropped
@@ -5698,26 +5612,18 @@ function filterContextForElevationOcclusion(
         const center = (mn + mx) / 2
         return Math.abs(center) > NEARBY_DOOR_DEPTH_TOLERANCE
     }
+    // Camera-true: a nearby door is kept iff its bbox is on the camera side
+    // of the host plane AND its body is close enough to the host wall plane
+    // to plausibly be a cut-door (vs a door deep in another room). No plan-
+    // visibility cross-check: the elevation answers "what does the camera
+    // see at this elevation?" and the plan answers "what does the section
+    // plane cut?" — they're different questions.
     const filteredNearbyDoors = context.nearbyDoors.filter((d) => {
         if (isElementOccluded(d.boundingBox ?? null)) return false
         if (isFarFromWallPlane(d.boundingBox ?? null)) return false
-        // Plan-as-truth: only adjacent doors whose body is actually crossed
-        // by the plan cut survive. Catches revisionsöffnung at ceiling /
-        // floor height that v13.C's bbox tolerance could still let through
-        // when the bbox slightly overlaps cutY (0pATJh9w right hatch).
-        if (!planVisibility.doorIDs.has(d.expressID)) return false
         return true
     })
-    // Devices straddling the host wall plane (mounted in/at the door jamb)
-    // belong on both views — surface socket on one side, J-box flush in the
-    // wall, etc. Centre-based filter drops them from one view; band-
-    // intersection keeps them on both ('fehlende elektro-elemente' fix).
-    const filteredNearbyDevices = context.nearbyDevices.filter((d) => {
-        if (isElementOccluded(d.boundingBox ?? null)) return false
-        // Wall-attachment gate — see computePlanVisibility comment.
-        if (!planVisibility.deviceIDs.has(d.expressID)) return false
-        return true
-    })
+    const filteredNearbyDevices = context.nearbyDevices.filter((d) => !isElementOccluded(d.boundingBox ?? null))
 
     const filteredContext: DoorContext = {
         ...context,
