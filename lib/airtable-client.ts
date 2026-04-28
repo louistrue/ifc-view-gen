@@ -156,7 +156,7 @@ function toDoorRecord(raw: { id: string; fields?: Record<string, unknown> }): Do
 
 export async function listDoors(
     config: AirtableConfig,
-    options: { onlyNonValid?: boolean; onlyNo?: boolean } = {}
+    options: { onlyNonValid?: boolean; onlyNo?: boolean; onlyReviewable?: boolean } = {}
 ): Promise<DoorRecord[]> {
     const { token, baseId, tableName } = config
     const out: DoorRecord[] = []
@@ -164,7 +164,13 @@ export async function listDoors(
     do {
         const url = new URL(`${API}/${baseId}/${encodeURIComponent(tableName)}`)
         url.searchParams.set('pageSize', '100')
-        if (options.onlyNo) {
+        if (options.onlyReviewable) {
+            // "Reviewable" = the reviewer queue: Valid='no' (rejected, needs
+            // re-render) OR Valid='check' (rendered, awaiting reviewer's
+            // second look).  Skips Valid='yes' (already approved) and empty
+            // (not yet imported / not in scope).
+            url.searchParams.set('filterByFormula', "OR({Valid} = 'no', {Valid} = 'check')")
+        } else if (options.onlyNo) {
             url.searchParams.set('filterByFormula', "{Valid} = 'no'")
         } else if (options.onlyNonValid) {
             url.searchParams.set('filterByFormula', "NOT({Valid} = 'yes')")
