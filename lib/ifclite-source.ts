@@ -95,6 +95,181 @@ export interface IfcLiteModel {
     /** The IfcType entity id linked to this instance via IfcRelDefinesByType,
      *  or null if none. */
     typeOfInstance(expressId: number): number | null
+    /** IfcProduct/ObjectPlacement local +Y axis in world space (Y-up), if resolvable. */
+    placementYAxis(expressId: number): [number, number, number] | null
+}
+
+interface IfcEntityRaw {
+    type: string
+    args: string[]
+}
+
+function splitTopLevelArgs(raw: string): string[] {
+    const out: string[] = []
+    let depth = 0
+    let inString = false
+    let token = ''
+    for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i]
+        if (ch === '\'') {
+            inString = !inString
+            token += ch
+            continue
+        }
+        if (!inString) {
+            if (ch === '(') depth++
+            else if (ch === ')') depth--
+            else if (ch === ',' && depth === 0) {
+                out.push(token.trim())
+                token = ''
+                continue
+            }
+        }
+        token += ch
+    }
+    if (token.trim().length > 0) out.push(token.trim())
+    return out
+}
+
+function parseIfcEntities(ifcText: string): Map<number, IfcEntityRaw> {
+    const entities = new Map<number, IfcEntityRaw>()
+    const re = /#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*?)\)\s*;/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(ifcText)) !== null) {
+        const id = Number.parseInt(m[1], 10)
+        const type = m[2].toUpperCase()
+        const args = splitTopLevelArgs(m[3])
+        entities.set(id, { type, args })
+    }
+    return entities
+}
+
+function parseRef(raw: string | undefined): number | null {
+    if (!raw) return null
+    const t = raw.trim()
+    if (!t || t === '$' || t === '*') return null
+    const mm = /^#(\d+)$/.exec(t)
+    if (!mm) return null
+    return Number.parseInt(mm[1], 10)
+}
+
+function parseNumberList(raw: string | undefined): number[] | null {
+    if (!raw) return null
+    const t = raw.trim()
+    if (!t.startsWith('(') || !t.endsWith(')')) return null
+    const parts = t.slice(1, -1).split(',').map((s) => s.trim()).filter(Boolean)
+    const out = parts.map((p) => Number.parseFloat(p))
+    return out.every((n) => Number.isFinite(n)) ? out : null
+}
+
+function normalize3(v: [number, number, number]): [number, number, number] {
+    const len = Math.hypot(v[0], v[1], v[2])
+    if (len < 1e-9) return [0, 0, 0]
+    return [v[0] / len, v[1] / len, v[2] / len]
+}
+
+function dot3(a: [number, number, number], b: [number, number, number]): number {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+function cross3(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+function sub3(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+function mulAddBasis(
+    basis: { x: [number, number, number]; y: [number, number, number]; z: [number, number, number] },
+    v: [number, number, number]
+): [number, number, number] {
+    return [
+        basis.x[0] * v[0] + basis.y[0] * v[1] + basis.z[0] * v[2],
+        basis.x[1] * v[0] + basis.y[1] * v[1] + basis.z[1] * v[2],
+        basis.x[2] * v[0] + basis.y[2] * v[1] + basis.z[2] * v[2],
+    ]
+}
+
+function ifcDirection3(entities: Map<number, IfcEntityRaw>, ref: number | null): [number, number, number] | null {
+    if (ref == null) return null
+    const e = entities.get(ref)
+    if (!e || e.type !== 'IFCDIRECTION') return null
+    const ratios = parseNumberList(e.args[0])
+    if (!ratios || ratios.length < 2) return null
+    const x = ratios[0]
+    const y = ratios[1]
+    const z = ratios.length >= 3 ? ratios[2] : 0
+    return normalize3([x, y, z])
+}
+
+function axis2PlacementBasisIfc(entities: Map<number, IfcEntityRaw>, ref: number | null): { x: [number, number, number]; y: [number, number, number]; z: [number, number, number] } | null {
+    if (ref == null) return null
+    const e = entities.get(ref)
+    if (!e) return null
+    if (e.type === 'IFCAXIS2PLACEMENT3D') {
+        const axisRef = parseRef(e.args[1])
+        const refDirRef = parseRef(e.args[2])
+        const z = ifcDirection3(entities, axisRef) ?? [0, 0, 1]
+        let x = ifcDirection3(entities, refDirRef) ?? [1, 0, 0]
+        x = normalize3(sub3(x, [z[0] * dot3(x, z), z[1] * dot3(x, z), z[2] * dot3(x, z)]))
+        if (Math.hypot(x[0], x[1], x[2]) < 1e-8) {
+            x = Math.abs(z[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]
+            x = normalize3(sub3(x, [z[0] * dot3(x, z), z[1] * dot3(x, z), z[2] * dot3(x, z)]))
+        }
+        const y = normalize3(cross3(z, x))
+        return { x, y, z }
+    }
+    if (e.type === 'IFCAXIS2PLACEMENT2D') {
+        const refDirRef = parseRef(e.args[1])
+        const x2 = ifcDirection3(entities, refDirRef) ?? [1, 0, 0]
+        const x = normalize3([x2[0], x2[1], 0])
+        const z: [number, number, number] = [0, 0, 1]
+        const y = normalize3(cross3(z, x))
+        return { x, y, z }
+    }
+    return null
+}
+
+function resolvePlacementBasisIfc(
+    entities: Map<number, IfcEntityRaw>,
+    localPlacementRef: number | null,
+    cache: Map<number, { x: [number, number, number]; y: [number, number, number]; z: [number, number, number] }>,
+    stack: Set<number>
+): { x: [number, number, number]; y: [number, number, number]; z: [number, number, number] } | null {
+    if (localPlacementRef == null) return null
+    const cached = cache.get(localPlacementRef)
+    if (cached) return cached
+    if (stack.has(localPlacementRef)) return null
+    stack.add(localPlacementRef)
+    try {
+        const e = entities.get(localPlacementRef)
+        if (!e || e.type !== 'IFCLOCALPLACEMENT') return null
+        const parentRef = parseRef(e.args[0])
+        const relRef = parseRef(e.args[1])
+        const relBasis = axis2PlacementBasisIfc(entities, relRef)
+        if (!relBasis) return null
+        const parent = resolvePlacementBasisIfc(entities, parentRef, cache, stack)
+            ?? { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }
+        const out = {
+            x: normalize3(mulAddBasis(parent, relBasis.x)),
+            y: normalize3(mulAddBasis(parent, relBasis.y)),
+            z: normalize3(mulAddBasis(parent, relBasis.z)),
+        }
+        cache.set(localPlacementRef, out)
+        return out
+    } finally {
+        stack.delete(localPlacementRef)
+    }
+}
+
+function ifcToMeshYUp(v: [number, number, number]): [number, number, number] {
+    // IFC is Z-up; ifc-lite mesh output is Y-up.
+    return [v[0], v[2], v[1]]
 }
 
 // ts-node in CJS mode rewrites `import()` to `require()`, which can't handle
@@ -148,6 +323,7 @@ export async function loadIfcLiteModel(path: string): Promise<IfcLiteModel> {
         const wasm = await loadWasm()
         const parserMod = await dynamicImport(PARSER_JS)
         const ifcText = readFileSync(path, 'utf8')
+        const ifcEntities = parseIfcEntities(ifcText)
 
         const api = new wasm.IfcAPI()
         const meshCollection = api.parseMeshes(ifcText)
@@ -391,6 +567,20 @@ export async function loadIfcLiteModel(path: string): Promise<IfcLiteModel> {
             return null
         }
 
+        const placementBasisCache = new Map<number, { x: [number, number, number]; y: [number, number, number]; z: [number, number, number] }>()
+        const placementYAxis = (expressId: number): [number, number, number] | null => {
+            const raw = ifcEntities.get(expressId)
+            if (!raw || raw.args.length < 6) return null
+            // IfcProduct inheritance: ObjectPlacement is arg index 5.
+            const localPlacementRef = parseRef(raw.args[5])
+            const basisIfc = resolvePlacementBasisIfc(ifcEntities, localPlacementRef, placementBasisCache, new Set<number>())
+            if (!basisIfc) return null
+            const yMesh = ifcToMeshYUp(basisIfc.y)
+            const planLen = Math.hypot(yMesh[0], yMesh[2])
+            if (planLen < 1e-8) return null
+            return [yMesh[0] / planLen, 0, yMesh[2] / planLen]
+        }
+
         return {
             sourcePath: path,
             meshesByExpressId,
@@ -408,6 +598,7 @@ export async function loadIfcLiteModel(path: string): Promise<IfcLiteModel> {
             typeOf,
             namedAttrs,
             typeOfInstance,
+            placementYAxis,
         }
     } finally {
         restoreLog()

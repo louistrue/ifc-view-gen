@@ -82,6 +82,8 @@ export interface DoorContextLite {
     /** IFC OperationType (e.g. "SINGLE_SWING_LEFT") read from the door instance
      *  or its IfcDoorType, used to pick the plan-view swing-arc handedness. */
     operationType: string | null
+    /** IFC ObjectPlacement local +Y axis in world XZ (normalized), if available. */
+    placementYAxis: [number, number, number] | null
 }
 
 export interface AnalyzeOptions {
@@ -582,5 +584,6 @@ export function analyzeDoor(
         nearbyDevices,
         cset: readCsetData(model, doorId),
         operationType: readOperationType(model, doorId),
+        placementYAxis: model.placementYAxis(doorId),
     }
 }

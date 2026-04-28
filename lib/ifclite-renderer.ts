@@ -25,6 +25,7 @@
  * door-leaf colours).
  */
 import * as THREE from 'three'
+import { appendFileSync } from 'node:fs'
 import {
     DEFAULT_SVG_FONT_FAMILY,
 } from './svg-renderer'
@@ -47,6 +48,32 @@ import type { AABB, DoorContextLite, DoorViewFrame } from './ifclite-door-analyz
 import type { IfcLiteMesh } from './ifclite-source'
 
 const COLORS = loadRenderColors()
+
+function debugLog(
+    runId: string,
+    hypothesisId: string,
+    location: string,
+    message: string,
+    data: Record<string, unknown>
+): void {
+    const payload = {
+        sessionId: '0a5c96',
+        runId,
+        hypothesisId,
+        location,
+        message,
+        data,
+        timestamp: Date.now(),
+    }
+    // #region agent log
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0a5c96'},body:JSON.stringify(payload)}).catch(()=>{});
+    // #endregion
+    try {
+        appendFileSync('debug-0a5c96.log', `${JSON.stringify(payload)}\n`, 'utf8')
+    } catch {
+        // swallow debug logging errors
+    }
+}
 
 export const FIXED_PX_PER_METER = 285
 export const CANVAS_PX = 1000
@@ -1113,6 +1140,35 @@ function parseOperationType(op: string | null): DoorOperation {
     return { kind: 'none', hingeSide: null }
 }
 
+function shouldMirrorSwingForHandedness(ctx: DoorContextLite): boolean {
+    const py = ctx.placementYAxis
+    if (!py) return false
+    const px = py[0], pz = py[2]
+    const plen = Math.hypot(px, pz)
+    if (plen < 1e-8) return false
+    const fx = ctx.viewFrame.facing[0], fz = ctx.viewFrame.facing[2]
+    const flen = Math.hypot(fx, fz)
+    if (flen < 1e-8) return false
+    // Same invariant as legacy renderer:
+    // mirror when placementYAxis · semanticFacing > 0.
+    return (px / plen) * (fx / flen) + (pz / plen) * (fz / flen) > 0
+}
+
+function shouldFlipPlanArc(ctx: DoorContextLite): boolean {
+    const op = (ctx.operationType ?? '').toUpperCase()
+    if (op.includes('REVERSE') || op.includes('OPPOSITE')) return true
+    const py = ctx.placementYAxis
+    if (!py) return false
+    const px = py[0], pz = py[2]
+    const plen = Math.hypot(px, pz)
+    if (plen < 1e-8) return false
+    const fx = ctx.viewFrame.facing[0], fz = ctx.viewFrame.facing[2]
+    const flen = Math.hypot(fx, fz)
+    if (flen < 1e-8) return false
+    // Legacy parity: flip when placementYAxis opposes semantic facing.
+    return (px / plen) * (fx / flen) + (pz / plen) * (fz / flen) < 0
+}
+
 interface PlanCamera {
     /** World→screen for a horizontal point. */
     project(x: number, z: number): { sx: number; sy: number }
@@ -1158,6 +1214,71 @@ function buildPlanCameraNew(
         widthAxis: right,
         openAxis: down,  // +facing = screen-down (swing sweeps downward).
     }
+}
+
+function detectLeafCenterFromDoorMeshes(
+    ctx: DoorContextLite,
+    cutY: number,
+    clearWidth: number
+): { centerOffset: number; width: number } | null {
+    const all: SectionSegment[] = []
+    for (const m of ctx.door.meshes) all.push(...extractMeshSectionSegments(m, cutY))
+    if (all.length === 0) return null
+    const { closedLoops, openChains } = reconstructPolygons(all)
+    const closedExtra: Array<Array<{ x: number; z: number }>> = []
+    for (const chain of openChains) {
+        const closed = tryCloseOpenChain(chain, PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS)
+        if (closed) closedExtra.push(closed)
+    }
+    const loops = [...closedLoops, ...closedExtra]
+    const rawOpen = openChains.filter((chain) => !tryCloseOpenChain(chain, PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS))
+    const wa = ctx.viewFrame.widthAxis
+    const originWidth = ctx.viewFrame.origin[0] * wa[0] + ctx.viewFrame.origin[2] * wa[2]
+    const candidates: Array<{ centerOffset: number; width: number; score: number }> = []
+
+    const pushCandidate = (pts: Array<{ x: number; z: number }>, minPts: number) => {
+        if (pts.length < minPts) return
+        let minA = +Infinity, maxA = -Infinity
+        for (const p of pts) {
+            const a = p.x * wa[0] + p.z * wa[2] - originWidth
+            if (a < minA) minA = a
+            if (a > maxA) maxA = a
+        }
+        if (!isFinite(minA) || !isFinite(maxA)) return
+        const width = maxA - minA
+        if (width < 0.08) return
+        const centerOffset = (minA + maxA) / 2
+        const score = Math.abs(width - clearWidth)
+        candidates.push({ centerOffset, width, score })
+    }
+    for (const loop of loops) pushCandidate(loop, 3)
+    // Many real-world leaf cuts are open chains (non-watertight triangulation).
+    // Use them as candidates too so we still anchor to leaf edges.
+    for (const chain of rawOpen) pushCandidate(chain, 2)
+    // Last resort: per-segment candidates from the raw section soup.
+    for (const seg of all) pushCandidate([seg.a, seg.b], 2)
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => a.score - b.score)
+    const best = candidates[0]
+    const topCandidates = candidates.slice(0, 5).map((c) => ({
+        centerOffset: c.centerOffset,
+        width: c.width,
+        score: c.score,
+    }))
+    if (best.width < clearWidth * 0.55 || best.width > ctx.viewFrame.width + 0.05) return null
+    debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1242', 'leaf candidate stats', {
+        guid: ctx.guid,
+        clearWidth,
+        closedLoops: closedLoops.length,
+        closedFromOpen: closedExtra.length,
+        rawOpenChains: rawOpen.length,
+        rawSegments: all.length,
+        candidateCount: candidates.length,
+        bestWidth: best.width,
+        bestCenterOffset: best.centerOffset,
+        topCandidates,
+    })
+    return { centerOffset: best.centerOffset, width: best.width }
 }
 
 function emitPlanSvg(
@@ -1297,19 +1418,55 @@ function emitPlanSvg(
     //   2. viewFrame.width − 0.10 m              (assume 5 cm jambs each side)
     {
         const op = parseOperationType(ctx.operationType)
+        const mirrorForIfcHandedness = shouldMirrorSwingForHandedness(ctx)
+        debugLog('pre-fix', 'H2-H4', 'ifclite-renderer.ts:1314', 'plan swing entry', {
+            guid: ctx.guid,
+            operationType: ctx.operationType,
+            parsed: op,
+            mirrorForIfcHandedness,
+            placementYAxis: ctx.placementYAxis,
+            widthAxis: ctx.viewFrame.widthAxis,
+            facing: ctx.viewFrame.facing,
+            frameWidth: ctx.viewFrame.width,
+            frameThickness: ctx.viewFrame.thickness,
+        })
         if (process.env.DEBUG_PLAN === '1') {
-            console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)} frameW=${ctx.viewFrame.width.toFixed(2)} clearW=${ctx.cset.massDurchgangsbreite}`)
+            console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)} mirror=${mirrorForIfcHandedness} frameW=${ctx.viewFrame.width.toFixed(2)} clearW=${ctx.cset.massDurchgangsbreite}`)
         }
         if (op.kind === 'swing' && op.hingeSide) {
             const widthAxis2 = cam.widthAxis     // {x,z} along door width
-            const openAxis2 = cam.openAxis       // +facing → screen-down (room arc opens into)
+            const flipArc = shouldFlipPlanArc(ctx)
+            const openAxis2 = cam.openAxis // keep right-handed basis; flip sweep angle only
+            const arcSign = flipArc ? -1 : 1
+            const det2d = widthAxis2.x * openAxis2.z - widthAxis2.z * openAxis2.x
+            debugLog('pre-fix', 'H5', 'ifclite-renderer.ts:1321', 'plan basis determinant', {
+                guid: ctx.guid,
+                widthAxis: widthAxis2,
+                openAxis: openAxis2,
+                det2d,
+            })
+            debugLog('pre-fix', 'H6', 'ifclite-renderer.ts:1323', 'plan arc flip decision', {
+                guid: ctx.guid,
+                flipArc,
+                arcSign,
+                mirrorMode: flipArc ? 'leaf-center-xy' : 'none',
+                placementYAxis: ctx.placementYAxis,
+                facing: ctx.viewFrame.facing,
+            })
             const frameW = ctx.viewFrame.width
             const clearW = (ctx.cset.massDurchgangsbreite != null && ctx.cset.massDurchgangsbreite > 0.05)
                 ? ctx.cset.massDurchgangsbreite
                 : Math.max(frameW - 0.10, 0.6)
             const jambInset = Math.max((frameW - clearW) / 2, 0)  // half the frame thickness on each side
             const faceOffset = ctx.viewFrame.thickness / 2
-            const drawLeaf = (hingeSide: 'left' | 'right', leafW: number, hingeOff: number) => {
+            debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1326', 'plan swing sizing', {
+                guid: ctx.guid,
+                frameW,
+                clearW,
+                jambInset,
+                usesCsetClearWidth: ctx.cset.massDurchgangsbreite != null && ctx.cset.massDurchgangsbreite > 0.05,
+            })
+            const drawLeaf = (hingeSide: 'left' | 'right', leafW: number, hingeOff: number, leafCenterOff: number) => {
                 // Hinge in world (XZ): door centre + widthAxis * hingeOff.
                 // hingeOff = ±(halfFrame - jambInset) so hinge sits at the
                 // INSIDE EDGE of the jamb, not at the bbox corner.
@@ -1318,17 +1475,23 @@ function emitPlanSvg(
                 // Pivot offset along openAxis (door face), faceOffset ahead of wall plane.
                 const pivotX = hingeX + openAxis2.x * faceOffset
                 const pivotZ = hingeZ + openAxis2.z * faceOffset
+                const leafCenterX = ctx.viewFrame.origin[0] + widthAxis2.x * leafCenterOff + openAxis2.x * faceOffset
+                const leafCenterZ = ctx.viewFrame.origin[2] + widthAxis2.z * leafCenterOff + openAxis2.z * faceOffset
                 const startAngle = hingeSide === 'left' ? 0 : Math.PI
-                const endAngle = hingeSide === 'left' ? PLAN_SWING_OPEN_RAD : Math.PI - PLAN_SWING_OPEN_RAD
+                const baseDelta = hingeSide === 'left' ? PLAN_SWING_OPEN_RAD : -PLAN_SWING_OPEN_RAD
+                const endAngle = startAngle + baseDelta * arcSign
                 const N = 24
                 let prevS: Pt | null = null
                 for (let i = 0; i <= N; i++) {
                     const t = i / N
                     const ang = startAngle + (endAngle - startAngle) * t
-                    const dirX = widthAxis2.x * Math.cos(ang) + openAxis2.x * Math.sin(ang)
-                    const dirZ = widthAxis2.z * Math.cos(ang) + openAxis2.z * Math.sin(ang)
-                    const px = pivotX + dirX * leafW
-                    const pz = pivotZ + dirZ * leafW
+                    const openAxisSign = xAxisMirrorOnly ? -1 : 1
+                    const dirX = widthAxis2.x * Math.cos(ang) + openAxis2.x * Math.sin(ang) * openAxisSign
+                    const dirZ = widthAxis2.z * Math.cos(ang) + openAxis2.z * Math.sin(ang) * openAxisSign
+                    const rawPx = pivotX + dirX * leafW
+                    const rawPz = pivotZ + dirZ * leafW
+                    const px = flipArc ? (2 * leafCenterX - rawPx) : rawPx
+                    const pz = flipArc ? (2 * leafCenterZ - rawPz) : rawPz
                     const s = projP({ x: px, z: pz })
                     if (prevS) {
                         segs.push({ x1: prevS.x, y1: prevS.y, x2: s.x, y2: s.y, layer: 7, color: '#666666' })
@@ -1337,25 +1500,180 @@ function emitPlanSvg(
                 }
                 // Leaf line: pivot → arc tip at 15° open position.
                 const tipAng = endAngle
-                const tipDirX = widthAxis2.x * Math.cos(tipAng) + openAxis2.x * Math.sin(tipAng)
-                const tipDirZ = widthAxis2.z * Math.cos(tipAng) + openAxis2.z * Math.sin(tipAng)
-                const tipX = pivotX + tipDirX * leafW
-                const tipZ = pivotZ + tipDirZ * leafW
-                const hingeS = projP({ x: pivotX, z: pivotZ })
+                const openAxisSign = xAxisMirrorOnly ? -1 : 1
+                const tipDirX = widthAxis2.x * Math.cos(tipAng) + openAxis2.x * Math.sin(tipAng) * openAxisSign
+                const tipDirZ = widthAxis2.z * Math.cos(tipAng) + openAxis2.z * Math.sin(tipAng) * openAxisSign
+                const rawTipX = pivotX + tipDirX * leafW
+                const rawTipZ = pivotZ + tipDirZ * leafW
+                const tipX = flipArc ? (2 * leafCenterX - rawTipX) : rawTipX
+                const tipZ = flipArc ? (2 * leafCenterZ - rawTipZ) : rawTipZ
+                const lineStartBaseX = pivotX
+                const lineStartBaseZ = pivotZ
+                const lineStartX = flipArc ? (2 * leafCenterX - lineStartBaseX) : lineStartBaseX
+                const lineStartZ = flipArc ? (2 * leafCenterZ - lineStartBaseZ) : lineStartBaseZ
+                const hingeS = projP({ x: lineStartX, z: lineStartZ })
                 const tipS = projP({ x: tipX, z: tipZ })
+                debugLog('pre-fix', 'H3-H4', 'ifclite-renderer.ts:1345', 'plan swing leaf geometry', {
+                    guid: ctx.guid,
+                    hingeSide,
+                    leafW,
+                    hingeOff,
+                    leafCenterOff,
+                    flipArc,
+                    xAxisMirrorOnly,
+                    pivotWorld: { x: pivotX, z: pivotZ },
+                    hingeWorld: { x: hingeX, z: hingeZ },
+                    lineStartMode: 'pivot-face',
+                    lineStartWorld: { x: lineStartX, z: lineStartZ },
+                    tipWorld: { x: tipX, z: tipZ },
+                    pivotScreen: hingeS,
+                    tipScreen: tipS,
+                    widthAxis: widthAxis2,
+                    openAxis: openAxis2,
+                })
                 segs.push({ x1: hingeS.x, y1: hingeS.y, x2: tipS.x, y2: tipS.y, layer: 7, color: '#666666' })
             }
+            const hingeSideResolved: 'left' | 'right' | 'both' =
+                op.hingeSide === 'both'
+                    ? 'both'
+                    : (mirrorForIfcHandedness
+                        ? (op.hingeSide === 'left' ? 'right' : 'left')
+                        : op.hingeSide)
+            let leafWidthForSingle = clearW
+            let centerOffsetForSingle = 0
+            let centeredOffsetUsed = true
+            const hasSignificantFixedPanel = clearW > 0.3 && clearW < frameW - 0.1
+            if (hingeSideResolved !== 'both' && hasSignificantFixedPanel) {
+                const detected = detectLeafCenterFromDoorMeshes(ctx, cutY, clearW)
+                if (detected) {
+                    leafWidthForSingle = detected.width
+                    centerOffsetForSingle = detected.centerOffset
+                    centeredOffsetUsed = false
+                    debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1381', 'detected asymmetric leaf', {
+                        guid: ctx.guid,
+                        clearW,
+                        frameW,
+                        detectedWidth: detected.width,
+                        detectedCenterOffset: detected.centerOffset,
+                    })
+                } else {
+                    debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1388', 'asymmetric leaf detection failed, using centered fallback', {
+                        guid: ctx.guid,
+                        clearW,
+                        frameW,
+                    })
+                }
+            }
             const halfClear = clearW / 2
-            if (op.hingeSide === 'both') {
+            let hingeSideResolvedFinal: 'left' | 'right' | 'both' = hingeSideResolved
+            const xAxisMirrorOnly =
+                hingeSideResolvedFinal !== 'both'
+                && mirrorForIfcHandedness
+                && !flipArc
+                && hasSignificantFixedPanel
+                && !centeredOffsetUsed
+            debugLog('pre-fix', 'H12', 'ifclite-renderer.ts:1394', 'x-axis mirror mode decision', {
+                guid: ctx.guid,
+                operationType: ctx.operationType,
+                mirrorForIfcHandedness,
+                flipArc,
+                xAxisMirrorOnly,
+                centeredOffsetUsed,
+                hasSignificantFixedPanel,
+            })
+            if (hingeSideResolvedFinal !== 'both') {
+                const rightNoMirror = op.hingeSide === 'right'
+                const hingeNoMirror = rightNoMirror
+                    ? centerOffsetForSingle + (leafWidthForSingle / 2)
+                    : centerOffsetForSingle - (leafWidthForSingle / 2)
+                const rightMirror = !rightNoMirror
+                const hingeMirror = rightMirror
+                    ? centerOffsetForSingle + (leafWidthForSingle / 2)
+                    : centerOffsetForSingle - (leafWidthForSingle / 2)
+                const halfFrame = frameW / 2
+                const edgeSlackNoMirror = Math.min(
+                    Math.abs((centerOffsetForSingle - leafWidthForSingle / 2) - (-halfFrame)),
+                    Math.abs((centerOffsetForSingle + leafWidthForSingle / 2) - halfFrame),
+                )
+                const leafLeft = centerOffsetForSingle - (leafWidthForSingle / 2)
+                const leafRight = centerOffsetForSingle + (leafWidthForSingle / 2)
+                const leftSlack = Math.abs(leafLeft - (-halfFrame))
+                const rightSlack = Math.abs(halfFrame - leafRight)
+                const geometricPreferredHinge: 'left' | 'right' = leftSlack < rightSlack ? 'left' : 'right'
+                const semanticResolvedHinge: 'left' | 'right' = hingeSideResolvedFinal === 'left' ? 'left' : 'right'
+                const handednessConflict = geometricPreferredHinge !== semanticResolvedHinge
+                if (xAxisMirrorOnly && handednessConflict) {
+                    hingeSideResolvedFinal = geometricPreferredHinge
+                    debugLog('pre-fix', 'H14', 'ifclite-renderer.ts:1398', 'conflict fallback: geometric hinge under x-axis mirror', {
+                        guid: ctx.guid,
+                        operationType: ctx.operationType,
+                        previousHinge: semanticResolvedHinge,
+                        overriddenHinge: hingeSideResolvedFinal,
+                        geometricPreferredHinge,
+                        mirrorForIfcHandedness,
+                        flipArc,
+                        xAxisMirrorOnly,
+                    })
+                }
+                debugLog('pre-fix', 'H13', 'ifclite-renderer.ts:1386', 'semantic-vs-geometry handedness', {
+                    guid: ctx.guid,
+                    operationType: ctx.operationType,
+                    mirrorForIfcHandedness,
+                    flipArc,
+                    geometricPreferredHinge,
+                    semanticResolvedHinge,
+                    handednessConflict,
+                    leafLeft,
+                    leafRight,
+                    halfFrame,
+                    leftSlack,
+                    rightSlack,
+                })
+                debugLog('pre-fix', 'H8-H10', 'ifclite-renderer.ts:1374', 'hinge alternatives', {
+                    guid: ctx.guid,
+                    operationType: ctx.operationType,
+                    mirrorForIfcHandedness,
+                    flipArc,
+                    centerOffsetForSingle,
+                    leafWidthForSingle,
+                    frameW,
+                    selectedHingeSide: hingeSideResolved,
+                    selectedHingeOffset: hingeSideResolvedFinal === 'left'
+                        ? centerOffsetForSingle - (leafWidthForSingle / 2)
+                        : centerOffsetForSingle + (leafWidthForSingle / 2),
+                    selectedHingeSideAfterConflictPolicy: hingeSideResolvedFinal,
+                    noMirror: {
+                        hingeSide: rightNoMirror ? 'right' : 'left',
+                        hingeOffset: hingeNoMirror,
+                    },
+                    mirror: {
+                        hingeSide: rightMirror ? 'right' : 'left',
+                        hingeOffset: hingeMirror,
+                    },
+                    leafEdgeSlackToFrame: edgeSlackNoMirror,
+                })
+            }
+            debugLog('pre-fix', 'H1-H2', 'ifclite-renderer.ts:1370', 'plan swing resolved hinge', {
+                guid: ctx.guid,
+                inputHinge: op.hingeSide,
+                resolvedHinge: hingeSideResolvedFinal,
+                halfClear,
+                centeredOffsetUsed,
+                leafWidthForSingle,
+                centerOffsetForSingle,
+            })
+            if (hingeSideResolvedFinal === 'both') {
                 // Double swing: each leaf is half the clear width.
-                drawLeaf('left', halfClear, -halfClear)
-                drawLeaf('right', halfClear, +halfClear)
+                drawLeaf('left', halfClear, -halfClear, -halfClear / 2)
+                drawLeaf('right', halfClear, +halfClear, +halfClear / 2)
             } else {
                 // Hinge at the INSIDE edge of the jamb (frame-thickness inset
                 // from bbox corner), arc spans the clear width to the
                 // opposite jamb's INSIDE edge.
-                const hingeOff = op.hingeSide === 'left' ? -halfClear : +halfClear
-                drawLeaf(op.hingeSide, clearW, hingeOff)
+                const hingeOff = hingeSideResolvedFinal === 'left'
+                    ? centerOffsetForSingle - (leafWidthForSingle / 2)
+                    : centerOffsetForSingle + (leafWidthForSingle / 2)
+                drawLeaf(hingeSideResolvedFinal, leafWidthForSingle, hingeOff, centerOffsetForSingle)
             }
         }
     }
