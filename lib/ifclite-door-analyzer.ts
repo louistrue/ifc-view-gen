@@ -206,21 +206,26 @@ function buildDoorViewFrame(bbox: AABB): DoorViewFrame {
     const centre = bboxCentre(bbox)
     // Y is up in IFC-Lite output. The two horizontal axes are X and Z.
     // The smaller of (extX, extZ) is wall thickness (door normal direction).
-    let widthAxis: [number, number, number]
     let facing: [number, number, number]
     let width: number
     let thickness: number
     if (ext[0] >= ext[2]) {
-        widthAxis = [1, 0, 0]
         facing = [0, 0, 1]
         width = ext[0]
         thickness = ext[2]
     } else {
-        widthAxis = [0, 0, 1]
         facing = [1, 0, 0]
         width = ext[2]
         thickness = ext[0]
     }
+    // Enforce a right-handed local frame:
+    //   widthAxis = up × facing
+    // This avoids mirrored projections when the door's thin axis is X.
+    const widthAxis: [number, number, number] = [
+        facing[2],
+        0,
+        -facing[0],
+    ]
     const height = ext[1]
     // Origin: bottom centre of door bbox in plan, Y at bbox bottom.
     const origin: [number, number, number] = [centre[0], bbox.min[1], centre[2]]
