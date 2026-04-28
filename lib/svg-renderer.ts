@@ -28,40 +28,6 @@ import {
     resolveWallElevationColor,
 } from './color-config'
 
-// #region agent log
-const agentDebugLogPromises: Promise<unknown>[] = []
-let agentDebugLogFlushInstalled = false
-
-function agentDebugLog(
-    hypothesisId: string,
-    location: string,
-    message: string,
-    data: Record<string, unknown>
-): void {
-    const request = fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9a86b4' },
-        body: JSON.stringify({
-            sessionId: '9a86b4',
-            runId: 'pre-fix',
-            hypothesisId,
-            location,
-            message,
-            data,
-            timestamp: Date.now(),
-        }),
-    }).catch(() => {})
-    agentDebugLogPromises.push(request)
-
-    if (!agentDebugLogFlushInstalled && typeof process !== 'undefined') {
-        agentDebugLogFlushInstalled = true
-        process.on('beforeExit', async () => {
-            await Promise.allSettled(agentDebugLogPromises)
-        })
-    }
-}
-// #endregion
-
 export interface SVGRenderOptions {
     width?: number
     height?: number
@@ -5445,27 +5411,6 @@ function filterContextForElevationOcclusion(
     // handles mesh-tessellation jitter.
     const tol = Math.max(halfThickness, 0.01) + 0.02
 
-    // #region agent log
-    agentDebugLog('H1,H2,H3', 'lib/svg-renderer.ts:filterContextForElevationOcclusion:plane', 'Elevation occlusion plane and raw context counts', {
-        doorId: context.doorId,
-        view: isBackView ? 'back' : 'front',
-        hostWallExpressID: context.hostWall?.expressID ?? null,
-        planeD,
-        normal: { x: normal.x, y: normal.y, z: normal.z },
-        halfThickness,
-        tol,
-        rawCounts: {
-            nearbyWalls: context.nearbyWalls.length,
-            wallAggregateParts: context.wallAggregatePartLinks.length,
-            nearbyDoors: context.nearbyDoors.length,
-            nearbyWindows: context.nearbyWindows?.length ?? 0,
-            nearbyStairs: context.nearbyStairs.length,
-            hostSlabsBelow: context.hostSlabsBelow.length,
-            hostSlabsAbove: context.hostSlabsAbove.length,
-        },
-    })
-    // #endregion
-
     const DEBUG = typeof process !== 'undefined' && process.env?.DEBUG_HALFSPACE === '1'
     if (DEBUG) {
         console.log(
@@ -5599,25 +5544,6 @@ function filterContextForElevationOcclusion(
             keepBySectionCriterion,
         }
     }
-    // #region agent log
-    agentDebugLog(
-        'H1,H2,H3',
-        'lib/svg-renderer.ts:filterContextForElevationOcclusion:section-criterion',
-        'Directional section criterion constants',
-        {
-            doorId: context.doorId,
-            view: isBackView ? 'back' : 'front',
-            sideToDrop,
-            visibleSide,
-            tol,
-            sectionRule: {
-                visibleSideMaxBeyondBand: SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND,
-                hiddenSideMaxBeyondBand: SECTION_HIDDEN_SIDE_MAX_BEYOND_BAND,
-                bandMinOverlap: SECTION_BAND_MIN_OVERLAP,
-            },
-        }
-    )
-    // #endregion
     const partDecisions: Array<{
         partExpressID: number
         parentWallExpressID: number
@@ -5665,15 +5591,6 @@ function filterContextForElevationOcclusion(
         return kept
     })
     const allowedPartIds = new Set(filteredLinks.map((l) => l.part.expressID))
-
-    // #region agent log
-    agentDebugLog('H2,H3', 'lib/svg-renderer.ts:filterContextForElevationOcclusion:parts', 'Wall aggregate part side decisions', {
-        doorId: context.doorId,
-        view: isBackView ? 'back' : 'front',
-        decisions: partDecisions.slice(0, 30),
-        total: partDecisions.length,
-    })
-    // #endregion
 
     // Walls need band-intersection classification instead of center-based:
     // a perpendicular cut-wall at the door jamb has its bbox CENTRE deep into
@@ -5905,15 +5822,6 @@ function filterContextForElevationOcclusion(
     })
     const filteredWalls = wallDecisions.filter((entry) => entry.kept).map((entry) => entry.wall)
 
-    // #region agent log
-    agentDebugLog('H1,H2', 'lib/svg-renderer.ts:filterContextForElevationOcclusion:walls', 'Nearby wall side decisions', {
-        doorId: context.doorId,
-        view: isBackView ? 'back' : 'front',
-        decisions: wallDecisions.slice(0, 30).map(({ wall, ...entry }) => entry),
-        total: wallDecisions.length,
-        kept: filteredWalls.length,
-    })
-    // #endregion
     // Adjacent doors need band-intersection too: a cut-door embedded in the
     // host wall has a thin glazing sub-mesh entirely on one side of the
     // plane. With centre-based per-mesh filtering the glazing gets dropped
@@ -6264,47 +6172,6 @@ function renderElevationFromMeshes(
     )
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
-
-    // #region agent log
-    const finalEdgesCount = renderGeometry.edges.length
-    const finalPolygonsCount = renderGeometry.polygons.length
-    const estimatedSourceEdgeMix = {
-        wallAfterOcclusion: wallGeometry.edges.length,
-        nearbyWall: clippedNearbyWallGeometry.edges.length,
-        slab: slabGeometry.edges.length,
-        ceiling: ceilingGeometry.edges.length,
-        stair: stairGeometry.edges.length,
-        nearbyDoor: clippedNearbyDoorGeometry.edges.length,
-        nearbyWindow: clippedNearbyWindowGeometry.edges.length,
-        device: deviceGeometry.edges.length,
-    }
-    agentDebugLog('H1,H2,H3,H4', 'lib/svg-renderer.ts:renderElevationFromMeshes:geometryCounts', 'Elevation rendered geometry counts by source', {
-        doorId: context.doorId,
-        view: isBackView ? 'back' : 'front',
-        meshIds: {
-            hostAndCoplanarWalls: [...new Set(wallMeshes.map((m) => m.userData?.expressID).filter((id) => typeof id === 'number'))],
-            nearbyWalls: [...new Set((context.detailedGeometry?.nearbyWallMeshes ?? []).map((m) => m.userData?.expressID).filter((id) => typeof id === 'number'))],
-            wallParts: [...new Set((context.detailedGeometry?.wallAggregatePartMeshes ?? []).map((m) => m.userData?.expressID).filter((id) => typeof id === 'number'))],
-        },
-        counts: {
-            preSourceLogEdgeCount: renderGeometry.edges.length,
-            nearbyWallRawEdges: nearbyWallGeometry.edges.length,
-            nearbyWallClippedEdges: clippedNearbyWallGeometry.edges.length,
-            wallProjectedEdgesBeforeOcclusion: wallProjected.edges.length,
-            wallEdgesAfterOcclusion: wallGeometry.edges.length,
-            slabEdges: slabGeometry.edges.length,
-            ceilingEdges: ceilingGeometry.edges.length,
-            stairEdges: stairGeometry.edges.length,
-            nearbyDoorEdges: clippedNearbyDoorGeometry.edges.length,
-            nearbyWindowEdges: clippedNearbyWindowGeometry.edges.length,
-            deviceEdges: deviceGeometry.edges.length,
-            finalEdges: finalEdgesCount,
-            finalPolygons: finalPolygonsCount,
-        },
-        estimatedSourceEdgeMix,
-        clip: elevationHostClipBounds,
-    })
-    // #endregion
 
     const doorAnchorProjected = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
     const doorAnchor = { x: doorAnchorProjected.x, y: doorAnchorProjected.y }
