@@ -744,9 +744,39 @@ function emitElevationSvg(
             })
         }
     }
-    // Nearby walls also as bbox rects but at the same wall layer (so the host
-    // wall's outline reads through them visually).
+    // bbox centre helper (defined locally to avoid an analyzer import).
+    const bboxCenter = (b: AABB): [number, number, number] => [
+        (b.min[0] + b.max[0]) / 2,
+        (b.min[1] + b.max[1]) / 2,
+        (b.min[2] + b.max[2]) / 2,
+    ]
+    // Hide nearby walls that sit behind the host wall in this elevation: the
+    // host wall blocks the camera's view of anything on the opposite side, so
+    // perpendicular walls / room returns in the far room must NOT render here.
+    //
+    //   front view: camera at +facing → wall is visible if its centre lies on
+    //               the +facing side of the host-wall mid-plane (or in-plane).
+    //   back view : opposite.
+    //
+    // Tolerance: a 5 cm dead-band around the host plane keeps walls that
+    // straddle the plane (pass-through partitions, stub returns coplanar
+    // with the host) visible in BOTH views.
+    const facing = ctx.viewFrame.facing
+    const projectFacing = (p: [number, number, number]) => p[0] * facing[0] + p[2] * facing[2]
+    const hostPlaneFacing = ctx.hostWall
+        ? projectFacing(bboxCenter(ctx.hostWall.bbox))
+        : projectFacing(ctx.viewFrame.origin)
+    const cameraSign = side === 'front' ? 1 : -1
+    const isWallVisibleInElevation = (bbox: AABB): boolean => {
+        const c = bboxCenter(bbox)
+        const delta = projectFacing(c) - hostPlaneFacing
+        // delta >  0 → wall is on +facing side
+        // delta <  0 → wall is on -facing side
+        // We keep walls on the camera side OR in the host plane.
+        return delta * cameraSign > -0.05
+    }
     for (const w of ctx.nearbyWalls) {
+        if (!isWallVisibleInElevation(w.bbox)) continue
         const wbb: AABB = {
             min: [w.bbox.min[0], Math.max(w.bbox.min[1], viewportBottomY), w.bbox.min[2]],
             max: [w.bbox.max[0], Math.min(w.bbox.max[1], viewportTopY), w.bbox.max[2]],
@@ -798,36 +828,50 @@ function emitElevationSvg(
     // Above that, render the structural slab cap stripe (10 cm) with strokes,
     // then the Unterlagsboden parts (build-up / screed / finish) up to the
     // door foot — typically 5–20 cm of additional layers stacked on top.
-    if (ctx.slabBelow) {
-        const slabTopY = ctx.slabBelow.bbox.max[1]
-        // 10 cm structural slab intrusion: from viewportBottomY (= slabTop - 0.1)
-        // up to slabTopY.  Drawn with strokes at top + bottom, like legacy.
-        drawHorizontalBand(viewportBottomY, slabTopY, options.colors.elevation.wall, 2, ctx.slabBelow.expressId, true)
-        // Unterlagsboden / build-up parts: each part is drawn as a band in the
-        // wall colour (or its BKP colour if set later).  Sort bottom→top so
-        // strokes layer cleanly.  Each part is clamped to viewportTopY so it
-        // doesn't bleed past the storey.
-        const parts = [...ctx.slabBelowParts].sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
-        for (const part of parts) {
-            const yLo = Math.max(part.bbox.min[1], slabTopY)
-            const yHi = Math.min(part.bbox.max[1], viewportTopY)
-            if (yHi - yLo < 0.005) continue
-            drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
+    // ── Bottom 10 cm structural slab cap ────────────────────────────────────
+    // Always render a 10 cm band at the bottom of the storey viewport, even
+    // when the analyzer couldn't locate a slabBelow.  viewportBottomY is
+    //   slabBelow.top − 0.10 m   when slab is found
+    //   doorBottom    − 0.10 m   fallback
+    // so the band ALWAYS sits exactly under the door foot (or the slab top
+    // when known).  This guarantees the 10 cm structural-slab cap reads
+    // consistently across every door, including basement entrances and
+    // raised-threshold doors where the analyzer's plan-radius search misses.
+    {
+        const slabBelowExpressId = ctx.slabBelow?.expressId ?? -1
+        const slabBandTopY = ctx.slabBelow
+            ? ctx.slabBelow.bbox.max[1]
+            : doorBottom
+        drawHorizontalBand(viewportBottomY, slabBandTopY, options.colors.elevation.wall, 2, slabBelowExpressId, true)
+        // Unterlagsboden / build-up parts above the structural slab.
+        if (ctx.slabBelow) {
+            const parts = [...ctx.slabBelowParts].sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
+            for (const part of parts) {
+                const yLo = Math.max(part.bbox.min[1], slabBandTopY)
+                const yHi = Math.min(part.bbox.max[1], viewportTopY)
+                if (yHi - yLo < 0.005) continue
+                drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
+            }
         }
     }
-    // Top: 10 cm INTO the structural slab above
-    //   = slabAbove.bottom + 10 cm  (show the bottom 10 cm of the slab body).
-    // Below that, render the slab parts (suspended ceiling, finish layers)
-    // hanging off the slab underside down to the door head area.
-    if (ctx.slabAbove) {
-        const slabBotY = ctx.slabAbove.bbox.min[1]
-        drawHorizontalBand(slabBotY, viewportTopY, options.colors.elevation.wall, 2, ctx.slabAbove.expressId, true)
-        const parts = [...ctx.slabAboveParts].sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
-        for (const part of parts) {
-            const yHi = Math.min(part.bbox.max[1], slabBotY)
-            const yLo = Math.max(part.bbox.min[1], viewportBottomY)
-            if (yHi - yLo < 0.005) continue
-            drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
+    // ── Top 10 cm structural slab cap (slabAbove) ───────────────────────────
+    // Same idea: always paint a 10 cm band at the storey-top reference.
+    // Falls back to viewportTopY when slabAbove is missing, so we never have
+    // an empty top edge for storeys without a detected ceiling slab.
+    {
+        const slabAboveExpressId = ctx.slabAbove?.expressId ?? -1
+        const slabBandBotY = ctx.slabAbove
+            ? ctx.slabAbove.bbox.min[1]
+            : viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS
+        drawHorizontalBand(slabBandBotY, viewportTopY, options.colors.elevation.wall, 2, slabAboveExpressId, true)
+        if (ctx.slabAbove) {
+            const parts = [...ctx.slabAboveParts].sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
+            for (const part of parts) {
+                const yHi = Math.min(part.bbox.max[1], slabBandBotY)
+                const yLo = Math.max(part.bbox.min[1], viewportBottomY)
+                if (yHi - yLo < 0.005) continue
+                drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
+            }
         }
     }
 
@@ -844,13 +888,43 @@ function emitElevationSvg(
     }
     groups.sort((a, b) => a.layer - b.layer)
 
-    // Original renderer showed only the storey CODE (e.g. "00EG", "-1UG"),
-    // not the full long name.  Use the first whitespace-separated token, which
-    // is the ARM convention in the Flu21 source IFC.
+    // Storey marker (▼ + label) at the storey-elevation reference Y, in the
+    // right-side margin.  Mirrors legacy `renderStoreyMarkerSvg`:
+    //   - filled black ▼ triangle pointing AT the slab top (the floor line)
+    //   - storey CODE (first whitespace-separated token of the long name)
+    //     placed ABOVE the triangle, right-anchored
+    // Falls back to door-foot Y when storeyElevation is unknown.
     const labelShort = ctx.storeyName ? ctx.storeyName.split(/\s+/)[0] : ''
-    const labelText = labelShort ? `${labelShort} ▼` : ''
     const fontFamily = DEFAULT_SVG_FONT_FAMILY
     const labelFont = 22
+    const storeyMarkerSvg = (() => {
+        if (!labelShort) return ''
+        const refWorldY = (typeof ctx.storeyElevation === 'number' && Number.isFinite(ctx.storeyElevation))
+            ? ctx.storeyElevation
+            : doorBottom
+        const refScreenY = yScreenAt(refWorldY)
+        // Clamp marker Y inside canvas with breathing room for label.
+        const triHeight = 14
+        const triHalfWidth = 7
+        const labelGap = 8
+        const minMarkerY = labelFont + labelGap + triHeight + 4
+        const maxMarkerY = H - 6
+        const markerY = Math.max(minMarkerY, Math.min(maxMarkerY, refScreenY))
+        const markerX = W - 30
+        const labelY = markerY - triHeight - labelGap
+        const escaped = escapeSvgText(labelShort)
+        const triPts = [
+            `${(markerX - triHalfWidth).toFixed(2)},${(markerY - triHeight).toFixed(2)}`,
+            `${(markerX + triHalfWidth).toFixed(2)},${(markerY - triHeight).toFixed(2)}`,
+            `${markerX.toFixed(2)},${markerY.toFixed(2)}`,
+        ].join(' ')
+        return [
+            `<g id="storey-marker">`,
+            `<polygon points="${triPts}" fill="#000000"/>`,
+            `<text x="${markerX.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="end" font-family="${fontFamily}" font-size="${labelFont}" font-weight="600" fill="#000">${escaped}</text>`,
+            `</g>`,
+        ].join('')
+    })()
 
     const groupSvg = groups.map((g) => {
         const polys = g.polygons.map(svgPolygon).join('')
@@ -859,22 +933,17 @@ function emitElevationSvg(
         return `<g data-layer="${g.layer}">${polys}${segs}</g>`
     }).join('\n')
 
-    // SVG-level safety clip — Sutherland-Hodgman already crops fills, but the
-    // clipPath catches stroke half-widths and any rounding leaks at the storey
-    // edge so the multi-storey wall doesn't poke past the slab band.
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${fontFamily}">`,
         svgWebFontDefs(fontFamily),
-        // Full-canvas clip — Sutherland-Hodgman already crops triangle fills
-        // to the storey rect; this is just the canvas safety boundary.
         `<defs><clipPath id="storey-clip"><rect x="0" y="0" width="${W}" height="${H}"/></clipPath></defs>`,
         `<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />`,
         `<g clip-path="url(#storey-clip)">`,
         groupSvg,
         `</g>`,
-        labelText
-            ? `<text x="${W - 24}" y="${H - 24}" text-anchor="end" font-size="${labelFont}" font-weight="600" fill="#000">${escapeSvgText(labelText)}</text>`
-            : '',
+        // Storey marker is OUTSIDE the storey-clip group so it can never get
+        // overdrawn by a stray wall band.  It's the topmost element.
+        storeyMarkerSvg,
         `</svg>`,
     ].join('\n')
 }
