@@ -1074,7 +1074,10 @@ function buildPlanCameraNew(
     const down = { x: fa[0], z: fa[2] }  // screen-down direction in world XZ
     const scale = FIXED_PX_PER_METER
     const offsetX = canvasW / 2
-    const offsetY = canvasH * 0.30
+    // Door anchored vertically near canvas centre (slightly above) so the
+    // back band, the door cut, and the swing arc all read inside the visible
+    // crop with whitespace evenly distributed.  Matches legacy framing.
+    const offsetY = canvasH * 0.45
     return {
         project(x: number, z: number) {
             const lx = x - cx, lz = z - cz
