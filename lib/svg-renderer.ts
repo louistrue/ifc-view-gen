@@ -28,6 +28,40 @@ import {
     resolveWallElevationColor,
 } from './color-config'
 
+// #region agent log
+const agentDebugLogPromises: Promise<unknown>[] = []
+let agentDebugLogFlushInstalled = false
+
+function agentDebugLog(
+    hypothesisId: string,
+    location: string,
+    message: string,
+    data: Record<string, unknown>
+): void {
+    const request = fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9a86b4' },
+        body: JSON.stringify({
+            sessionId: '9a86b4',
+            runId: 'pre-fix',
+            hypothesisId,
+            location,
+            message,
+            data,
+            timestamp: Date.now(),
+        }),
+    }).catch(() => {})
+    agentDebugLogPromises.push(request)
+
+    if (!agentDebugLogFlushInstalled && typeof process !== 'undefined') {
+        agentDebugLogFlushInstalled = true
+        process.on('beforeExit', async () => {
+            await Promise.allSettled(agentDebugLogPromises)
+        })
+    }
+}
+// #endregion
+
 export interface SVGRenderOptions {
     width?: number
     height?: number
@@ -5411,6 +5445,27 @@ function filterContextForElevationOcclusion(
     // handles mesh-tessellation jitter.
     const tol = Math.max(halfThickness, 0.01) + 0.02
 
+    // #region agent log
+    agentDebugLog('H1,H2,H3', 'lib/svg-renderer.ts:filterContextForElevationOcclusion:plane', 'Elevation occlusion plane and raw context counts', {
+        doorId: context.doorId,
+        view: isBackView ? 'back' : 'front',
+        hostWallExpressID: context.hostWall?.expressID ?? null,
+        planeD,
+        normal: { x: normal.x, y: normal.y, z: normal.z },
+        halfThickness,
+        tol,
+        rawCounts: {
+            nearbyWalls: context.nearbyWalls.length,
+            wallAggregateParts: context.wallAggregatePartLinks.length,
+            nearbyDoors: context.nearbyDoors.length,
+            nearbyWindows: context.nearbyWindows?.length ?? 0,
+            nearbyStairs: context.nearbyStairs.length,
+            hostSlabsBelow: context.hostSlabsBelow.length,
+            hostSlabsAbove: context.hostSlabsAbove.length,
+        },
+    })
+    // #endregion
+
     const DEBUG = typeof process !== 'undefined' && process.env?.DEBUG_HALFSPACE === '1'
     if (DEBUG) {
         console.log(
@@ -5495,40 +5550,130 @@ function filterContextForElevationOcclusion(
     }
 
     const hostWallExpressID = context.hostWall?.expressID
-    // Override-aware part filter: a part is kept when (a) its parent is the
-    // host wall, or (b) the part's own bbox passes the half-space test, or
-    // (c) the part bbox is a narrow perpendicular T-stub close to the host
-    // wall plane (sharing the same override the parent wall gets in the
-    // elevation filter — otherwise the parent passes but its right-side
-    // parts get dropped, leaving an empty wall area on 0e50Gp / 03Ah /
-    // 1$4oG4LJ / 0mwF46yfq).
-    const PARTS_PERPENDICULAR_NEAR_FACE_TOL = 0.30
-    const PARTS_PERPENDICULAR_WIDTH_LIMIT = 0.40
-    const _widthAxis = context.viewFrame.widthAxis
-    const _originW = context.viewFrame.origin.dot(_widthAxis)
-    const partOverridesOcclusion = (bbox: THREE.Box3 | null | undefined): boolean => {
-        if (!bbox) return false
-        let sideMin = Infinity, sideMax = -Infinity
-        let widthMin = Infinity, widthMax = -Infinity
+    const SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND = 0.30
+    const SECTION_HIDDEN_SIDE_MAX_BEYOND_BAND = 0.30
+    const SECTION_BAND_MIN_OVERLAP = 0.03
+    const visibleSide = sideToDrop === -1 ? +1 : -1
+    const projectSideRange = (
+        bbox: THREE.Box3 | null | undefined
+    ): { min: number; max: number } | null => {
+        if (!bbox) return null
+        let sideMin = Infinity
+        let sideMax = -Infinity
         for (const corner of box3Corners(bbox)) {
             const s = corner.dot(normal) - planeD
             if (s < sideMin) sideMin = s
             if (s > sideMax) sideMax = s
-            const w = corner.dot(_widthAxis) - _originW
-            if (w < widthMin) widthMin = w
-            if (w > widthMax) widthMax = w
         }
-        if (!Number.isFinite(sideMin)) return false
-        if ((widthMax - widthMin) > PARTS_PERPENDICULAR_WIDTH_LIMIT) return false
-        return Math.min(Math.abs(sideMin), Math.abs(sideMax)) <= PARTS_PERPENDICULAR_NEAR_FACE_TOL
+        if (!Number.isFinite(sideMin) || !Number.isFinite(sideMax)) return null
+        return { min: sideMin, max: sideMax }
     }
+    const evaluateSectionBand = (range: { min: number; max: number } | null) => {
+        if (!range) {
+            return {
+                strictStraddler: false,
+                bandOverlap: 0,
+                visibleSideOverhang: Infinity,
+                hiddenSideOverhang: Infinity,
+                keepBySectionCriterion: false,
+            }
+        }
+        const strictStraddler = range.min < -tol && range.max > +tol
+        const bandOverlap = Math.max(0, Math.min(range.max, +tol) - Math.max(range.min, -tol))
+        const visibleSideOverhang = visibleSide === +1
+            ? Math.max(0, range.max - tol)
+            : Math.max(0, -tol - range.min)
+        const hiddenSideOverhang = visibleSide === +1
+            ? Math.max(0, -tol - range.min)
+            : Math.max(0, range.max - tol)
+        const keepBySectionCriterion = strictStraddler || (
+            bandOverlap >= SECTION_BAND_MIN_OVERLAP &&
+            visibleSideOverhang <= SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND &&
+            hiddenSideOverhang <= SECTION_HIDDEN_SIDE_MAX_BEYOND_BAND
+        )
+        return {
+            strictStraddler,
+            bandOverlap,
+            visibleSideOverhang,
+            hiddenSideOverhang,
+            keepBySectionCriterion,
+        }
+    }
+    // #region agent log
+    agentDebugLog(
+        'H1,H2,H3',
+        'lib/svg-renderer.ts:filterContextForElevationOcclusion:section-criterion',
+        'Directional section criterion constants',
+        {
+            doorId: context.doorId,
+            view: isBackView ? 'back' : 'front',
+            sideToDrop,
+            visibleSide,
+            tol,
+            sectionRule: {
+                visibleSideMaxBeyondBand: SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND,
+                hiddenSideMaxBeyondBand: SECTION_HIDDEN_SIDE_MAX_BEYOND_BAND,
+                bandMinOverlap: SECTION_BAND_MIN_OVERLAP,
+            },
+        }
+    )
+    // #endregion
+    const partDecisions: Array<{
+        partExpressID: number
+        parentWallExpressID: number
+        sideClass: number | null
+        range: { min: number; max: number } | null
+        kept: boolean
+        reason: string
+        sectionSignals: {
+            strictStraddler: boolean
+            bandOverlap: number
+            visibleSideOverhang: number
+            hiddenSideOverhang: number
+            keepBySectionCriterion: boolean
+        }
+    }> = []
     const filteredLinks = context.wallAggregatePartLinks.filter((link) => {
-        // Host wall aggregate parts are part of the host wall drawing — keep them.
-        if (hostWallExpressID !== undefined && link.parentWallExpressID === hostWallExpressID) return true
-        if (!isOccludedElement(link.part)) return true
-        return partOverridesOcclusion(link.part.boundingBox ?? null)
+        const range = projectSideRange(link.part.boundingBox ?? null)
+        const sideClass = classifyBbox(link.part.boundingBox ?? null)
+        const sectionSignals = evaluateSectionBand(range)
+        let kept: boolean
+        let reason: string
+        const isHostWallPart = hostWallExpressID !== undefined && link.parentWallExpressID === hostWallExpressID
+        if (!sectionSignals.keepBySectionCriterion) {
+            kept = false
+            reason = isHostWallPart ? 'host-wall-part-section-reject' : 'section-reject'
+        } else if (sectionSignals.strictStraddler) {
+            kept = true
+            reason = isHostWallPart ? 'host-wall-part-strict-straddler' : 'strict-straddler'
+        } else if (!isOccludedElement(link.part)) {
+            kept = true
+            reason = isHostWallPart ? 'host-wall-part-visible-side' : 'visible-side'
+        } else {
+            kept = true
+            reason = isHostWallPart ? 'host-wall-part-section-band' : 'section-band'
+        }
+        partDecisions.push({
+            partExpressID: link.part.expressID,
+            parentWallExpressID: link.parentWallExpressID,
+            sideClass,
+            range,
+            kept,
+            reason,
+            sectionSignals,
+        })
+        return kept
     })
     const allowedPartIds = new Set(filteredLinks.map((l) => l.part.expressID))
+
+    // #region agent log
+    agentDebugLog('H2,H3', 'lib/svg-renderer.ts:filterContextForElevationOcclusion:parts', 'Wall aggregate part side decisions', {
+        doorId: context.doorId,
+        view: isBackView ? 'back' : 'front',
+        decisions: partDecisions.slice(0, 30),
+        total: partDecisions.length,
+    })
+    // #endregion
 
     // Walls need band-intersection classification instead of center-based:
     // a perpendicular cut-wall at the door jamb has its bbox CENTRE deep into
@@ -5597,8 +5742,12 @@ function filterContextForElevationOcclusion(
     //      perpendicular walls in v3 reviewer feedback). Wider walls don't
     //      get this exception, so deep parallel partitions stay dropped.
     const PLANE_TOUCH_TOL = 0.05
-    const PERPENDICULAR_NEAR_FACE_TOL = 0.30
+    const PERPENDICULAR_NEAR_FACE_TOL = SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND
+    const PERPENDICULAR_SECTION_NEAR_FACE_TOL = SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND
     const PERPENDICULAR_WIDTH_LIMIT = 0.40
+    const PERPENDICULAR_IMAGE_OVERLAP_MIN = 0.03
+    const PERPENDICULAR_DOOR_SIDE_GAP_MAX = 0.30
+    const elevationLateralHalfMeters = getEffectiveLateralHalfMeters(context)
     const widthAxisLocal = context.viewFrame.widthAxis
     const originWidthLocal = context.viewFrame.origin.dot(widthAxisLocal)
     const wallShouldOverrideOcclusion = (bbox: THREE.Box3 | null | undefined): boolean => {
@@ -5628,13 +5777,143 @@ function filterContextForElevationOcclusion(
         }
         return false
     }
-    const filteredWalls = context.nearbyWalls.filter((w) => {
-        if (!planVisibility.wallIDs.has(w.expressID)) return false
-        if (isElementOccluded(w.boundingBox ?? null) && !wallShouldOverrideOcclusion(w.boundingBox ?? null)) {
-            return false
+    const wallDecisions = context.nearbyWalls.map((w) => {
+        let sideMin = Infinity
+        let sideMax = -Infinity
+        let widthMin = Infinity
+        let widthMax = -Infinity
+        for (const corner of box3Corners(w.boundingBox ?? new THREE.Box3())) {
+            const s = corner.dot(normal) - planeD
+            if (s < sideMin) sideMin = s
+            if (s > sideMax) sideMax = s
+            const width = corner.dot(widthAxisLocal) - originWidthLocal
+            if (width < widthMin) widthMin = width
+            if (width > widthMax) widthMax = width
         }
-        return true
+        const planVisible = planVisibility.wallIDs.has(w.expressID)
+        const occluded = isElementOccluded(w.boundingBox ?? null)
+        const override = wallShouldOverrideOcclusion(w.boundingBox ?? null)
+        const sectionSignals = evaluateSectionBand(
+            Number.isFinite(sideMin) && Number.isFinite(sideMax)
+                ? { min: sideMin, max: sideMax }
+                : null
+        )
+        const planeTouchRule = Number.isFinite(sideMin) && Number.isFinite(sideMax)
+            ? sideMin <= PLANE_TOUCH_TOL && sideMax >= -PLANE_TOUCH_TOL
+            : false
+        const nearFaceDistance = Number.isFinite(sideMin) && Number.isFinite(sideMax)
+            ? Math.min(Math.abs(sideMin), Math.abs(sideMax))
+            : NaN
+        const strictStraddler = Number.isFinite(sideMin) && Number.isFinite(sideMax)
+            ? sideMin < -tol && sideMax > +tol
+            : false
+        const widthExt = Number.isFinite(widthMin) && Number.isFinite(widthMax)
+            ? widthMax - widthMin
+            : NaN
+        const perpendicularRule = Number.isFinite(widthExt) && Number.isFinite(nearFaceDistance)
+            ? widthExt <= PERPENDICULAR_WIDTH_LIMIT && nearFaceDistance <= PERPENDICULAR_NEAR_FACE_TOL
+            : false
+        const lateralOverlapWithImage = Number.isFinite(widthMin) && Number.isFinite(widthMax)
+            ? Math.max(
+                0,
+                Math.min(widthMax, +elevationLateralHalfMeters) - Math.max(widthMin, -elevationLateralHalfMeters)
+            )
+            : NaN
+        const nearDoorInShownWidth = Number.isFinite(lateralOverlapWithImage)
+            ? lateralOverlapWithImage >= PERPENDICULAR_IMAGE_OVERLAP_MIN
+            : false
+        const halfDoorWidth = context.viewFrame.width / 2
+        const doorSideGap = Number.isFinite(widthMin) && Number.isFinite(widthMax)
+            ? (
+                widthMax < -halfDoorWidth
+                    ? (-halfDoorWidth - widthMax)
+                    : widthMin > +halfDoorWidth
+                        ? (widthMin - halfDoorWidth)
+                        : 0
+            )
+            : NaN
+        const nearDoorSides = Number.isFinite(doorSideGap)
+            ? doorSideGap <= PERPENDICULAR_DOOR_SIDE_GAP_MAX
+            : false
+        const nearDoorForPerpendicularRule = nearDoorInShownWidth || nearDoorSides
+        const perpendicularTouchesBand = planeTouchRule || sectionSignals.bandOverlap >= SECTION_BAND_MIN_OVERLAP
+        const directionalPerpendicularOverhangOk = occluded
+            ? sectionSignals.hiddenSideOverhang <= SECTION_HIDDEN_SIDE_MAX_BEYOND_BAND
+            : sectionSignals.visibleSideOverhang <= SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND
+        const perpendicularVisibleSideNearDistance = Number.isFinite(sideMin) && Number.isFinite(sideMax)
+            ? (
+                visibleSide === +1
+                    ? (
+                        sideMax <= 0
+                            ? Infinity
+                            : (sideMin >= 0 ? sideMin : 0)
+                    )
+                    : (
+                        sideMin >= 0
+                            ? Infinity
+                            : (sideMax <= 0 ? -sideMax : 0)
+                    )
+            )
+            : Infinity
+        const perpendicularVisibleSideRule = perpendicularVisibleSideNearDistance <= SECTION_VISIBLE_SIDE_MAX_BEYOND_BAND
+        const perpendicularSectionRule = Number.isFinite(widthExt) && Number.isFinite(nearFaceDistance)
+            ? (
+                perpendicularRule &&
+                perpendicularVisibleSideRule &&
+                nearDoorForPerpendicularRule
+            )
+            : false
+        const keepBySectionCriterion = sectionSignals.keepBySectionCriterion || perpendicularSectionRule
+        const keepByPlanCriterion = planVisible || perpendicularSectionRule
+        const kept = keepByPlanCriterion && keepBySectionCriterion && (!occluded || override || sectionSignals.strictStraddler)
+        return {
+            wall: w,
+            wallExpressID: w.expressID,
+            typeName: w.typeName,
+            planVisible,
+            occluded,
+            override,
+            kept,
+            range: Number.isFinite(sideMin) ? { min: sideMin, max: sideMax } : null,
+            widthRange: Number.isFinite(widthMin) ? { min: widthMin, max: widthMax } : null,
+            overrideSignals: {
+                planeTouchRule,
+                perpendicularRule,
+                strictStraddler,
+                nearFaceDistance,
+                widthExt,
+                bandOverlap: sectionSignals.bandOverlap,
+                visibleSideOverhang: sectionSignals.visibleSideOverhang,
+                hiddenSideOverhang: sectionSignals.hiddenSideOverhang,
+                keepBySectionCriterion,
+                keepBySectionCriterionBase: sectionSignals.keepBySectionCriterion,
+                keepByPlanCriterion,
+                perpendicularSectionRule,
+                perpendicularTouchesBand,
+                directionalPerpendicularOverhangOk,
+                perpendicularVisibleSideNearDistance,
+                perpendicularVisibleSideRule,
+                lateralHalfMeters: elevationLateralHalfMeters,
+                lateralOverlapWithImage,
+                nearDoorInShownWidth,
+                doorSideGap,
+                nearDoorSides,
+                nearDoorForPerpendicularRule,
+                perpendicularSectionNearFaceTol: PERPENDICULAR_SECTION_NEAR_FACE_TOL,
+            },
+        }
     })
+    const filteredWalls = wallDecisions.filter((entry) => entry.kept).map((entry) => entry.wall)
+
+    // #region agent log
+    agentDebugLog('H1,H2', 'lib/svg-renderer.ts:filterContextForElevationOcclusion:walls', 'Nearby wall side decisions', {
+        doorId: context.doorId,
+        view: isBackView ? 'back' : 'front',
+        decisions: wallDecisions.slice(0, 30).map(({ wall, ...entry }) => entry),
+        total: wallDecisions.length,
+        kept: filteredWalls.length,
+    })
+    // #endregion
     // Adjacent doors need band-intersection too: a cut-door embedded in the
     // host wall has a thin glazing sub-mesh entirely on one side of the
     // plane. With centre-based per-mesh filtering the glazing gets dropped
@@ -5985,6 +6264,47 @@ function renderElevationFromMeshes(
     )
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
+
+    // #region agent log
+    const finalEdgesCount = renderGeometry.edges.length
+    const finalPolygonsCount = renderGeometry.polygons.length
+    const estimatedSourceEdgeMix = {
+        wallAfterOcclusion: wallGeometry.edges.length,
+        nearbyWall: clippedNearbyWallGeometry.edges.length,
+        slab: slabGeometry.edges.length,
+        ceiling: ceilingGeometry.edges.length,
+        stair: stairGeometry.edges.length,
+        nearbyDoor: clippedNearbyDoorGeometry.edges.length,
+        nearbyWindow: clippedNearbyWindowGeometry.edges.length,
+        device: deviceGeometry.edges.length,
+    }
+    agentDebugLog('H1,H2,H3,H4', 'lib/svg-renderer.ts:renderElevationFromMeshes:geometryCounts', 'Elevation rendered geometry counts by source', {
+        doorId: context.doorId,
+        view: isBackView ? 'back' : 'front',
+        meshIds: {
+            hostAndCoplanarWalls: [...new Set(wallMeshes.map((m) => m.userData?.expressID).filter((id) => typeof id === 'number'))],
+            nearbyWalls: [...new Set((context.detailedGeometry?.nearbyWallMeshes ?? []).map((m) => m.userData?.expressID).filter((id) => typeof id === 'number'))],
+            wallParts: [...new Set((context.detailedGeometry?.wallAggregatePartMeshes ?? []).map((m) => m.userData?.expressID).filter((id) => typeof id === 'number'))],
+        },
+        counts: {
+            preSourceLogEdgeCount: renderGeometry.edges.length,
+            nearbyWallRawEdges: nearbyWallGeometry.edges.length,
+            nearbyWallClippedEdges: clippedNearbyWallGeometry.edges.length,
+            wallProjectedEdgesBeforeOcclusion: wallProjected.edges.length,
+            wallEdgesAfterOcclusion: wallGeometry.edges.length,
+            slabEdges: slabGeometry.edges.length,
+            ceilingEdges: ceilingGeometry.edges.length,
+            stairEdges: stairGeometry.edges.length,
+            nearbyDoorEdges: clippedNearbyDoorGeometry.edges.length,
+            nearbyWindowEdges: clippedNearbyWindowGeometry.edges.length,
+            deviceEdges: deviceGeometry.edges.length,
+            finalEdges: finalEdgesCount,
+            finalPolygons: finalPolygonsCount,
+        },
+        estimatedSourceEdgeMix,
+        clip: elevationHostClipBounds,
+    })
+    // #endregion
 
     const doorAnchorProjected = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
     const doorAnchor = { x: doorAnchorProjected.x, y: doorAnchorProjected.y }
