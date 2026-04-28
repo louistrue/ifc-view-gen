@@ -397,7 +397,9 @@ function readCsetData(model: IfcLiteModel, doorId: number): DoorContextLite['cse
     for (const cset of csets) {
         for (const [k, v] of Object.entries(cset.properties)) {
             const lk = k.toLowerCase()
-            const norm = lk.replace(/[\s_/]/g, '')  // normalize "CFC / BKP / CCC / BCC" → "cfcbkpcccbcc"
+            // normalize: "CFC / BKP / CCC / BCC" → "cfcbkpcccbcc" and
+            // "Mass - Durchgangsbreite" → "massdurchgangsbreite"
+            const norm = lk.replace(/[\s_/-]/g, '')
             if (out.cfcBkp == null && norm === 'cfcbkpcccbcc') {
                 out.cfcBkp = v == null ? null : String(v)
             } else if (out.alTuernummer == null && (lk === 'altuernummer' || norm === 'altuernummer')) {

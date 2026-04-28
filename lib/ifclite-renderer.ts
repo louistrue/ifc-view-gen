@@ -1213,24 +1213,37 @@ function emitPlanSvg(
         polys.push({ points: rectPts, fill, stroke: true, layer: safety ? 8 : 7 })
     }
 
-    // Door swing arc — 15° symbolic opening (NOT a 90° arc).  Uses
-    // OperationType for hinge handedness and the door's geometric placement
-    // for facing direction.
+    // Door swing arc — 15° symbolic opening (NOT a 90° arc).
+    //
+    // The arc must run from the HINGE JAMB to the OPPOSITE JAMB (clear-opening
+    // span), NOT corner-to-corner on the door's bbox.  The bbox includes the
+    // frame on both sides, so corner-to-corner produced an arc that landed
+    // outside the door frame in the next room.
+    //
+    // Clear width preference order:
+    //   1. Cset_StandardCH:Mass_Durchgangsbreite  (authored clear width)
+    //   2. viewFrame.width − 0.10 m              (assume 5 cm jambs each side)
     {
         const op = parseOperationType(ctx.operationType)
         if (process.env.DEBUG_PLAN === '1') {
-            console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)}`)
+            console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)} frameW=${ctx.viewFrame.width.toFixed(2)} clearW=${ctx.cset.massDurchgangsbreite}`)
         }
         if (op.kind === 'swing' && op.hingeSide) {
-            const widthAxis2 = cam.widthAxis     // {x,z}
-            const openAxis2 = cam.openAxis       // -facing in world → screen up
-            const halfW = ctx.viewFrame.width / 2
+            const widthAxis2 = cam.widthAxis     // {x,z} along door width
+            const openAxis2 = cam.openAxis       // +facing → screen-down (room arc opens into)
+            const frameW = ctx.viewFrame.width
+            const clearW = (ctx.cset.massDurchgangsbreite != null && ctx.cset.massDurchgangsbreite > 0.05)
+                ? ctx.cset.massDurchgangsbreite
+                : Math.max(frameW - 0.10, 0.6)
+            const jambInset = Math.max((frameW - clearW) / 2, 0)  // half the frame thickness on each side
             const faceOffset = ctx.viewFrame.thickness / 2
             const drawLeaf = (hingeSide: 'left' | 'right', leafW: number, hingeOff: number) => {
-                // hinge in world (XZ): door centre + widthAxis * hingeOff
+                // Hinge in world (XZ): door centre + widthAxis * hingeOff.
+                // hingeOff = ±(halfFrame - jambInset) so hinge sits at the
+                // INSIDE EDGE of the jamb, not at the bbox corner.
                 const hingeX = ctx.viewFrame.origin[0] + widthAxis2.x * hingeOff
                 const hingeZ = ctx.viewFrame.origin[2] + widthAxis2.z * hingeOff
-                // Pivot offset along openAxis (door face): faceOffset ahead of wall.
+                // Pivot offset along openAxis (door face), faceOffset ahead of wall plane.
                 const pivotX = hingeX + openAxis2.x * faceOffset
                 const pivotZ = hingeZ + openAxis2.z * faceOffset
                 const startAngle = hingeSide === 'left' ? 0 : Math.PI
@@ -1250,7 +1263,7 @@ function emitPlanSvg(
                     }
                     prevS = s
                 }
-                // Leaf line: hinge → arc end (door at 15° open position).
+                // Leaf line: pivot → arc tip at 15° open position.
                 const tipAng = endAngle
                 const tipDirX = widthAxis2.x * Math.cos(tipAng) + openAxis2.x * Math.sin(tipAng)
                 const tipDirZ = widthAxis2.z * Math.cos(tipAng) + openAxis2.z * Math.sin(tipAng)
@@ -1260,13 +1273,17 @@ function emitPlanSvg(
                 const tipS = projP({ x: tipX, z: tipZ })
                 segs.push({ x1: hingeS.x, y1: hingeS.y, x2: tipS.x, y2: tipS.y, layer: 7, color: '#666666' })
             }
+            const halfClear = clearW / 2
             if (op.hingeSide === 'both') {
-                const half = ctx.viewFrame.width / 2
-                drawLeaf('left', half, -half)
-                drawLeaf('right', half, +half)
+                // Double swing: each leaf is half the clear width.
+                drawLeaf('left', halfClear, -halfClear)
+                drawLeaf('right', halfClear, +halfClear)
             } else {
-                const hingeOff = op.hingeSide === 'left' ? -halfW : +halfW
-                drawLeaf(op.hingeSide, ctx.viewFrame.width, hingeOff)
+                // Hinge at the INSIDE edge of the jamb (frame-thickness inset
+                // from bbox corner), arc spans the clear width to the
+                // opposite jamb's INSIDE edge.
+                const hingeOff = op.hingeSide === 'left' ? -halfClear : +halfClear
+                drawLeaf(op.hingeSide, clearW, hingeOff)
             }
         }
     }
