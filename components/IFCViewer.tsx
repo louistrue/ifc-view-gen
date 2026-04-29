@@ -6,7 +6,7 @@ import { loadIFCModelWithFragments } from '@/lib/fragments-loader'
 import { loadIFCModelWithMetadata } from '@/lib/ifc-loader'
 import { analyzeDoors, loadDetailedGeometry } from '@/lib/door-analyzer'
 import type { DoorContext } from '@/lib/door-analyzer'
-import type { DoorCsetStandardCHData, DoorLeafMetadata } from '@/lib/ifc-loader'
+import type { DoorCsetStandardCHData, DoorLeafMetadata, WallCsetStandardCHData } from '@/lib/ifc-loader'
 import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
@@ -933,16 +933,35 @@ export default function IFCViewer() {
         let doorLeafMetadataMap: Map<number, DoorLeafMetadata> | undefined
         let hostRelationshipMap: Map<number, number> | undefined
         let slabAggregatePartMap: Map<number, number> | undefined
+        let wallAggregatePartMap: Map<number, number> | undefined
+        let wallCsetStandardCHMap: Map<number, WallCsetStandardCHData> | undefined
+        let deviceLayerMap: Map<number, string[]> | undefined
         if (archFileRef.current) {
           try {
-            const { extractDoorOperationTypes, extractDoorCsetStandardCH, extractDoorLeafMetadata, extractDoorHostRelationships, extractSlabAggregateParts } = await import('@/lib/ifc-loader')
-            operationTypeMap = await extractDoorOperationTypes(archFileRef.current)
-            csetStandardCHMap = await extractDoorCsetStandardCH(archFileRef.current)
+            const {
+              extractDoorAnalyzerSidecarMaps,
+              extractDoorLeafMetadata,
+              extractDoorHostRelationships,
+              extractSlabAggregateParts,
+              extractElectricalLayerAssignments,
+            } = await import('@/lib/ifc-loader')
+            const sidecars = await extractDoorAnalyzerSidecarMaps(archFileRef.current)
+            operationTypeMap = sidecars.operationTypeMap
+            csetStandardCHMap = sidecars.csetStandardCHMap
+            wallAggregatePartMap = sidecars.wallAggregatePartMap
+            wallCsetStandardCHMap = sidecars.wallCsetStandardCHMap
             doorLeafMetadataMap = await extractDoorLeafMetadata(archFileRef.current)
             hostRelationshipMap = await extractDoorHostRelationships(archFileRef.current)
             slabAggregatePartMap = await extractSlabAggregateParts(archFileRef.current)
+            if (electricalFileRef.current) {
+              try {
+                deviceLayerMap = await extractElectricalLayerAssignments(electricalFileRef.current)
+              } catch (err) {
+                console.warn('Failed to extract electrical layer assignments:', err)
+              }
+            }
           } catch (err) {
-            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH/DoorLeafMetadata/HostRelationships/SlabAggregateParts):', err)
+            console.warn('Failed to extract IFC metadata (OperationType/Cset_StandardCH/DoorLeafMetadata/HostRelationships/SlabAggregateParts/WallAggregateParts):', err)
           }
         }
 
@@ -955,7 +974,11 @@ export default function IFCViewer() {
           csetStandardCHMap,
           doorLeafMetadataMap,
           hostRelationshipMap,
-          slabAggregatePartMap
+          slabAggregatePartMap,
+          wallAggregatePartMap,
+          undefined,
+          wallCsetStandardCHMap,
+          deviceLayerMap
         )
 
         if (process.env.NODE_ENV === 'development') {

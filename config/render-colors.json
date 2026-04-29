@@ -1,0 +1,52 @@
+{
+  "palette": {
+    "grau":       "#E0E0E0",
+    "hellgrau":   "#D9CBBA",
+    "gelb":       "#FAC846",
+    "pink":       "#FA467F",
+    "anthrazit":  "#B8B8B8",
+    "hellbraun":  "#D19D5A",
+    "hellblau":   "#B5E1F7",
+    "graubraun":  "#D9CBBA"
+  },
+  "plan": {
+    "wallCut":             "grau",
+    "wallCutByBKP": {
+      "drywall": "graubraun"
+    },
+    "ceilingCut":          "grau",
+    "suspendedCeilingCut": "grau",
+    "windowContext":       "anthrazit",
+    "doorContext":         "anthrazit",
+    "currentDoor":         "anthrazit",
+    "electrical":          "gelb",
+    "safety":              "pink"
+  },
+  "elevation": {
+    "wall":             "grau",
+    "wallByBKP": {
+      "drywall": "graubraun"
+    },
+    "suspendedCeiling": "grau",
+    "glass":            "hellblau",
+    "electrical":       "gelb",
+    "safety":           "pink",
+    "door": {
+      "default": "hellgrau",
+      "byBKP": {
+        "metal":   "anthrazit",
+        "wood":    "hellbraun",
+        "context": "hellgrau"
+      }
+    }
+  },
+  "safety": {
+    "layerKeywords": ["e_sicherheit", "sicherheit"]
+  },
+  "hide": {
+    "layerKeywords": ["mobilier", "möbel", "moebel", "einrichtung"]
+  },
+  "strokes": {
+    "outline": "#000000"
+  }
+}

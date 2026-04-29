@@ -1,5 +1,11 @@
+const path = require('path');
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Parent folders may contain another package-lock.json; pin Turbopack’s root to this app.
+  turbopack: {
+    root: path.join(__dirname),
+  },
   async headers() {
     return [
       {

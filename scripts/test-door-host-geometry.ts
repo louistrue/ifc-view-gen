@@ -125,9 +125,11 @@ async function buildContextVariant(options: {
         doorMeshes: [doorMesh],
         wallMeshes,
         nearbyWallMeshes: [],
+        wallAggregatePartMeshes: [],
         slabMeshes: [],
         ceilingMeshes: [],
         nearbyDoorMeshes: [],
+        nearbyWindowMeshes: [],
         stairMeshes: [],
         deviceMeshes: [],
     }

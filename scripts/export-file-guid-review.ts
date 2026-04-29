@@ -3,10 +3,9 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { basename, extname, resolve } from 'node:path'
 import * as THREE from 'three'
 import {
-    extractDoorCsetStandardCH,
+    extractDoorAnalyzerSidecarMaps,
     extractDoorHostRelationships,
     extractDoorLeafMetadata,
-    extractDoorOperationTypes,
     extractSlabAggregateParts,
     loadIFCModelWithMetadata,
 } from '../lib/ifc-loader'
@@ -47,7 +46,7 @@ const DEFAULT_PRIMARY = resolve(process.cwd(), 'Flu21_A_AR_51_ARM_0000_A-AR-0000
 const DEFAULT_SECONDARY = resolve(process.cwd(), 'Flu21_A_EL_51_ELM_0000_A-EL-2300-0001_IFC Elektro.ifc')
 const DEFAULT_ISSUE_FOLDER = resolve(process.cwd(), 'ZGSO_2026-04-15,_05.42')
 const DEFAULT_MANIFEST = resolve(DEFAULT_ISSUE_FOLDER, 'guid-manifest.json')
-const DEFAULT_OUT_DIR = resolve(process.cwd(), 'test-output', 'zgso-guid-review')
+const DEFAULT_OUT_DIR = resolve(process.cwd(), 'test-output', 'file-guid-review')
 
 function parseArgs(argv: string[]) {
     let primaryIfc = DEFAULT_PRIMARY
@@ -140,8 +139,7 @@ async function main() {
     const secondaryFile = secondaryIfc ? loadIfcFile(secondaryIfc) : undefined
 
     const model = await loadIFCModelWithMetadata(primaryFile)
-    const operationTypeMap = await extractDoorOperationTypes(primaryFile)
-    const csetStandardCHMap = await extractDoorCsetStandardCH(primaryFile)
+    const { operationTypeMap, csetStandardCHMap, wallAggregatePartMap } = await extractDoorAnalyzerSidecarMaps(primaryFile)
     const doorLeafMetadataMap = await extractDoorLeafMetadata(primaryFile)
     const hostRelationshipMap = await extractDoorHostRelationships(primaryFile)
     const slabAggregatePartMap = await extractSlabAggregateParts(primaryFile)
@@ -153,7 +151,8 @@ async function main() {
         csetStandardCHMap,
         doorLeafMetadataMap,
         hostRelationshipMap,
-        slabAggregatePartMap
+        slabAggregatePartMap,
+        wallAggregatePartMap
     )
 
     await loadDetailedGeometry(contexts, primaryFile, new THREE.Vector3(0, 0, 0), secondaryFile)

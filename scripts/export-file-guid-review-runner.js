@@ -8,5 +8,4 @@ require('ts-node').register({
         esModuleInterop: true,
     },
 })
-
-require('./test-zgso-real-ifc-regression.ts')
+require('./export-file-guid-review.ts')

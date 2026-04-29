@@ -3,10 +3,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import * as THREE from 'three'
 import {
-    extractDoorCsetStandardCH,
+    extractDoorAnalyzerSidecarMaps,
     extractDoorHostRelationships,
     extractDoorLeafMetadata,
-    extractDoorOperationTypes,
     extractSlabAggregateParts,
     loadIFCModelWithMetadata,
 } from '../lib/ifc-loader'
@@ -73,8 +72,8 @@ type GuidReport = {
 
 const DEFAULT_PRIMARY = resolve(process.cwd(), 'Flu21_A_AR_51_ARM_0000_A-AR-0000-0001_260402.ifc')
 const DEFAULT_SECONDARY = resolve(process.cwd(), 'Flu21_A_EL_51_ELM_0000_A-EL-2300-0001_IFC Elektro.ifc')
-const DEFAULT_BACKLOG = resolve(process.cwd(), 'test-output', 'zgso-guid-review', 'full-fix-target-backlog.json')
-const DEFAULT_OUTPUT_DIR = resolve(process.cwd(), 'test-output', 'zgso-real-ifc-regression')
+const DEFAULT_BACKLOG = resolve(process.cwd(), 'test-output', 'file-guid-review', 'full-fix-target-backlog.json')
+const DEFAULT_OUTPUT_DIR = resolve(process.cwd(), 'test-output', 'file-real-ifc-regression')
 
 function loadIfcFile(filePath: string): File {
     const buffer = readFileSync(filePath)
@@ -358,7 +357,7 @@ function renderMarkdownSummary(reports: GuidReport[]): string {
     }
 
     const lines = [
-        '# ZGSO Real IFC Regression Report',
+        '# File Real IFC Regression Report',
         '',
         `- GUIDs analyzed: **${reports.length}**`,
         `- Fixed: **${counts.fixed}**`,
@@ -396,8 +395,7 @@ async function main() {
     console.log(`Running regression against ${backlog.length} GUID backlog items`)
 
     const model = await loadIFCModelWithMetadata(primaryFile)
-    const operationTypeMap = await extractDoorOperationTypes(primaryFile)
-    const csetStandardCHMap = await extractDoorCsetStandardCH(primaryFile)
+    const { operationTypeMap, csetStandardCHMap, wallAggregatePartMap } = await extractDoorAnalyzerSidecarMaps(primaryFile)
     const doorLeafMetadataMap = await extractDoorLeafMetadata(primaryFile)
     const hostRelationshipMap = await extractDoorHostRelationships(primaryFile)
     const slabAggregatePartMap = await extractSlabAggregateParts(primaryFile)
@@ -409,7 +407,8 @@ async function main() {
         csetStandardCHMap,
         doorLeafMetadataMap,
         hostRelationshipMap,
-        slabAggregatePartMap
+        slabAggregatePartMap,
+        wallAggregatePartMap
     )
     await loadDetailedGeometry(contexts, primaryFile, new THREE.Vector3(0, 0, 0), secondaryFile)
 

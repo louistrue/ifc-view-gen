@@ -50,7 +50,7 @@ cd door-view-creator
 npm install
 ```
 
-The `postinstall` script automatically copies required WASM files and web workers.
+The `postinstall` script (`scripts/copy-postinstall-assets.mjs`) copies required WASM files and the fragments worker into `public/` using Node so it works on Windows as well as macOS/Linux.
 
 ### Development
 

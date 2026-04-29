@@ -35,7 +35,15 @@ yarn-error.log*
 next-env.d.ts
 
 *.ifc
+*.cursorignore
+*.svg
+*.png
+*.log
+guid.json
 
+# airtable render round
+/test-output/
+.airtable-round.lock
 
 20251230_test-prototyp.pdf
 Antworten auf Fragen in Feedback.md

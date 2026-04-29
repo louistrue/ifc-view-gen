@@ -64,6 +64,7 @@ async function buildContext(options?: {
     csetStandardCH?: Partial<DoorCsetStandardCHData>
     doorLeafMetadata?: DoorLeafMetadata
     includeCeiling?: boolean
+    ceilingDepthOffset?: number
     includeStair?: boolean
 }): Promise<DoorContext> {
     const {
@@ -77,6 +78,7 @@ async function buildContext(options?: {
         csetStandardCH,
         doorLeafMetadata,
         includeCeiling = false,
+        ceilingDepthOffset = 0,
         includeStair = false,
     } = options ?? {}
 
@@ -92,7 +94,9 @@ async function buildContext(options?: {
     const doorMesh = createBoxMesh(1, 1, 2.1, 0.12, doorCenter, rotationY)
     const wallMesh = createBoxMesh(2, 40, 3, wallThickness, wallCenter, rotationY)
     const deviceMesh = createBoxMesh(3, 0.12, 0.12, 0.08, deviceCenter)
-    const ceilingMesh = createBoxMesh(4, 4, 0.14, 1.2, new THREE.Vector3(0, 2.45, 0), rotationY)
+    const localCeilingCenter = new THREE.Vector3(0, 0, ceilingDepthOffset)
+    const rotatedCeilingCenter = rotateHorizontalPoint(localCeilingCenter, rotationY)
+    const ceilingMesh = createBoxMesh(4, 4, 0.14, 1.2, new THREE.Vector3(rotatedCeilingCenter.x, 2.45, rotatedCeilingCenter.z), rotationY)
     const stairMesh = createBoxMesh(5, 1.6, 0.4, 1.4, new THREE.Vector3(-0.95, 0.25, 0.55), rotationY)
 
     const door = makeElement(1, 'IFCDOOR', doorMesh)
@@ -166,9 +170,11 @@ async function buildContext(options?: {
         doorMeshes: [doorMesh],
         wallMeshes: includeWall ? [wallMesh] : [],
         nearbyWallMeshes: [],
+        wallAggregatePartMeshes: [],
         slabMeshes: [],
         ceilingMeshes: includeCeiling ? [ceilingMesh] : [],
         nearbyDoorMeshes: [],
+        nearbyWindowMeshes: [],
         stairMeshes: includeStair ? [stairMesh] : [],
         deviceMeshes: [deviceMesh],
     }
@@ -316,15 +322,16 @@ function assertCoordinatesWithinBounds(svg: string, width: number, height: numbe
     }
 }
 
-function getLongestDashedGuide(svg: string): { x1: number; y1: number; x2: number; y2: number } | null {
+/** Longest solid plan swing “open position” guide: same stroke as arc helper, no dash (product is solid, not dashed). */
+function getLongestSwingOpenGuide(svg: string): { x1: number; y1: number; x2: number; y2: number } | null {
     const lineMatches = svg.match(/<line\b[^>]*>/g) || []
     let bestLine: { x1: number; y1: number; x2: number; y2: number } | null = null
     let bestLength = -Infinity
 
     for (const lineTag of lineMatches) {
         const stroke = lineTag.match(/\bstroke="([^"]+)"/)?.[1]
-        const dash = lineTag.match(/\bstroke-dasharray="([^"]+)"/)?.[1]
-        if (stroke !== '#666666' || dash !== '4,2') continue
+        if (stroke !== '#666666') continue
+        if (/\bstroke-dasharray=/.test(lineTag)) continue
 
         const x1 = Number.parseFloat(lineTag.match(/\bx1="([^"]+)"/)?.[1] || 'NaN')
         const y1 = Number.parseFloat(lineTag.match(/\by1="([^"]+)"/)?.[1] || 'NaN')
@@ -383,9 +390,11 @@ async function buildLCornerContext(): Promise<DoorContext> {
         doorMeshes: [doorMesh],
         wallMeshes: [hostWallMesh],
         nearbyWallMeshes: [perpWallMesh],
+        wallAggregatePartMeshes: [],
         slabMeshes: [],
         ceilingMeshes: [],
         nearbyDoorMeshes: [],
+        nearbyWindowMeshes: [],
         stairMeshes: [],
         deviceMeshes: [],
     }
@@ -439,9 +448,11 @@ async function buildAdjacentDoorsContexts(): Promise<{ primary: DoorContext; sec
             doorMeshes: [ownMesh],
             wallMeshes: [hostWallMesh],
             nearbyWallMeshes: [],
+            wallAggregatePartMeshes: [],
             slabMeshes: [],
             ceilingMeshes: [],
             nearbyDoorMeshes: [],
+            nearbyWindowMeshes: [],
             stairMeshes: [],
             deviceMeshes: [],
         }
@@ -675,20 +686,20 @@ async function main() {
     const sideFixedLeftPlan = sideFixedLeftViews.plan
     const sideFixedRightPlan = sideFixedRightViews.plan
 
-    const leftGuide  = getLongestDashedGuide(leftPlan)
-    const rightGuide = getLongestDashedGuide(rightPlan)
-    const rotatedGuide = getLongestDashedGuide(rot45Plan)
-    const upwardGuide = getLongestDashedGuide(upwardArcPlan)
-    const sideFixedLeftGuide = getLongestDashedGuide(sideFixedLeftPlan)
-    const sideFixedRightGuide = getLongestDashedGuide(sideFixedRightPlan)
+    const leftGuide  = getLongestSwingOpenGuide(leftPlan)
+    const rightGuide = getLongestSwingOpenGuide(rightPlan)
+    const rotatedGuide = getLongestSwingOpenGuide(rot45Plan)
+    const upwardGuide = getLongestSwingOpenGuide(upwardArcPlan)
+    const sideFixedLeftGuide = getLongestSwingOpenGuide(sideFixedLeftPlan)
+    const sideFixedRightGuide = getLongestSwingOpenGuide(sideFixedRightPlan)
     const planBounds = getRenderedContentBounds(leftPlan)
 
-    assert.ok(leftGuide,  'Left swing plan should include a dashed open-position guide')
-    assert.ok(rightGuide, 'Right swing plan should include a dashed open-position guide')
+    assert.ok(leftGuide,  'Left swing plan should include a solid open-position guide')
+    assert.ok(rightGuide, 'Right swing plan should include a solid open-position guide')
     assert.equal(rotatedGuide, null, 'Rotated plan should not render a symbolic swing guide')
-    assert.ok(upwardGuide, 'IFC-reversed placement should still include a dashed open-position guide')
-    assert.ok(sideFixedLeftGuide, 'Fixed-left sidelight plan should include a dashed open-position guide')
-    assert.ok(sideFixedRightGuide, 'Fixed-right sidelight plan should include a dashed open-position guide')
+    assert.ok(upwardGuide, 'IFC-reversed placement should still include a solid open-position guide')
+    assert.ok(sideFixedLeftGuide, 'Fixed-left sidelight plan should include a solid open-position guide')
+    assert.ok(sideFixedRightGuide, 'Fixed-right sidelight plan should include a solid open-position guide')
     assert.ok(planBounds, 'Plan view should contain rendered geometry')
     assert.ok(planBounds.maxX - planBounds.minX > 250, 'Plan view geometry should occupy a substantial width')
     // Plan uses the same scale as Vorderansicht (renderDoorViews); the slice is shallow in screen Y.
@@ -705,14 +716,14 @@ async function main() {
     // `widthAxis` depends on `semanticFacing`, which can be guessed with either
     // sign; the mirror logic compensates so that IFC LEFT/RIGHT always maps to
     // the correct world-side regardless of that ambiguity.
-    const handednessLeftPlusZGuide   = getLongestDashedGuide(handednessLeftPlusZViews.plan)
-    const handednessLeftMinusZGuide  = getLongestDashedGuide(handednessLeftMinusZViews.plan)
-    const handednessRightPlusZGuide  = getLongestDashedGuide(handednessRightPlusZViews.plan)
-    const handednessRightMinusZGuide = getLongestDashedGuide(handednessRightMinusZViews.plan)
-    assert.ok(handednessLeftPlusZGuide,   'SINGLE_SWING_LEFT with placementYAxis=+Z should render a swing guide')
-    assert.ok(handednessLeftMinusZGuide,  'SINGLE_SWING_LEFT with placementYAxis=-Z should render a swing guide')
-    assert.ok(handednessRightPlusZGuide,  'SINGLE_SWING_RIGHT with placementYAxis=+Z should render a swing guide')
-    assert.ok(handednessRightMinusZGuide, 'SINGLE_SWING_RIGHT with placementYAxis=-Z should render a swing guide')
+    const handednessLeftPlusZGuide   = getLongestSwingOpenGuide(handednessLeftPlusZViews.plan)
+    const handednessLeftMinusZGuide  = getLongestSwingOpenGuide(handednessLeftMinusZViews.plan)
+    const handednessRightPlusZGuide  = getLongestSwingOpenGuide(handednessRightPlusZViews.plan)
+    const handednessRightMinusZGuide = getLongestSwingOpenGuide(handednessRightMinusZViews.plan)
+    assert.ok(handednessLeftPlusZGuide,   'SINGLE_SWING_LEFT with placementYAxis=+Z should render a solid open-position guide')
+    assert.ok(handednessLeftMinusZGuide,  'SINGLE_SWING_LEFT with placementYAxis=-Z should render a solid open-position guide')
+    assert.ok(handednessRightPlusZGuide,  'SINGLE_SWING_RIGHT with placementYAxis=+Z should render a solid open-position guide')
+    assert.ok(handednessRightMinusZGuide, 'SINGLE_SWING_RIGHT with placementYAxis=-Z should render a solid open-position guide')
     const midX = options.width! / 2
     const leftPlusZOnLeft   = handednessLeftPlusZGuide.x1   < midX
     const leftMinusZOnLeft  = handednessLeftMinusZGuide.x1  < midX
@@ -741,8 +752,8 @@ async function main() {
     )
     // Double doors (hingeSide='both') must still render a symbolic swing; hinge mirroring
     // is a no-op for symmetric leaves but the renderer must not crash or drop the swing.
-    const handednessDoubleDoorGuide = getLongestDashedGuide(handednessDoubleDoorViews.plan)
-    assert.ok(handednessDoubleDoorGuide, 'DOUBLE_DOOR_SINGLE_SWING with placementYAxis=+Z should still render a swing guide')
+    const handednessDoubleDoorGuide = getLongestSwingOpenGuide(handednessDoubleDoorViews.plan)
+    assert.ok(handednessDoubleDoorGuide, 'DOUBLE_DOOR_SINGLE_SWING with placementYAxis=+Z should still render a solid open-position guide')
 
     // Default synthetic setup opens downward: y2 > y1.
     assert.ok(leftGuide.y2  > leftGuide.y1,  'Left swing arc should open downward (into room)')
@@ -791,10 +802,10 @@ async function main() {
     }
 
     // The old plan tests (legacy)
-    const leftGuide2  = getLongestDashedGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_LEFT'  }), options)).plan)
-    const rightGuide2 = getLongestDashedGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_RIGHT' }), options)).plan)
-    assert.ok(leftGuide2,  'No-wall left swing plan should include a dashed guide')
-    assert.ok(rightGuide2, 'No-wall right swing plan should include a dashed guide')
+    const leftGuide2  = getLongestSwingOpenGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_LEFT'  }), options)).plan)
+    const rightGuide2 = getLongestSwingOpenGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_RIGHT' }), options)).plan)
+    assert.ok(leftGuide2,  'No-wall left swing plan should include a solid open-position guide')
+    assert.ok(rightGuide2, 'No-wall right swing plan should include a solid open-position guide')
 
     const thickWallContext = await buildContext({ includeWall: true, wallThickness: 0.6 })
     const thickWallViews = await renderDoorViews(thickWallContext, options)
@@ -813,12 +824,17 @@ async function main() {
     // assertions measure real slab-context fills. If we re-used the default
     // (which falls back to wallColor), the host-wall fill alone would satisfy
     // the area threshold and mask slab-rendering regressions.
-    const highMountedOptions = { ...options, floorSlabColor: '#6EAF72' }
+    const highMountedOptions = { ...options, floorSlabColor: '#6EAF72', suspendedCeilingColor: '#6EAF72' }
     const highMountedDeviceViews = await renderDoorViews(highMountedDeviceContext, highMountedOptions)
     const highMountedPlanDevicePaths = extractPathDataByFill(highMountedDeviceViews.plan, highMountedOptions.deviceColor!)
     assert.ok(
         highMountedDeviceContext.hostCeilings.length > 0,
         'Expected IFCCOVERING elements to be collected as host ceilings'
+    )
+    assert.equal(
+        highMountedDeviceContext.hostCeilingVisibility[0]?.side,
+        'both',
+        'Expected straddling IFCCOVERING to render on both elevations'
     )
     assert.ok(
         highMountedDeviceContext.nearbyStairs.length > 0,
@@ -837,6 +853,39 @@ async function main() {
     assert.ok(
         getWallFilledArea(highMountedDeviceViews.back, slabColor) > 1200,
         'Back elevation should render ceiling/stair slab-color context'
+    )
+
+    const frontCeilingOnlyContext = await buildContext({
+        includeWall: true,
+        includeCeiling: true,
+        includeStair: false,
+        ceilingDepthOffset: 0.72,
+    })
+    const backCeilingOnlyContext = await buildContext({
+        includeWall: true,
+        includeCeiling: true,
+        includeStair: false,
+        ceilingDepthOffset: -0.72,
+    })
+    const frontCeilingOnlyViews = await renderDoorViews(frontCeilingOnlyContext, highMountedOptions)
+    const backCeilingOnlyViews = await renderDoorViews(backCeilingOnlyContext, highMountedOptions)
+    assert.equal(frontCeilingOnlyContext.hostCeilingVisibility[0]?.side, 'front', 'Expected front-side IFCCOVERING metadata')
+    assert.equal(backCeilingOnlyContext.hostCeilingVisibility[0]?.side, 'back', 'Expected back-side IFCCOVERING metadata')
+    assert.ok(
+        getWallFilledArea(frontCeilingOnlyViews.front, slabColor) > 1200,
+        'Front elevation should render front-side IFCCOVERING'
+    )
+    assert.ok(
+        getWallFilledArea(frontCeilingOnlyViews.back, slabColor) < 1,
+        'Back elevation should hide front-side IFCCOVERING'
+    )
+    assert.ok(
+        getWallFilledArea(backCeilingOnlyViews.front, slabColor) < 1,
+        'Front elevation should hide back-side IFCCOVERING'
+    )
+    assert.ok(
+        getWallFilledArea(backCeilingOnlyViews.back, slabColor) > 1200,
+        'Back elevation should render back-side IFCCOVERING'
     )
 
     // ── Mesh-based plan section: L-corner + adjacent doors ────────────────────

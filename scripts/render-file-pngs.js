@@ -3,7 +3,7 @@ const { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } = requir
 const { join } = require('node:path')
 const { Resvg } = require('@resvg/resvg-js')
 
-const SRC_ROOT = join(process.cwd(), 'test-output/zgso-guid-review')
+const SRC_ROOT = join(process.cwd(), 'test-output/file-guid-review')
 const OUT_DIR = '/tmp/svg-pngs'
 mkdirSync(OUT_DIR, { recursive: true })
 
