@@ -82,8 +82,6 @@ export interface DoorContextLite {
     /** IFC OperationType (e.g. "SINGLE_SWING_LEFT") read from the door instance
      *  or its IfcDoorType, used to pick the plan-view swing-arc handedness. */
     operationType: string | null
-    /** IFC ObjectPlacement local +Y axis in world XZ (normalized), if available. */
-    placementYAxis: [number, number, number] | null
 }
 
 export interface AnalyzeOptions {
@@ -208,26 +206,29 @@ function buildDoorViewFrame(bbox: AABB): DoorViewFrame {
     const centre = bboxCentre(bbox)
     // Y is up in IFC-Lite output. The two horizontal axes are X and Z.
     // The smaller of (extX, extZ) is wall thickness (door normal direction).
+    let widthAxis: [number, number, number]
     let facing: [number, number, number]
     let width: number
     let thickness: number
+    // widthAxis must equal `facing × upAxis` so a camera looking at the door
+    // (front view) and a camera looking down (plan view) both place +widthAxis
+    // on screen-right.  Picking widthAxis = +X with facing = +Z violated that
+    // and mirrored every plan view of an X-aligned door.
     if (ext[0] >= ext[2]) {
+        // Wall runs along X, door faces ±Z. Use facing = +Z, then
+        //   widthAxis = facing × upAxis = (0,0,1) × (0,1,0) = (-1,0,0)
+        widthAxis = [-1, 0, 0]
         facing = [0, 0, 1]
         width = ext[0]
         thickness = ext[2]
     } else {
+        // Wall runs along Z, door faces ±X. Use facing = +X, then
+        //   widthAxis = facing × upAxis = (1,0,0) × (0,1,0) = (0,0,1)
+        widthAxis = [0, 0, 1]
         facing = [1, 0, 0]
         width = ext[2]
         thickness = ext[0]
     }
-    // Enforce a right-handed local frame:
-    //   widthAxis = up × facing
-    // This avoids mirrored projections when the door's thin axis is X.
-    const widthAxis: [number, number, number] = [
-        facing[2],
-        0,
-        -facing[0],
-    ]
     const height = ext[1]
     // Origin: bottom centre of door bbox in plan, Y at bbox bottom.
     const origin: [number, number, number] = [centre[0], bbox.min[1], centre[2]]
@@ -431,6 +432,15 @@ function readCsetData(model: IfcLiteModel, doorId: number): DoorContextLite['cse
 export interface DoorAnalyzerCaches {
     wallIndex: ReturnType<typeof buildPlanIndex>
     slabIndex: ReturnType<typeof buildPlanIndex>
+    /** Plan-radius index for IFCBUILDINGELEMENTPART entities — Unterlagsboden,
+     *  Estrich/Chape, Dämmung, finish layers etc.  In Flu21 these aren't
+     *  aggregated under the structural slab; they're standalone elements
+     *  whose horizontal mesh sits on top of (or hanging below) the slab. */
+    buildingPartIndex: ReturnType<typeof buildPlanIndex>
+    /** Plan-radius index for IFCCOVERING entities — floor finishes, ceiling
+     *  finishes (suspended ceilings).  Same modelling pattern as
+     *  buildingPartIndex; needed for the floor-stack rendering. */
+    coveringIndex: ReturnType<typeof buildPlanIndex>
     doorIndex: ReturnType<typeof buildPlanIndex>
     windowIndex: ReturnType<typeof buildPlanIndex>
     elecIndices: Map<string, ReturnType<typeof buildPlanIndex>> | null
@@ -449,6 +459,8 @@ export function buildAnalyzerCaches(model: IfcLiteModel, elec: IfcLiteModel | nu
         }
     }
     const slabIndex = buildPlanIndex(model, 'IFCSLAB', 2.0)
+    const buildingPartIndex = buildPlanIndex(model, 'IFCBUILDINGELEMENTPART', 1.5)
+    const coveringIndex = buildPlanIndex(model, 'IFCCOVERING', 1.5)
     const doorIndex = buildPlanIndex(model, 'IFCDOOR', 1.0)
     const windowIndex = buildPlanIndex(model, 'IFCWINDOW', 1.0)
     const elecIndices = elec ? new Map<string, ReturnType<typeof buildPlanIndex>>() : null
@@ -466,7 +478,7 @@ export function buildAnalyzerCaches(model: IfcLiteModel, elec: IfcLiteModel | nu
             elecIndices.set(t, buildPlanIndex(elec, t, 1.0))
         }
     }
-    return { wallIndex, slabIndex, doorIndex, windowIndex, elecIndices }
+    return { wallIndex, slabIndex, buildingPartIndex, coveringIndex, doorIndex, windowIndex, elecIndices }
 }
 
 export function analyzeDoor(
@@ -501,6 +513,7 @@ export function analyzeDoor(
     }
 
     const slabs = findSlabsAroundDoor(model, bbox, caches.slabIndex)
+    const centre = bboxCentre(bbox)
 
     const collectParts = (slabId: number | null | undefined): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> => {
         if (slabId == null) return []
@@ -516,19 +529,69 @@ export function analyzeDoor(
         }
         return out
     }
-    // Slab parts come from two sources:
-    //   1. IfcRelAggregates children that are IfcBuildingElementPart (real parts)
-    //   2. Other IFCSLABs stacked between the structural slab and door foot
-    //      (Unterlagsboden / screed are often modelled as separate IFCSLAB).
+    // Floor / ceiling stack parts come from FOUR places, in priority order:
+    //   1. IfcRelAggregates children of the structural slab
+    //      (rare in Flu21, but other authors model build-up that way)
+    //   2. Other IFCSLABs stacked above/below structural in plan radius
+    //   3. IFCBUILDINGELEMENTPART entities (Chapes/Unterlagsboden, Dämmung,
+    //      Bodenbeläge) — Flu21's modelling pattern.  Standalone, NOT
+    //      aggregated under the slab.
+    //   4. IFCCOVERING entities (floor finish, suspended ceiling)
+    //
+    // The render code stacks them as horizontal bands on top of the
+    // structural slab cap, so seeing all four types is essential.
     const aggParts = (id: number | null | undefined) =>
         id == null ? [] : collectParts(id)
-    const slabBelowParts = [...aggParts(slabs.below?.expressId), ...slabs.belowExtras]
-    const slabAboveParts = [...aggParts(slabs.above?.expressId), ...slabs.aboveExtras]
+    /** Pick standalone build-up parts whose bbox-Y range falls inside
+     *  [yLo, yHi] and whose plan footprint is within `radius` of the door. */
+    const collectBuildupParts = (
+        index: ReturnType<typeof buildPlanIndex>,
+        yLo: number,
+        yHi: number,
+        radius: number,
+    ): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> => {
+        const out: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> = []
+        for (const cand of queryPlanIndex(index, centre, radius)) {
+            // bbox vertical mid-point in target band — accommodates very thin
+            // sheets (5 mm finishes) whose top + bottom both round to the
+            // boundary.
+            const yMid = (cand.bbox.min[1] + cand.bbox.max[1]) / 2
+            if (yMid < yLo - 0.005 || yMid > yHi + 0.005) continue
+            out.push({ expressId: cand.expressId, meshes: cand.meshes, bbox: cand.bbox })
+        }
+        return out
+    }
+    // Below stack: structural top → door foot (typically 0–25 cm of build-up).
+    const belowYLo = slabs.below ? slabs.below.bbox.max[1] - 0.01 : bbox.min[1] - 0.50
+    const belowYHi = bbox.min[1] + 0.05
+    const belowBuildup = [
+        ...collectBuildupParts(caches.buildingPartIndex, belowYLo, belowYHi, 1.5),
+        ...collectBuildupParts(caches.coveringIndex, belowYLo, belowYHi, 1.5),
+    ]
+    // Above stack: door head → slab-above bottom (suspended ceiling, finish).
+    const aboveYLo = bbox.max[1] - 0.05
+    const aboveYHi = slabs.above ? slabs.above.bbox.min[1] + 0.01 : bbox.max[1] + 1.5
+    const aboveBuildup = [
+        ...collectBuildupParts(caches.buildingPartIndex, aboveYLo, aboveYHi, 1.5),
+        ...collectBuildupParts(caches.coveringIndex, aboveYLo, aboveYHi, 1.5),
+    ]
+    const slabBelowParts = [
+        ...aggParts(slabs.below?.expressId),
+        ...slabs.belowExtras,
+        ...belowBuildup,
+    ]
+    const slabAboveParts = [
+        ...aggParts(slabs.above?.expressId),
+        ...slabs.aboveExtras,
+        ...aboveBuildup,
+    ]
     if (process.env.DEBUG_PARTS === '1') {
-        console.log(`[parts] door=${doorId} slabBelow=${slabs.below?.expressId ?? 'none'} slabBelow.bbox.max[1]=${slabs.below?.bbox.max[1].toFixed(3)} doorBottom=${bbox.min[1].toFixed(3)} extras=${slabs.belowExtras.length} agg=${slabBelowParts.length - slabs.belowExtras.length} totalParts=${slabBelowParts.length}`)
+        console.log(`[parts] door=${doorId} slabBelow=${slabs.below?.expressId ?? 'none'} top=${slabs.below?.bbox.max[1].toFixed(3) ?? 'none'} doorBottom=${bbox.min[1].toFixed(3)} belowParts=${slabBelowParts.length} (extras=${slabs.belowExtras.length} buildup=${belowBuildup.length}) slabAbove=${slabs.above?.expressId ?? 'none'} aboveBot=${slabs.above?.bbox.min[1].toFixed(3) ?? 'none'} doorTop=${bbox.max[1].toFixed(3)} aboveParts=${slabAboveParts.length}`)
+        for (const p of belowBuildup) {
+            console.log(`  below buildup #${p.expressId} Y[${p.bbox.min[1].toFixed(3)}, ${p.bbox.max[1].toFixed(3)}]`)
+        }
     }
 
-    const centre = bboxCentre(bbox)
     const radius = opts.neighbourPlanRadius
     const filterY = (cand: { bbox: AABB }) =>
         cand.bbox.max[1] >= bbox.min[1] - opts.neighbourElevationOverlap
@@ -584,6 +647,5 @@ export function analyzeDoor(
         nearbyDevices,
         cset: readCsetData(model, doorId),
         operationType: readOperationType(model, doorId),
-        placementYAxis: model.placementYAxis(doorId),
     }
 }

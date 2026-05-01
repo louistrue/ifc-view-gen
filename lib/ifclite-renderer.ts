@@ -25,7 +25,6 @@
  * door-leaf colours).
  */
 import * as THREE from 'three'
-import { appendFileSync } from 'node:fs'
 import {
     DEFAULT_SVG_FONT_FAMILY,
 } from './svg-renderer'
@@ -49,38 +48,59 @@ import type { IfcLiteMesh } from './ifclite-source'
 
 const COLORS = loadRenderColors()
 
-function debugLog(
-    runId: string,
-    hypothesisId: string,
-    location: string,
-    message: string,
-    data: Record<string, unknown>
-): void {
-    const payload = {
-        sessionId: '0a5c96',
-        runId,
-        hypothesisId,
-        location,
-        message,
-        data,
-        timestamp: Date.now(),
-    }
-    // #region agent log
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0a5c96'},body:JSON.stringify(payload)}).catch(()=>{});
-    // #endregion
-    try {
-        appendFileSync('debug-0a5c96.log', `${JSON.stringify(payload)}\n`, 'utf8')
-    } catch {
-        // swallow debug logging errors
-    }
-}
-
 export const FIXED_PX_PER_METER = 285
+// Canvas matches the legacy 1000×1000 SVG.  The PNG rasteriser upscales to
+// 1400 px wide, so the *effective* zoom in the PNG is 285×1.4 = 399 px/m —
+// same as legacy.  Bumping the SVG canvas to 1400 (which we tried earlier)
+// breaks zoom parity because the rasteriser then ships the SVG 1:1.
 export const CANVAS_PX = 1000
+export const CANVAS_HEIGHT_PX = 1000
 
 // Legacy renderer constants — kept identical so visual parity holds.
 const STRUCTURAL_SLAB_INTRUSION_METERS = 0.10  // 10 cm into slab top/bottom face
 const STOREY_CONTENT_HEIGHT_METERS = 3.5       // hard cap on visible vertical span
+// Lateral context size on each side of the door, matched to legacy
+// `getEffectiveLateralHalfMeters`: clamp(doorWidth*0.5, 0.5m, 1.5m). Beyond
+// this the canvas paints the page background — the architectural border that
+// frames the elevation/plan instead of bleeding model fill to the page edge.
+const LATERAL_GAP_MIN_METERS = 0.5
+const LATERAL_GAP_MAX_METERS = 1.5
+
+/** Legacy parity: half-window in metres for plan + elevation lateral content,
+ *  capped by the host wall's actual horizontal extent (so a perpendicular
+ *  T-stub past the wall end doesn't push the window wider than the wall). */
+function computeEffectiveLateralHalfMeters(ctx: DoorContextLite): number {
+    const halfDoor = ctx.viewFrame.width / 2
+    const lateralGap = Math.max(LATERAL_GAP_MIN_METERS, Math.min(LATERAL_GAP_MAX_METERS, ctx.viewFrame.width * 0.5))
+    let localMinW = -halfDoor - lateralGap
+    let localMaxW = halfDoor + lateralGap
+    if (ctx.hostWall) {
+        const { origin, widthAxis } = ctx.viewFrame
+        const bb = ctx.hostWall.bbox
+        const corners: Array<[number, number]> = [
+            [bb.min[0], bb.min[2]], [bb.max[0], bb.min[2]],
+            [bb.min[0], bb.max[2]], [bb.max[0], bb.max[2]],
+        ]
+        let wallMin = +Infinity, wallMax = -Infinity
+        for (const [x, z] of corners) {
+            const p = (x - origin[0]) * widthAxis[0] + (z - origin[2]) * widthAxis[2]
+            if (p < wallMin) wallMin = p
+            if (p > wallMax) wallMax = p
+        }
+        // Cap window to wall extent but never tighter than door + gap.
+        localMinW = Math.min(Math.max(wallMin, -halfDoor - lateralGap), -halfDoor)
+        localMaxW = Math.max(Math.min(wallMax, halfDoor + lateralGap), halfDoor)
+    }
+    return Math.max(Math.abs(localMinW), Math.abs(localMaxW))
+}
+
+/** Side gutter (in pixels) so model content sits inside [marginX, W-marginX]
+ *  centred on the door anchor — matches the legacy elevation/plan viewport. */
+function computeContentMarginX(ctx: DoorContextLite, canvasW: number): number {
+    const effHalfW = computeEffectiveLateralHalfMeters(ctx)
+    const visibleHalfPx = effHalfW * FIXED_PX_PER_METER
+    return Math.max(0, Math.round(canvasW / 2 - visibleHalfPx))
+}
 
 export interface RenderOptions {
     width?: number
@@ -96,7 +116,7 @@ export interface RenderOptions {
 
 const DEFAULT_OPTS: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs'>> = {
     width: CANVAS_PX,
-    height: CANVAS_PX,
+    height: CANVAS_HEIGHT_PX,
     lineWidth: 1.5,
     colors: COLORS,
     // Storey content fills the canvas exactly (no gutter): viewport bottom
@@ -272,6 +292,12 @@ function buildElevationCamera(
     footAnchor: number
 ): CameraSetup {
     // World axes: widthAxis (horizontal), upAxis = (0,1,0), facing = wall normal.
+    // viewFrame.widthAxis matches the plan camera's screen-right direction.
+    // The elevation camera shares this convention so plan + elevation read
+    // CONSISTENTLY (a feature on the door's left reads as screen-left in both
+    // views).  Mathematically: plan looks down with up=-facing, elevation
+    // looks at +facing with up=+Y; both end up with camera-right = -facing×Y
+    // = widthAxis.  No negation needed.
     const wA = new THREE.Vector3(...frame.widthAxis)
     const uA = new THREE.Vector3(...frame.upAxis)
     const fA = new THREE.Vector3(...frame.facing)
@@ -599,10 +625,13 @@ function projectMeshSegments(
     canvasW?: number,
     canvasH?: number,
     canvasMinY?: number,
+    canvasMinX?: number,
+    canvasMaxX?: number,
 ): ProjectedSegment[] {
     const edges = extractMeshEdges(mesh)
     const out: ProjectedSegment[] = []
     const minY = canvasMinY ?? -4
+    const minX = canvasMinX ?? -4
     for (const { a, b } of edges) {
         if (clip) {
             if (clip.yMin != null && a.y < clip.yMin && b.y < clip.yMin) continue
@@ -616,7 +645,8 @@ function projectMeshSegments(
         const pb = projectPoint(new THREE.Vector3(b.x, b.y, b.z), cam)
         let x1 = pa.x, y1 = pa.y, x2 = pb.x, y2 = pb.y
         if (canvasW != null && canvasH != null) {
-            const clipped = clipLine2D(x1, y1, x2, y2, -4, minY, canvasW + 4, canvasH + 4)
+            const maxX = canvasMaxX ?? canvasW + 4
+            const clipped = clipLine2D(x1, y1, x2, y2, minX, minY, maxX, canvasH + 4)
             if (!clipped) continue
             x1 = clipped[0]; y1 = clipped[1]; x2 = clipped[2]; y2 = clipped[3]
         }
@@ -682,10 +712,24 @@ function emitElevationSvg(
     //   bottomDy = slab-below.top - 10 cm intrusion (drop into slab below)
     //   topDy    = min(slab-above.bottom + 10 cm, bottomDy + 3.5 m cap)
     // Falls back to door-bottom ± 10 cm when slabs are missing.
+    //
+    // When findSlabsAroundDoor doesn't return a structural IFCSLAB (Flu21
+    // basement: slab too far from door centre, only Bodenplatte tiles model
+    // the floor), use the lowest IFCBUILDINGELEMENTPART build-up bottom as a
+    // proxy for the structural-slab top so the 10 cm cap still reads.
     const structAboveDy = getStructuralSlabFaceDy(ctx, 'above')
     const structBelowDy = getStructuralSlabFaceDy(ctx, 'below')
-    const bottomDy = structBelowDy != null
-        ? structBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
+    let buildupFloorDy: number | null = null
+    if (structBelowDy == null && ctx.slabBelowParts.length > 0) {
+        let minBottom = +Infinity
+        for (const p of ctx.slabBelowParts) {
+            if (p.bbox.min[1] < minBottom) minBottom = p.bbox.min[1]
+        }
+        if (minBottom < doorBottom - 0.005) buildupFloorDy = minBottom - doorBottom
+    }
+    const effectiveBelowDy = structBelowDy ?? buildupFloorDy
+    const bottomDy = effectiveBelowDy != null
+        ? effectiveBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
         : -STRUCTURAL_SLAB_INTRUSION_METERS
     const topCapDy = bottomDy + STOREY_CONTENT_HEIGHT_METERS
     const topDy = structAboveDy != null
@@ -705,27 +749,42 @@ function emitElevationSvg(
     // space anyway; this clip just kills triangulated meshes that fall
     // entirely outside the visible box.
     const halfCanvasMeters = (W / 2) / FIXED_PX_PER_METER
+    // Depth crop along the facing (wall-normal) axis: only include geometry
+    // within ±ELEVATION_DEPTH_HALF_M of the door plane.  Without this, walls
+    // / doors / fixtures sitting deep in the adjacent room project onto the
+    // elevation as ghost rectangles overlapping the door — legacy capped
+    // elevation depth at the door + a thin slice of the wall thickness.
+    const ELEVATION_DEPTH_HALF_M = 0.3
     const elevationClip: WorldClip = {
         yMin: viewportBottomY - 0.02,
         yMax: viewportTopY + 0.02,
     }
     if (Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])) {
+        // Width axis = X, facing axis = Z
         elevationClip.xMin = ctx.viewFrame.origin[0] - halfCanvasMeters - 0.1
         elevationClip.xMax = ctx.viewFrame.origin[0] + halfCanvasMeters + 0.1
+        elevationClip.zMin = ctx.viewFrame.origin[2] - ELEVATION_DEPTH_HALF_M
+        elevationClip.zMax = ctx.viewFrame.origin[2] + ELEVATION_DEPTH_HALF_M
     } else {
+        // Width axis = Z, facing axis = X
         elevationClip.zMin = ctx.viewFrame.origin[2] - halfCanvasMeters - 0.1
         elevationClip.zMax = ctx.viewFrame.origin[2] + halfCanvasMeters + 0.1
+        elevationClip.xMin = ctx.viewFrame.origin[0] - ELEVATION_DEPTH_HALF_M
+        elevationClip.xMax = ctx.viewFrame.origin[0] + ELEVATION_DEPTH_HALF_M
     }
 
     // Pixel rect for Sutherland-Hodgman polygon clipping. Top is the world
     // viewport top, projected to screen — anything above gets cut.  Bottom
     // stays on the canvas edge so a slab-below band reads to the very edge.
+    // Left/right gutters: keep the architectural border whitespace the legacy
+    // renderer had — content is painted only inside [marginX, W-marginX].
     const yScreenAt = (yWorld: number) => cam.scaleY * yWorld + cam.offsetY
     const screenTopWorld = yScreenAt(viewportTopY)
+    const marginX = computeContentMarginX(ctx, W)
     const pixelClip: PixelClipRect = {
-        minX: 0,
+        minX: marginX,
         minY: Math.max(0, Math.min(H, screenTopWorld)),
-        maxX: W,
+        maxX: W - marginX,
         maxY: H,
     }
 
@@ -736,16 +795,20 @@ function emitElevationSvg(
     }
     const groups: Group[] = []
 
-    // Background wall band: full canvas (independent of storey clip).  The
-    // legacy renderer paints the canvas with wall colour and then layers
-    // door/slab/devices on top.  Without this our renders show white where
-    // the storey content is shorter than 3.5 m, but legacy never does.
+    // Background wall band: content area only (clipped to the side gutters
+    // AND to the storey-content vertical viewport).  Without the vertical
+    // clip the layer-0 fill paints a wall-grey block above the top slab cap
+    // — for short storeys (basement door whose slab-above sits right on the
+    // door head) the cap reads as just a black line, not a 10 cm band.  By
+    // ending layer-0 at the slab-cap top edge, white page background frames
+    // the band the same way the legacy renderer did.
+    const layer0TopY = Math.max(0, Math.min(H, screenTopWorld))
     groups.push({
         layer: 0,
         polygons: [{
             points: [
-                { x: 0, y: 0 }, { x: W, y: 0 },
-                { x: W, y: H }, { x: 0, y: H },
+                { x: marginX, y: layer0TopY }, { x: W - marginX, y: layer0TopY },
+                { x: W - marginX, y: H }, { x: marginX, y: H },
             ],
             fill: options.colors.elevation.wall,
             depth: 0,
@@ -809,17 +872,50 @@ function emitElevationSvg(
             max: [w.bbox.max[0], Math.min(w.bbox.max[1], viewportTopY), w.bbox.max[2]],
         }
         const rect = projectBoxToElevationRect(wbb, cam, pixelClip)
-        if (rect && rect.length >= 3) {
-            groups.push({
-                layer: 1,
-                polygons: [{ points: rect, fill: options.colors.elevation.wall, depth: 0, layer: 1, expressId: w.expressId }],
-                segments: [],
-            })
+        if (!rect || rect.length < 3) continue
+        // Outline the rect so perpendicular walls (T-junction returns, room
+        // returns adjacent to the door) are actually visible against the
+        // bg-wall fill, which uses the same colour.  Without strokes a wall
+        // perfectly matches the background and disappears.
+        const verticalEdges: ProjectedSegment[] = []
+        let minSx = +Infinity, maxSx = -Infinity, minSy = +Infinity, maxSy = -Infinity
+        for (const p of rect) {
+            if (p.x < minSx) minSx = p.x
+            if (p.x > maxSx) maxSx = p.x
+            if (p.y < minSy) minSy = p.y
+            if (p.y > maxSy) maxSy = p.y
         }
+        const widthPx = maxSx - minSx
+        // Skip drawing strokes if the wall is wider than ~80 % of canvas — that's
+        // the host-wall-spanning case where strokes would frame the whole canvas.
+        // Also suppress edges that landed exactly on the side gutter (the wall
+        // got clipped against the marginX crop): those would draw a vertical
+        // line along the page border, not a real wall edge.
+        if (widthPx < W * 0.80) {
+            const onLeftCrop = Math.abs(minSx - marginX) < 0.5
+            const onRightCrop = Math.abs(maxSx - (W - marginX)) < 0.5
+            if (!onLeftCrop) {
+                verticalEdges.push({ x1: minSx, y1: minSy, x2: minSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+            }
+            if (!onRightCrop) {
+                verticalEdges.push({ x1: maxSx, y1: minSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+            }
+        }
+        groups.push({
+            layer: 1,
+            polygons: [{ points: rect, fill: options.colors.elevation.wall, depth: 0, layer: 1, expressId: w.expressId }],
+            segments: verticalEdges,
+        })
     }
     // Horizontal band rendering: a full-canvas-width strip clipped to the
     // [yMinWorld, yMaxWorld] range, painted with `fill` at the given layer,
     // with thin top/bottom strokes for the architectural-style stripe look.
+    // Strokes that would land EXACTLY on a crop edge (top of viewport at
+    // screenTopWorld, bottom of viewport at canvasH) are suppressed — those
+    // would read as solid lines drawn along the image crop, not real geometry.
+    const screenBottomWorld = yScreenAt(viewportBottomY)
+    const onCropEdge = (yPx: number) =>
+        Math.abs(yPx - screenTopWorld) < 0.5 || Math.abs(yPx - screenBottomWorld) < 0.5
     const drawHorizontalBand = (
         yMinWorld: number,
         yMaxWorld: number,
@@ -834,15 +930,18 @@ function emitElevationSvg(
         const yMax = Math.max(yTop, yBot)
         if (yMax - yMin < 0.3) return
         const rect: Pt[] = [
-            { x: 0, y: yMin }, { x: W, y: yMin },
-            { x: W, y: yMax }, { x: 0, y: yMax },
+            { x: marginX, y: yMin }, { x: W - marginX, y: yMin },
+            { x: W - marginX, y: yMax }, { x: marginX, y: yMax },
         ]
-        const segments: ProjectedSegment[] = addStrokes
-            ? [
-                { x1: 0, y1: yMin, x2: W, y2: yMin, color: options.colors.strokes.outline, depth: 0, layer, width: options.lineWidth },
-                { x1: 0, y1: yMax, x2: W, y2: yMax, color: options.colors.strokes.outline, depth: 0, layer, width: options.lineWidth },
-            ]
-            : []
+        const segments: ProjectedSegment[] = []
+        if (addStrokes) {
+            if (!onCropEdge(yMin)) {
+                segments.push({ x1: marginX, y1: yMin, x2: W - marginX, y2: yMin, color: options.colors.strokes.outline, depth: 0, layer, width: options.lineWidth })
+            }
+            if (!onCropEdge(yMax)) {
+                segments.push({ x1: marginX, y1: yMax, x2: W - marginX, y2: yMax, color: options.colors.strokes.outline, depth: 0, layer, width: options.lineWidth })
+            }
+        }
         groups.push({
             layer,
             polygons: [{ points: rect, fill, depth: 0, layer, expressId }],
@@ -866,19 +965,22 @@ function emitElevationSvg(
     // raised-threshold doors where the analyzer's plan-radius search misses.
     {
         const slabBelowExpressId = ctx.slabBelow?.expressId ?? -1
+        // When we fell back to the buildup-derived floor, treat that Y as the
+        // structural top so the 10 cm cap reads as a separate band UNDER the
+        // build-up rather than smearing into it.
         const slabBandTopY = ctx.slabBelow
             ? ctx.slabBelow.bbox.max[1]
-            : doorBottom
+            : (buildupFloorDy != null ? doorBottom + buildupFloorDy : doorBottom)
         drawHorizontalBand(viewportBottomY, slabBandTopY, options.colors.elevation.wall, 2, slabBelowExpressId, true)
-        // Unterlagsboden / build-up parts above the structural slab.
-        if (ctx.slabBelow) {
-            const parts = [...ctx.slabBelowParts].sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
-            for (const part of parts) {
-                const yLo = Math.max(part.bbox.min[1], slabBandTopY)
-                const yHi = Math.min(part.bbox.max[1], viewportTopY)
-                if (yHi - yLo < 0.005) continue
-                drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
-            }
+        // Unterlagsboden / build-up parts above the structural slab — render
+        // even when slabBelow is null (some doors sit at storey openings where
+        // the structural slab plane is interrupted).
+        const belowParts = [...ctx.slabBelowParts].sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
+        for (const part of belowParts) {
+            const yLo = Math.max(part.bbox.min[1], viewportBottomY)
+            const yHi = Math.min(part.bbox.max[1], viewportTopY)
+            if (yHi - yLo < 0.005) continue
+            drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
         }
     }
     // ── Top 10 cm structural slab cap (slabAbove) ───────────────────────────
@@ -891,25 +993,38 @@ function emitElevationSvg(
             ? ctx.slabAbove.bbox.min[1]
             : viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS
         drawHorizontalBand(slabBandBotY, viewportTopY, options.colors.elevation.wall, 2, slabAboveExpressId, true)
-        if (ctx.slabAbove) {
-            const parts = [...ctx.slabAboveParts].sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
-            for (const part of parts) {
-                const yHi = Math.min(part.bbox.max[1], slabBandBotY)
-                const yLo = Math.max(part.bbox.min[1], viewportBottomY)
-                if (yHi - yLo < 0.005) continue
-                drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
-            }
+        const aboveParts = [...ctx.slabAboveParts].sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
+        for (const part of aboveParts) {
+            const yHi = Math.min(part.bbox.max[1], viewportTopY)
+            const yLo = Math.max(part.bbox.min[1], viewportBottomY)
+            if (yHi - yLo < 0.005) continue
+            drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
         }
     }
 
     // Triangulated mesh path for the door, nearby doors/windows, and devices.
     // These need triangle-level fills because they have meaningful interior
-    // detail (panels, glazing, frames, hardware).
-    const meshes = elevationMeshSet(ctx)
+    // detail (panels, glazing, frames, hardware).  Apply the same hidden-side
+    // filter as the host-wall background fill, so perpendicular doors / wall
+    // devices behind the host wall don't bleed handles or fixtures through.
+    const meshes: Array<{ mesh: IfcLiteMesh; expressId: number }> = []
+    for (const m of ctx.door.meshes) meshes.push({ mesh: m, expressId: m.expressId })
+    for (const d of ctx.nearbyDoors) {
+        if (!isWallVisibleInElevation(d.bbox)) continue
+        for (const m of d.meshes) meshes.push({ mesh: m, expressId: m.expressId })
+    }
+    for (const w of ctx.nearbyWindows) {
+        if (!isWallVisibleInElevation(w.bbox)) continue
+        for (const m of w.meshes) meshes.push({ mesh: m, expressId: m.expressId })
+    }
+    for (const d of ctx.nearbyDevices) {
+        if (!isWallVisibleInElevation(d.bbox)) continue
+        for (const m of d.meshes) meshes.push({ mesh: m, expressId: m.expressId })
+    }
     for (const { mesh, expressId } of meshes) {
         const cls = classifyMesh(mesh, ctx, true, options.colors)
         const polys = projectMeshFill(mesh, cam, cls, expressId, elevationClip, pixelClip)
-        const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, elevationClip, W, H, pixelClip.minY)
+        const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
     }
@@ -1122,6 +1237,44 @@ interface DoorOperation {
     hingeSide: 'left' | 'right' | 'both' | null
 }
 
+/** For a door whose bbox includes a sidelight (Flu21 ST.KA.T1 / ST.ZE.T2),
+ *  the leaf is one of the door's sub-meshes whose width-axis extent equals
+ *  the clear opening (Mass-Durchgangsbreite).  Returns the leaf centre's
+ *  offset (in metres along widthAxis) from the bbox centre, or 0 when no
+ *  matching sub-mesh is found (single-panel doors). */
+function findLeafCentreOffset(
+    meshes: IfcLiteMesh[],
+    viewFrame: DoorViewFrame,
+    clearW: number,
+): number {
+    if (clearW <= 0.05 || meshes.length === 0) return 0
+    const wax = viewFrame.widthAxis[0]
+    const waz = viewFrame.widthAxis[2]
+    const ox = viewFrame.origin[0]
+    const oz = viewFrame.origin[2]
+    const tolerance = 0.05  // 5 cm
+    const candidates: Array<{ centre: number; ext: number }> = []
+    for (const m of meshes) {
+        const pos = m.positions
+        if (pos.length < 9) continue
+        let lo = +Infinity, hi = -Infinity
+        for (let v = 0; v < pos.length; v += 3) {
+            const proj = (pos[v] - ox) * wax + (pos[v + 2] - oz) * waz
+            if (proj < lo) lo = proj
+            if (proj > hi) hi = proj
+        }
+        const ext = hi - lo
+        if (Math.abs(ext - clearW) <= tolerance) {
+            candidates.push({ centre: (lo + hi) / 2, ext })
+        }
+    }
+    if (candidates.length === 0) return 0
+    // Multiple matches (top rail + threshold + transom + leaf-face) typically
+    // share the same centre.  Take the median to ride out outliers.
+    candidates.sort((a, b) => a.centre - b.centre)
+    return candidates[Math.floor(candidates.length / 2)].centre
+}
+
 function parseOperationType(op: string | null): DoorOperation {
     if (!op) return { kind: 'none', hingeSide: null }
     const u = op.toUpperCase()
@@ -1138,35 +1291,6 @@ function parseOperationType(op: string | null): DoorOperation {
     if (u.includes('FIXED')) return { kind: 'fixed', hingeSide: null }
     if (u.includes('SWING')) return { kind: 'swing', hingeSide: 'right' }
     return { kind: 'none', hingeSide: null }
-}
-
-function shouldMirrorSwingForHandedness(ctx: DoorContextLite): boolean {
-    const py = ctx.placementYAxis
-    if (!py) return false
-    const px = py[0], pz = py[2]
-    const plen = Math.hypot(px, pz)
-    if (plen < 1e-8) return false
-    const fx = ctx.viewFrame.facing[0], fz = ctx.viewFrame.facing[2]
-    const flen = Math.hypot(fx, fz)
-    if (flen < 1e-8) return false
-    // Same invariant as legacy renderer:
-    // mirror when placementYAxis · semanticFacing > 0.
-    return (px / plen) * (fx / flen) + (pz / plen) * (fz / flen) > 0
-}
-
-function shouldFlipPlanArc(ctx: DoorContextLite): boolean {
-    const op = (ctx.operationType ?? '').toUpperCase()
-    if (op.includes('REVERSE') || op.includes('OPPOSITE')) return true
-    const py = ctx.placementYAxis
-    if (!py) return false
-    const px = py[0], pz = py[2]
-    const plen = Math.hypot(px, pz)
-    if (plen < 1e-8) return false
-    const fx = ctx.viewFrame.facing[0], fz = ctx.viewFrame.facing[2]
-    const flen = Math.hypot(fx, fz)
-    if (flen < 1e-8) return false
-    // Legacy parity: flip when placementYAxis opposes semantic facing.
-    return (px / plen) * (fx / flen) + (pz / plen) * (fz / flen) < 0
 }
 
 interface PlanCamera {
@@ -1216,71 +1340,6 @@ function buildPlanCameraNew(
     }
 }
 
-function detectLeafCenterFromDoorMeshes(
-    ctx: DoorContextLite,
-    cutY: number,
-    clearWidth: number
-): { centerOffset: number; width: number } | null {
-    const all: SectionSegment[] = []
-    for (const m of ctx.door.meshes) all.push(...extractMeshSectionSegments(m, cutY))
-    if (all.length === 0) return null
-    const { closedLoops, openChains } = reconstructPolygons(all)
-    const closedExtra: Array<Array<{ x: number; z: number }>> = []
-    for (const chain of openChains) {
-        const closed = tryCloseOpenChain(chain, PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS)
-        if (closed) closedExtra.push(closed)
-    }
-    const loops = [...closedLoops, ...closedExtra]
-    const rawOpen = openChains.filter((chain) => !tryCloseOpenChain(chain, PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS))
-    const wa = ctx.viewFrame.widthAxis
-    const originWidth = ctx.viewFrame.origin[0] * wa[0] + ctx.viewFrame.origin[2] * wa[2]
-    const candidates: Array<{ centerOffset: number; width: number; score: number }> = []
-
-    const pushCandidate = (pts: Array<{ x: number; z: number }>, minPts: number) => {
-        if (pts.length < minPts) return
-        let minA = +Infinity, maxA = -Infinity
-        for (const p of pts) {
-            const a = p.x * wa[0] + p.z * wa[2] - originWidth
-            if (a < minA) minA = a
-            if (a > maxA) maxA = a
-        }
-        if (!isFinite(minA) || !isFinite(maxA)) return
-        const width = maxA - minA
-        if (width < 0.08) return
-        const centerOffset = (minA + maxA) / 2
-        const score = Math.abs(width - clearWidth)
-        candidates.push({ centerOffset, width, score })
-    }
-    for (const loop of loops) pushCandidate(loop, 3)
-    // Many real-world leaf cuts are open chains (non-watertight triangulation).
-    // Use them as candidates too so we still anchor to leaf edges.
-    for (const chain of rawOpen) pushCandidate(chain, 2)
-    // Last resort: per-segment candidates from the raw section soup.
-    for (const seg of all) pushCandidate([seg.a, seg.b], 2)
-    if (candidates.length === 0) return null
-    candidates.sort((a, b) => a.score - b.score)
-    const best = candidates[0]
-    const topCandidates = candidates.slice(0, 5).map((c) => ({
-        centerOffset: c.centerOffset,
-        width: c.width,
-        score: c.score,
-    }))
-    if (best.width < clearWidth * 0.55 || best.width > ctx.viewFrame.width + 0.05) return null
-    debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1242', 'leaf candidate stats', {
-        guid: ctx.guid,
-        clearWidth,
-        closedLoops: closedLoops.length,
-        closedFromOpen: closedExtra.length,
-        rawOpenChains: rawOpen.length,
-        rawSegments: all.length,
-        candidateCount: candidates.length,
-        bestWidth: best.width,
-        bestCenterOffset: best.centerOffset,
-        topCandidates,
-    })
-    return { centerOffset: best.centerOffset, width: best.width }
-}
-
 function emitPlanSvg(
     ctx: DoorContextLite,
     options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs'>>,
@@ -1306,6 +1365,7 @@ function emitPlanSvg(
     // head where wall is widest; +1.0 m at the waist gives the same wall
     // section since walls are uniform between slabs.)
     const cutY = ctx.viewFrame.origin[1] + PLAN_CUT_HEIGHT_METERS
+    const planMarginX = computeContentMarginX(ctx, W)
     const colors = options.colors
     const stroke = colors.strokes.outline
 
@@ -1352,12 +1412,79 @@ function emitPlanSvg(
     const wallFillFor = (cfcBkp: string | null): string =>
         resolveWallCutColor(cfcBkp, colors)
 
-    // Host wall (cut + filled).
+    // Host wall (cut + filled).  Mesh-section alone often produces only an
+    // open chain along the front / back wall faces because the door opening
+    // breaks the loop — that's why some doors used to render the host wall
+    // as a single horizontal line with no fill and no jamb edges.  Render two
+    // bbox-rects flanking the door opening as a guaranteed fill, then overlay
+    // the mesh-section for any extra detail.  The flanking rects' inner
+    // edges naturally provide the vertical jamb lines closing the wall shape
+    // at the door opening.
     if (ctx.hostWall) {
+        const hwbb = ctx.hostWall.bbox
+        if (hwbb.min[1] <= cutY && hwbb.max[1] >= cutY) {
+            const dbb = ctx.door.bbox
+            const fillC = wallFillFor(ctx.cset.cfcBkp)
+            const wallAlongX = Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])
+            if (wallAlongX) {
+                // Wall length axis = X, thickness = Z.
+                if (dbb.min[0] > hwbb.min[0] + 0.001) {
+                    const r: Pt[] = [
+                        { x: hwbb.min[0], z: hwbb.min[2] },
+                        { x: dbb.min[0],  z: hwbb.min[2] },
+                        { x: dbb.min[0],  z: hwbb.max[2] },
+                        { x: hwbb.min[0], z: hwbb.max[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+                if (dbb.max[0] < hwbb.max[0] - 0.001) {
+                    const r: Pt[] = [
+                        { x: dbb.max[0],  z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: hwbb.max[2] },
+                        { x: dbb.max[0],  z: hwbb.max[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+            } else {
+                // Wall length axis = Z, thickness = X.
+                if (dbb.min[2] > hwbb.min[2] + 0.001) {
+                    const r: Pt[] = [
+                        { x: hwbb.min[0], z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: dbb.min[2] },
+                        { x: hwbb.min[0], z: dbb.min[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+                if (dbb.max[2] < hwbb.max[2] - 0.001) {
+                    const r: Pt[] = [
+                        { x: hwbb.min[0], z: dbb.max[2] },
+                        { x: hwbb.max[0], z: dbb.max[2] },
+                        { x: hwbb.max[0], z: hwbb.max[2] },
+                        { x: hwbb.min[0], z: hwbb.max[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+            }
+        }
         sectionGroup(ctx.hostWall.meshes, wallFillFor(ctx.cset.cfcBkp), 1)
     }
-    // Nearby walls (perpendicular, T-junction returns).
+    // Nearby walls (perpendicular, T-junction returns).  Emit a bbox-rect
+    // backdrop FIRST so thin / T-stub walls whose mesh-section produces only
+    // an open chain still render as a filled wall body — without this, the
+    // perpendicular returns appear as empty outlined boxes in plan.
     for (const w of ctx.nearbyWalls) {
+        const wbb = w.bbox
+        if (wbb.min[1] <= cutY && wbb.max[1] >= cutY) {
+            const rectPts: Pt[] = [
+                { x: wbb.min[0], z: wbb.min[2] },
+                { x: wbb.max[0], z: wbb.min[2] },
+                { x: wbb.max[0], z: wbb.max[2] },
+                { x: wbb.min[0], z: wbb.max[2] },
+            ].map((p) => projP(p))
+            polys.push({ points: rectPts, fill: wallFillFor(null), stroke: false, layer: 1 })
+        }
         sectionGroup(w.meshes, wallFillFor(null), 1)
     }
     // Nearby doors (faded so the focal door reads).
@@ -1418,55 +1545,19 @@ function emitPlanSvg(
     //   2. viewFrame.width − 0.10 m              (assume 5 cm jambs each side)
     {
         const op = parseOperationType(ctx.operationType)
-        const mirrorForIfcHandedness = shouldMirrorSwingForHandedness(ctx)
-        debugLog('pre-fix', 'H2-H4', 'ifclite-renderer.ts:1314', 'plan swing entry', {
-            guid: ctx.guid,
-            operationType: ctx.operationType,
-            parsed: op,
-            mirrorForIfcHandedness,
-            placementYAxis: ctx.placementYAxis,
-            widthAxis: ctx.viewFrame.widthAxis,
-            facing: ctx.viewFrame.facing,
-            frameWidth: ctx.viewFrame.width,
-            frameThickness: ctx.viewFrame.thickness,
-        })
         if (process.env.DEBUG_PLAN === '1') {
-            console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)} mirror=${mirrorForIfcHandedness} frameW=${ctx.viewFrame.width.toFixed(2)} clearW=${ctx.cset.massDurchgangsbreite}`)
+            console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)} frameW=${ctx.viewFrame.width.toFixed(2)} clearW=${ctx.cset.massDurchgangsbreite}`)
         }
         if (op.kind === 'swing' && op.hingeSide) {
             const widthAxis2 = cam.widthAxis     // {x,z} along door width
-            const flipArc = shouldFlipPlanArc(ctx)
-            const openAxis2 = cam.openAxis // keep right-handed basis; flip sweep angle only
-            const arcSign = flipArc ? -1 : 1
-            const det2d = widthAxis2.x * openAxis2.z - widthAxis2.z * openAxis2.x
-            debugLog('pre-fix', 'H5', 'ifclite-renderer.ts:1321', 'plan basis determinant', {
-                guid: ctx.guid,
-                widthAxis: widthAxis2,
-                openAxis: openAxis2,
-                det2d,
-            })
-            debugLog('pre-fix', 'H6', 'ifclite-renderer.ts:1323', 'plan arc flip decision', {
-                guid: ctx.guid,
-                flipArc,
-                arcSign,
-                mirrorMode: flipArc ? 'leaf-center-xy' : 'none',
-                placementYAxis: ctx.placementYAxis,
-                facing: ctx.viewFrame.facing,
-            })
+            const openAxis2 = cam.openAxis       // +facing → screen-down (room arc opens into)
             const frameW = ctx.viewFrame.width
             const clearW = (ctx.cset.massDurchgangsbreite != null && ctx.cset.massDurchgangsbreite > 0.05)
                 ? ctx.cset.massDurchgangsbreite
                 : Math.max(frameW - 0.10, 0.6)
             const jambInset = Math.max((frameW - clearW) / 2, 0)  // half the frame thickness on each side
             const faceOffset = ctx.viewFrame.thickness / 2
-            debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1326', 'plan swing sizing', {
-                guid: ctx.guid,
-                frameW,
-                clearW,
-                jambInset,
-                usesCsetClearWidth: ctx.cset.massDurchgangsbreite != null && ctx.cset.massDurchgangsbreite > 0.05,
-            })
-            const drawLeaf = (hingeSide: 'left' | 'right', leafW: number, hingeOff: number, leafCenterOff: number) => {
+            const drawLeaf = (hingeSide: 'left' | 'right', leafW: number, hingeOff: number) => {
                 // Hinge in world (XZ): door centre + widthAxis * hingeOff.
                 // hingeOff = ±(halfFrame - jambInset) so hinge sits at the
                 // INSIDE EDGE of the jamb, not at the bbox corner.
@@ -1475,23 +1566,17 @@ function emitPlanSvg(
                 // Pivot offset along openAxis (door face), faceOffset ahead of wall plane.
                 const pivotX = hingeX + openAxis2.x * faceOffset
                 const pivotZ = hingeZ + openAxis2.z * faceOffset
-                const leafCenterX = ctx.viewFrame.origin[0] + widthAxis2.x * leafCenterOff + openAxis2.x * faceOffset
-                const leafCenterZ = ctx.viewFrame.origin[2] + widthAxis2.z * leafCenterOff + openAxis2.z * faceOffset
                 const startAngle = hingeSide === 'left' ? 0 : Math.PI
-                const baseDelta = hingeSide === 'left' ? PLAN_SWING_OPEN_RAD : -PLAN_SWING_OPEN_RAD
-                const endAngle = startAngle + baseDelta * arcSign
+                const endAngle = hingeSide === 'left' ? PLAN_SWING_OPEN_RAD : Math.PI - PLAN_SWING_OPEN_RAD
                 const N = 24
                 let prevS: Pt | null = null
                 for (let i = 0; i <= N; i++) {
                     const t = i / N
                     const ang = startAngle + (endAngle - startAngle) * t
-                    const openAxisSign = xAxisMirrorOnly ? -1 : 1
-                    const dirX = widthAxis2.x * Math.cos(ang) + openAxis2.x * Math.sin(ang) * openAxisSign
-                    const dirZ = widthAxis2.z * Math.cos(ang) + openAxis2.z * Math.sin(ang) * openAxisSign
-                    const rawPx = pivotX + dirX * leafW
-                    const rawPz = pivotZ + dirZ * leafW
-                    const px = flipArc ? (2 * leafCenterX - rawPx) : rawPx
-                    const pz = flipArc ? (2 * leafCenterZ - rawPz) : rawPz
+                    const dirX = widthAxis2.x * Math.cos(ang) + openAxis2.x * Math.sin(ang)
+                    const dirZ = widthAxis2.z * Math.cos(ang) + openAxis2.z * Math.sin(ang)
+                    const px = pivotX + dirX * leafW
+                    const pz = pivotZ + dirZ * leafW
                     const s = projP({ x: px, z: pz })
                     if (prevS) {
                         segs.push({ x1: prevS.x, y1: prevS.y, x2: s.x, y2: s.y, layer: 7, color: '#666666' })
@@ -1500,180 +1585,30 @@ function emitPlanSvg(
                 }
                 // Leaf line: pivot → arc tip at 15° open position.
                 const tipAng = endAngle
-                const openAxisSign = xAxisMirrorOnly ? -1 : 1
-                const tipDirX = widthAxis2.x * Math.cos(tipAng) + openAxis2.x * Math.sin(tipAng) * openAxisSign
-                const tipDirZ = widthAxis2.z * Math.cos(tipAng) + openAxis2.z * Math.sin(tipAng) * openAxisSign
-                const rawTipX = pivotX + tipDirX * leafW
-                const rawTipZ = pivotZ + tipDirZ * leafW
-                const tipX = flipArc ? (2 * leafCenterX - rawTipX) : rawTipX
-                const tipZ = flipArc ? (2 * leafCenterZ - rawTipZ) : rawTipZ
-                const lineStartBaseX = pivotX
-                const lineStartBaseZ = pivotZ
-                const lineStartX = flipArc ? (2 * leafCenterX - lineStartBaseX) : lineStartBaseX
-                const lineStartZ = flipArc ? (2 * leafCenterZ - lineStartBaseZ) : lineStartBaseZ
-                const hingeS = projP({ x: lineStartX, z: lineStartZ })
+                const tipDirX = widthAxis2.x * Math.cos(tipAng) + openAxis2.x * Math.sin(tipAng)
+                const tipDirZ = widthAxis2.z * Math.cos(tipAng) + openAxis2.z * Math.sin(tipAng)
+                const tipX = pivotX + tipDirX * leafW
+                const tipZ = pivotZ + tipDirZ * leafW
+                const hingeS = projP({ x: pivotX, z: pivotZ })
                 const tipS = projP({ x: tipX, z: tipZ })
-                debugLog('pre-fix', 'H3-H4', 'ifclite-renderer.ts:1345', 'plan swing leaf geometry', {
-                    guid: ctx.guid,
-                    hingeSide,
-                    leafW,
-                    hingeOff,
-                    leafCenterOff,
-                    flipArc,
-                    xAxisMirrorOnly,
-                    pivotWorld: { x: pivotX, z: pivotZ },
-                    hingeWorld: { x: hingeX, z: hingeZ },
-                    lineStartMode: 'pivot-face',
-                    lineStartWorld: { x: lineStartX, z: lineStartZ },
-                    tipWorld: { x: tipX, z: tipZ },
-                    pivotScreen: hingeS,
-                    tipScreen: tipS,
-                    widthAxis: widthAxis2,
-                    openAxis: openAxis2,
-                })
                 segs.push({ x1: hingeS.x, y1: hingeS.y, x2: tipS.x, y2: tipS.y, layer: 7, color: '#666666' })
             }
-            const hingeSideResolved: 'left' | 'right' | 'both' =
-                op.hingeSide === 'both'
-                    ? 'both'
-                    : (mirrorForIfcHandedness
-                        ? (op.hingeSide === 'left' ? 'right' : 'left')
-                        : op.hingeSide)
-            let leafWidthForSingle = clearW
-            let centerOffsetForSingle = 0
-            let centeredOffsetUsed = true
-            const hasSignificantFixedPanel = clearW > 0.3 && clearW < frameW - 0.1
-            if (hingeSideResolved !== 'both' && hasSignificantFixedPanel) {
-                const detected = detectLeafCenterFromDoorMeshes(ctx, cutY, clearW)
-                if (detected) {
-                    leafWidthForSingle = detected.width
-                    centerOffsetForSingle = detected.centerOffset
-                    centeredOffsetUsed = false
-                    debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1381', 'detected asymmetric leaf', {
-                        guid: ctx.guid,
-                        clearW,
-                        frameW,
-                        detectedWidth: detected.width,
-                        detectedCenterOffset: detected.centerOffset,
-                    })
-                } else {
-                    debugLog('pre-fix', 'H1', 'ifclite-renderer.ts:1388', 'asymmetric leaf detection failed, using centered fallback', {
-                        guid: ctx.guid,
-                        clearW,
-                        frameW,
-                    })
-                }
-            }
             const halfClear = clearW / 2
-            let hingeSideResolvedFinal: 'left' | 'right' | 'both' = hingeSideResolved
-            const xAxisMirrorOnly =
-                hingeSideResolvedFinal !== 'both'
-                && mirrorForIfcHandedness
-                && !flipArc
-                && hasSignificantFixedPanel
-                && !centeredOffsetUsed
-            debugLog('pre-fix', 'H12', 'ifclite-renderer.ts:1394', 'x-axis mirror mode decision', {
-                guid: ctx.guid,
-                operationType: ctx.operationType,
-                mirrorForIfcHandedness,
-                flipArc,
-                xAxisMirrorOnly,
-                centeredOffsetUsed,
-                hasSignificantFixedPanel,
-            })
-            if (hingeSideResolvedFinal !== 'both') {
-                const rightNoMirror = op.hingeSide === 'right'
-                const hingeNoMirror = rightNoMirror
-                    ? centerOffsetForSingle + (leafWidthForSingle / 2)
-                    : centerOffsetForSingle - (leafWidthForSingle / 2)
-                const rightMirror = !rightNoMirror
-                const hingeMirror = rightMirror
-                    ? centerOffsetForSingle + (leafWidthForSingle / 2)
-                    : centerOffsetForSingle - (leafWidthForSingle / 2)
-                const halfFrame = frameW / 2
-                const edgeSlackNoMirror = Math.min(
-                    Math.abs((centerOffsetForSingle - leafWidthForSingle / 2) - (-halfFrame)),
-                    Math.abs((centerOffsetForSingle + leafWidthForSingle / 2) - halfFrame),
-                )
-                const leafLeft = centerOffsetForSingle - (leafWidthForSingle / 2)
-                const leafRight = centerOffsetForSingle + (leafWidthForSingle / 2)
-                const leftSlack = Math.abs(leafLeft - (-halfFrame))
-                const rightSlack = Math.abs(halfFrame - leafRight)
-                const geometricPreferredHinge: 'left' | 'right' = leftSlack < rightSlack ? 'left' : 'right'
-                const semanticResolvedHinge: 'left' | 'right' = hingeSideResolvedFinal === 'left' ? 'left' : 'right'
-                const handednessConflict = geometricPreferredHinge !== semanticResolvedHinge
-                if (xAxisMirrorOnly && handednessConflict) {
-                    hingeSideResolvedFinal = geometricPreferredHinge
-                    debugLog('pre-fix', 'H14', 'ifclite-renderer.ts:1398', 'conflict fallback: geometric hinge under x-axis mirror', {
-                        guid: ctx.guid,
-                        operationType: ctx.operationType,
-                        previousHinge: semanticResolvedHinge,
-                        overriddenHinge: hingeSideResolvedFinal,
-                        geometricPreferredHinge,
-                        mirrorForIfcHandedness,
-                        flipArc,
-                        xAxisMirrorOnly,
-                    })
-                }
-                debugLog('pre-fix', 'H13', 'ifclite-renderer.ts:1386', 'semantic-vs-geometry handedness', {
-                    guid: ctx.guid,
-                    operationType: ctx.operationType,
-                    mirrorForIfcHandedness,
-                    flipArc,
-                    geometricPreferredHinge,
-                    semanticResolvedHinge,
-                    handednessConflict,
-                    leafLeft,
-                    leafRight,
-                    halfFrame,
-                    leftSlack,
-                    rightSlack,
-                })
-                debugLog('pre-fix', 'H8-H10', 'ifclite-renderer.ts:1374', 'hinge alternatives', {
-                    guid: ctx.guid,
-                    operationType: ctx.operationType,
-                    mirrorForIfcHandedness,
-                    flipArc,
-                    centerOffsetForSingle,
-                    leafWidthForSingle,
-                    frameW,
-                    selectedHingeSide: hingeSideResolved,
-                    selectedHingeOffset: hingeSideResolvedFinal === 'left'
-                        ? centerOffsetForSingle - (leafWidthForSingle / 2)
-                        : centerOffsetForSingle + (leafWidthForSingle / 2),
-                    selectedHingeSideAfterConflictPolicy: hingeSideResolvedFinal,
-                    noMirror: {
-                        hingeSide: rightNoMirror ? 'right' : 'left',
-                        hingeOffset: hingeNoMirror,
-                    },
-                    mirror: {
-                        hingeSide: rightMirror ? 'right' : 'left',
-                        hingeOffset: hingeMirror,
-                    },
-                    leafEdgeSlackToFrame: edgeSlackNoMirror,
-                })
-            }
-            debugLog('pre-fix', 'H1-H2', 'ifclite-renderer.ts:1370', 'plan swing resolved hinge', {
-                guid: ctx.guid,
-                inputHinge: op.hingeSide,
-                resolvedHinge: hingeSideResolvedFinal,
-                halfClear,
-                centeredOffsetUsed,
-                leafWidthForSingle,
-                centerOffsetForSingle,
-            })
-            if (hingeSideResolvedFinal === 'both') {
-                // Double swing: each leaf is half the clear width.
-                drawLeaf('left', halfClear, -halfClear, -halfClear / 2)
-                drawLeaf('right', halfClear, +halfClear, +halfClear / 2)
+            // Find the LEAF position within the door bbox.  For a
+            // door+sidelight assembly the bbox spans BOTH panels (e.g. 2.0 m
+            // bbox = 1.25 m leaf + 0.75 m sidelight + jambs), so the bbox
+            // centre is NOT the leaf centre and the swing arc lands inside
+            // the sidelight glass.  Walk the door's sub-meshes for one whose
+            // width-axis extent ≈ clearW (Mass-Durchgangsbreite); its centre
+            // is the actual leaf centre.  Falls back to bbox centre when no
+            // matching sub-mesh exists (simple symmetric doors).
+            const leafCentreOffset = findLeafCentreOffset(ctx.door.meshes, ctx.viewFrame, clearW)
+            if (op.hingeSide === 'both') {
+                drawLeaf('left', halfClear, leafCentreOffset - halfClear)
+                drawLeaf('right', halfClear, leafCentreOffset + halfClear)
             } else {
-                // Hinge at the INSIDE edge of the jamb (frame-thickness inset
-                // from bbox corner), arc spans the clear width to the
-                // opposite jamb's INSIDE edge.
-                const hingeOff = hingeSideResolvedFinal === 'left'
-                    ? centerOffsetForSingle - (leafWidthForSingle / 2)
-                    : centerOffsetForSingle + (leafWidthForSingle / 2)
-                drawLeaf(hingeSideResolvedFinal, leafWidthForSingle, hingeOff, centerOffsetForSingle)
+                const hingeOff = leafCentreOffset + (op.hingeSide === 'left' ? -halfClear : +halfClear)
+                drawLeaf(op.hingeSide, clearW, hingeOff)
             }
         }
     }
@@ -1700,7 +1635,7 @@ function emitPlanSvg(
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${DEFAULT_SVG_FONT_FAMILY}">`,
         svgWebFontDefs(DEFAULT_SVG_FONT_FAMILY),
-        `<defs><clipPath id="plan-clip"><rect x="0" y="${planClipMinY.toFixed(2)}" width="${W}" height="${(planClipMaxY - planClipMinY).toFixed(2)}"/></clipPath></defs>`,
+        `<defs><clipPath id="plan-clip"><rect x="${planMarginX.toFixed(2)}" y="${planClipMinY.toFixed(2)}" width="${(W - 2 * planMarginX).toFixed(2)}" height="${(planClipMaxY - planClipMinY).toFixed(2)}"/></clipPath></defs>`,
         `<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />`,
         `<g clip-path="url(#plan-clip)" stroke-linejoin="round" stroke-linecap="round">`,
         polySvg,
@@ -1715,9 +1650,14 @@ export function renderDoorViewsLite(
     options: RenderOptions = {}
 ): { front: string; back: string; plan: string } {
     const opts = { ...DEFAULT_OPTS, ...options }
+    // Plan view keeps the 1:1 aspect (1000×1000) so the depth crop has
+    // room above + below the door anchor.  Elevation uses the same square
+    // canvas — 3.5 m of storey content fits inside (≈ 997 px at 285 px/m)
+    // and the rasteriser upscales the SVG to 1400 px wide PNG (legacy zoom).
+    const planOpts = { ...opts, height: opts.width }
     return {
         front: emitElevationSvg(ctx, 'front', opts),
         back: emitElevationSvg(ctx, 'back', opts),
-        plan: emitPlanSvg(ctx, opts),
+        plan: emitPlanSvg(ctx, planOpts),
     }
 }
