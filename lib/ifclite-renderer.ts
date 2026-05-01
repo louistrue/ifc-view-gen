@@ -1412,8 +1412,62 @@ function emitPlanSvg(
     const wallFillFor = (cfcBkp: string | null): string =>
         resolveWallCutColor(cfcBkp, colors)
 
-    // Host wall (cut + filled).
+    // Host wall (cut + filled).  Mesh-section alone often produces only an
+    // open chain along the front / back wall faces because the door opening
+    // breaks the loop — that's why some doors used to render the host wall
+    // as a single horizontal line with no fill and no jamb edges.  Render two
+    // bbox-rects flanking the door opening as a guaranteed fill, then overlay
+    // the mesh-section for any extra detail.  The flanking rects' inner
+    // edges naturally provide the vertical jamb lines closing the wall shape
+    // at the door opening.
     if (ctx.hostWall) {
+        const hwbb = ctx.hostWall.bbox
+        if (hwbb.min[1] <= cutY && hwbb.max[1] >= cutY) {
+            const dbb = ctx.door.bbox
+            const fillC = wallFillFor(ctx.cset.cfcBkp)
+            const wallAlongX = Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])
+            if (wallAlongX) {
+                // Wall length axis = X, thickness = Z.
+                if (dbb.min[0] > hwbb.min[0] + 0.001) {
+                    const r: Pt[] = [
+                        { x: hwbb.min[0], z: hwbb.min[2] },
+                        { x: dbb.min[0],  z: hwbb.min[2] },
+                        { x: dbb.min[0],  z: hwbb.max[2] },
+                        { x: hwbb.min[0], z: hwbb.max[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+                if (dbb.max[0] < hwbb.max[0] - 0.001) {
+                    const r: Pt[] = [
+                        { x: dbb.max[0],  z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: hwbb.max[2] },
+                        { x: dbb.max[0],  z: hwbb.max[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+            } else {
+                // Wall length axis = Z, thickness = X.
+                if (dbb.min[2] > hwbb.min[2] + 0.001) {
+                    const r: Pt[] = [
+                        { x: hwbb.min[0], z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: hwbb.min[2] },
+                        { x: hwbb.max[0], z: dbb.min[2] },
+                        { x: hwbb.min[0], z: dbb.min[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+                if (dbb.max[2] < hwbb.max[2] - 0.001) {
+                    const r: Pt[] = [
+                        { x: hwbb.min[0], z: dbb.max[2] },
+                        { x: hwbb.max[0], z: dbb.max[2] },
+                        { x: hwbb.max[0], z: hwbb.max[2] },
+                        { x: hwbb.min[0], z: hwbb.max[2] },
+                    ].map((p) => projP(p))
+                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                }
+            }
+        }
         sectionGroup(ctx.hostWall.meshes, wallFillFor(ctx.cset.cfcBkp), 1)
     }
     // Nearby walls (perpendicular, T-junction returns).  Emit a bbox-rect
