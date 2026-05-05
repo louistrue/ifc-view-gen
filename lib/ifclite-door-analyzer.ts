@@ -643,27 +643,6 @@ export function analyzeDoor(
         ...slabs.aboveExtras,
         ...aboveBuildup,
     ]
-    const slabAboveDebugParts = slabAboveParts.map((p) => {
-        const attrs = model.attrs(p.expressId)
-        return {
-            expressId: p.expressId,
-            globalId: attrs?.globalId ?? null,
-            ifcType: p.meshes[0]?.ifcType ?? null,
-            yMin: p.bbox.min[1],
-            yMax: p.bbox.max[1],
-        }
-    })
-    // #region agent log
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1e0c3a'},body:JSON.stringify({sessionId:'1e0c3a',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H1',location:'lib/ifclite-door-analyzer.ts:slabAboveParts',message:'Analyzer slabAboveParts composition',data:{doorId,guid,aboveYLo,aboveYHi,targetCoverGuid:process.env.DEBUG_TARGET_COVER_GUID ?? null,targetCoverPresent:slabAboveDebugParts.some((p)=>p.globalId === (process.env.DEBUG_TARGET_COVER_GUID ?? '')),slabAbovePartsCount:slabAboveParts.length,coveringCount:slabAboveParts.filter((p)=>(p.meshes[0]?.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING').length,parts:slabAboveDebugParts},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-    if (process.env.DEBUG_COVERING === '1' && (!process.env.DEBUG_DOOR_GUID || process.env.DEBUG_DOOR_GUID === guid)) {
-        const targetGuid = process.env.DEBUG_TARGET_COVER_GUID ?? ''
-        const targetPart = slabAboveDebugParts.find((p) => p.globalId === targetGuid) ?? null
-        console.log(`[DBG-COVER] analyzer door=${guid} targetGuid=${targetGuid || 'none'} targetPresent=${targetPart != null} targetExpressId=${targetPart?.expressId ?? 'none'} aboveParts=${slabAboveDebugParts.length}`)
-        for (const p of slabAboveDebugParts) {
-            console.log(`[DBG-COVER] analyzer-part door=${guid} eid=${p.expressId} gid=${p.globalId ?? 'none'} ifcType=${p.ifcType ?? 'none'} y=[${p.yMin.toFixed(3)},${p.yMax.toFixed(3)}]`)
-        }
-    }
     if (process.env.DEBUG_PARTS === '1') {
         console.log(`[parts] door=${doorId} slabBelow=${slabs.below?.expressId ?? 'none'} top=${slabs.below?.bbox.max[1].toFixed(3) ?? 'none'} doorBottom=${bbox.min[1].toFixed(3)} belowParts=${slabBelowParts.length} (extras=${slabs.belowExtras.length} buildup=${belowBuildup.length}) slabAbove=${slabs.above?.expressId ?? 'none'} aboveBot=${slabs.above?.bbox.min[1].toFixed(3) ?? 'none'} doorTop=${bbox.max[1].toFixed(3)} aboveParts=${slabAboveParts.length}`)
         for (const p of belowBuildup) {
