@@ -110,8 +110,9 @@ const DEFAULT_OPTS: Required<AnalyzeOptions> = {
     neighbourPlanRadius: 4.5,
     neighbourElevationOverlap: 0.05,
 }
-// Keep in sync with ifclite-renderer plan section height so nearby-device
-// prefiltering matches the plan-view projection band.
+// Keep in sync with ifclite-renderer plan section height. We still use this
+// as a floor for device candidate collection so plan always sees clip-plane
+// context, while elevation-specific clipping is handled later in rendering.
 const PLAN_CUT_HEIGHT_METERS = 1.85
 
 function bboxOfMeshes(meshes: IfcLiteMesh[]): AABB | null {
@@ -653,12 +654,16 @@ export function analyzeDoor(
     const filterY = (cand: { bbox: AABB }) =>
         cand.bbox.max[1] >= bbox.min[1] - opts.neighbourElevationOverlap
         && cand.bbox.min[1] <= bbox.max[1] + opts.neighbourElevationOverlap
-    // Plan electrical projection should include components from door bottom up
-    // to the cut plane (not only elements crossing the cut slice).
+    // Device candidate pool must support ALL views:
+    //   - plan needs devices from door bottom up to clip plane
+    //   - elevation needs context above the plan cut (e.g. BMA/KNX near ceiling)
+    // Keep this broad and let each renderer apply its own final clip.
     const planCutY = viewFrame.origin[1] + PLAN_CUT_HEIGHT_METERS
-    const filterPlanDeviceBandY = (cand: { bbox: AABB }) =>
-        cand.bbox.max[1] >= bbox.min[1]
-        && cand.bbox.min[1] <= planCutY
+    const elevationDeviceTopY = bbox.max[1] + 1.0
+    const deviceCandidateTopY = Math.max(planCutY, elevationDeviceTopY)
+    const filterDeviceCandidateBandY = (cand: { bbox: AABB }) =>
+        cand.bbox.max[1] >= bbox.min[1] - 0.1
+        && cand.bbox.min[1] <= deviceCandidateTopY
 
     const nearbyWalls = queryPlanIndex(caches.wallIndex, centre, radius)
         .filter((c) => c.expressId !== hostWallId)
@@ -682,7 +687,7 @@ export function analyzeDoor(
     const nearbyDevices: DoorContextLite['nearbyDevices'] = []
     if (elec && caches.elecIndices) {
         for (const [t, idx] of caches.elecIndices.entries()) {
-            const found = queryPlanIndex(idx, centre, radius).filter(filterPlanDeviceBandY)
+            const found = queryPlanIndex(idx, centre, radius).filter(filterDeviceCandidateBandY)
             for (const item of found) {
                 const a = elec.attrs(item.expressId)
                 nearbyDevices.push({
