@@ -1569,11 +1569,14 @@ function emitPlanSvg(
 
     /** Section a single mesh group (host wall, nearby wall, door, etc.) and
      *  emit closed polygon fills + open-chain stroke edges.  `layer` controls
-     *  draw order; `fill` is the polygon colour. */
+     *  draw order; `fill` is the polygon colour.  Returns section stats so
+     *  callers can decide whether they still need a bbox fallback fill. */
     const sectionGroup = (meshes: IfcLiteMesh[], fill: string, layer: number) => {
         const all: SectionSegment[] = []
         for (const m of meshes) all.push(...extractMeshSectionSegments(m, cutY))
-        if (all.length === 0) return
+        if (all.length === 0) {
+            return { hasAnySegments: false, hasClosedLoops: false }
+        }
         const { closedLoops, openChains } = reconstructPolygons(all)
         const closedExtra: Array<Array<{ x: number; z: number }>> = []
         const remainingOpen: Array<Array<{ x: number; z: number }>> = []
@@ -1582,7 +1585,8 @@ function emitPlanSvg(
             if (closed) closedExtra.push(closed)
             else remainingOpen.push(chain)
         }
-        for (const loop of [...closedLoops, ...closedExtra]) {
+        const closedAll = [...closedLoops, ...closedExtra]
+        for (const loop of closedAll) {
             polys.push({ points: loop.map(projP), fill, stroke: true, layer })
         }
         // Open chains: outline only (non-watertight wall stubs).
@@ -1592,6 +1596,7 @@ function emitPlanSvg(
                 segs.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, layer })
             }
         }
+        return { hasAnySegments: true, hasClosedLoops: closedAll.length > 0 }
     }
 
     // Wall colour resolution mirrors elevation logic.
@@ -1682,13 +1687,16 @@ function emitPlanSvg(
         }
         sectionGroup(ctx.hostWall.meshes, wallFillFor(null), 1)
     }
-    // Nearby walls (perpendicular, T-junction returns).  Render every wall
-    // whose bbox INTERSECTS the plan view volume (cut slab × canvas footprint).
-    // Bbox-rect first so thin / T-stub walls whose mesh-section produces only
-    // an open chain still register as a filled wall body, then mesh-section
-    // for sharper detail.
+    // Nearby walls (perpendicular, T-junction returns). Prefer real section
+    // geometry and only fall back to bbox fill when section extraction yields
+    // open chains but no closed loops (sparse/non-watertight mesh). Avoid bbox
+    // fallback when there is no section at all — that case caused grey blobs in
+    // door/window openings under overhead wall/lintel geometry.
     for (const w of ctx.nearbyWalls) {
         if (!intersectsPlanVolume(w.bbox)) continue
+        const section = sectionGroup(w.meshes, wallFillFor(null), 1)
+        if (section.hasClosedLoops) continue
+        if (!section.hasAnySegments) continue
         const wbb = w.bbox
         const rectPts: Pt[] = [
             { x: wbb.min[0], z: wbb.min[2] },
@@ -1696,8 +1704,7 @@ function emitPlanSvg(
             { x: wbb.max[0], z: wbb.max[2] },
             { x: wbb.min[0], z: wbb.max[2] },
         ].map((p) => projP(p))
-        polys.push({ points: rectPts, fill: wallFillFor(null), stroke: false, layer: 1 })
-        sectionGroup(w.meshes, wallFillFor(null), 1)
+        polys.push({ points: rectPts, fill: wallFillFor(null), stroke: true, layer: 1 })
     }
     // Nearby doors (faded so the focal door reads).  Project every triangle
     // top-down (real mesh, ignoring Y) so the door's full footprint —
