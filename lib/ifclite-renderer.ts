@@ -1845,8 +1845,6 @@ function emitPlanSvg(
                 const faceOffsetSigned = faceOffset * (sweepSign < 0 ? -1 : 1)
                 const pivotX = hingeX + openAxis2.x * faceOffsetSigned
                 const pivotZ = hingeZ + openAxis2.z * faceOffsetSigned
-                const pivotXFlippedFace = hingeX - openAxis2.x * faceOffset
-                const pivotZFlippedFace = hingeZ - openAxis2.z * faceOffset
                 const startAngle = hingeSide === 'left' ? 0 : Math.PI
                 const endAngle = hingeSide === 'left' ? PLAN_SWING_OPEN_RAD : Math.PI - PLAN_SWING_OPEN_RAD
                 const N = 24
@@ -1874,21 +1872,6 @@ function emitPlanSvg(
                 const tipZ = pivotZ + tipDirZ * leafW
                 const hingeS = projP({ x: pivotX, z: pivotZ })
                 const tipS = projP({ x: tipX, z: tipZ })
-                const axisS = cam.project(ctx.viewFrame.origin[0], ctx.viewFrame.origin[2])
-                const hingeSFlippedFace = projP({ x: pivotXFlippedFace, z: pivotZFlippedFace })
-                const tipDirXFlipped = widthAxis2.x * Math.cos(tipAng) - openAxis2.x * Math.sin(tipAng)
-                const tipDirZFlipped = widthAxis2.z * Math.cos(tipAng) - openAxis2.z * Math.sin(tipAng)
-                const tipXFlipped = pivotX + tipDirXFlipped * leafW
-                const tipZFlipped = pivotZ + tipDirZFlipped * leafW
-                const tipSFlipped = projP({ x: tipXFlipped, z: tipZFlipped })
-                // #region agent log
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H9',location:'lib/ifclite-renderer.ts:1884',message:'Plan swing tip side diagnostics',data:{guid:ctx.guid,effectiveHingeSide,hingeSideDraw:hingeSide,tipSy:tipS.y,tipSyFlipped:tipSFlipped.y,axisSy:axisS.sy,tipMinusAxis:tipS.y-axisS.sy,tipFlippedMinusAxis:tipSFlipped.y-axisS.sy,pivotSy:hingeS.y},timestamp:Date.now()})}).catch(()=>{})
-                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H9',location:'lib/ifclite-renderer.ts:1884',message:'Plan swing tip side diagnostics',data:{guid:ctx.guid,effectiveHingeSide,hingeSideDraw:hingeSide,tipSy:tipS.y,tipSyFlipped:tipSFlipped.y,axisSy:axisS.sy,tipMinusAxis:tipS.y-axisS.sy,tipFlippedMinusAxis:tipSFlipped.y-axisS.sy,pivotSy:hingeS.y},timestamp:Date.now()})}\n`) } catch {}
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H11',location:'lib/ifclite-renderer.ts:1892',message:'Leaf thickness pivot diagnostics',data:{guid:ctx.guid,sweepSign,faceOffset,pivotSy:hingeS.y,pivotMinusAxis:hingeS.y-axisS.sy,pivotSyFlippedFace:hingeSFlippedFace.y,pivotFlippedFaceMinusAxis:hingeSFlippedFace.y-axisS.sy},timestamp:Date.now()})}).catch(()=>{})
-                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H11',location:'lib/ifclite-renderer.ts:1892',message:'Leaf thickness pivot diagnostics',data:{guid:ctx.guid,sweepSign,faceOffset,pivotSy:hingeS.y,pivotMinusAxis:hingeS.y-axisS.sy,pivotSyFlippedFace:hingeSFlippedFace.y,pivotFlippedFaceMinusAxis:hingeSFlippedFace.y-axisS.sy},timestamp:Date.now()})}\n`) } catch {}
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-post-fix',hypothesisId:'H12',location:'lib/ifclite-renderer.ts:1896',message:'Applied face-offset translation for mirrored sweep',data:{guid:ctx.guid,sweepSign,faceOffset,faceOffsetSigned,pivotMinusAxis:hingeS.y-axisS.sy},timestamp:Date.now()})}).catch(()=>{})
-                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-post-fix',hypothesisId:'H12',location:'lib/ifclite-renderer.ts:1896',message:'Applied face-offset translation for mirrored sweep',data:{guid:ctx.guid,sweepSign,faceOffset,faceOffsetSigned,pivotMinusAxis:hingeS.y-axisS.sy},timestamp:Date.now()})}\n`) } catch {}
-                // #endregion
                 segs.push({ x1: hingeS.x, y1: hingeS.y, x2: tipS.x, y2: tipS.y, layer: 7, color: '#666666' })
             }
             const halfClear = clearW / 2
@@ -1902,18 +1885,10 @@ function emitPlanSvg(
             // matching sub-mesh exists (simple symmetric doors).
             const leafCentreOffset = findLeafCentreOffset(ctx.door.meshes, ctx.viewFrame, clearW)
             if (effectiveHingeSide === 'both') {
-                // #region agent log
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H4',location:'lib/ifclite-renderer.ts:1876',message:'Double swing hinge offsets',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,widthAxis:widthAxis2,openAxis:openAxis2},timestamp:Date.now()})}).catch(()=>{})
-                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H4',location:'lib/ifclite-renderer.ts:1876',message:'Double swing hinge offsets',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,widthAxis:widthAxis2,openAxis:openAxis2},timestamp:Date.now()})}\n`) } catch {}
-                // #endregion
                 drawLeaf('left', halfClear, leafCentreOffset - halfClear)
                 drawLeaf('right', halfClear, leafCentreOffset + halfClear)
             } else {
                 const hingeOff = leafCentreOffset + (effectiveHingeSide === 'left' ? -halfClear : +halfClear)
-                // #region agent log
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H5',location:'lib/ifclite-renderer.ts:1884',message:'Single swing hinge offset resolved',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,hingeOff,widthAxis:widthAxis2,openAxis:openAxis2,frameWidth:frameW,clearWidth:clearW},timestamp:Date.now()})}).catch(()=>{})
-                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H5',location:'lib/ifclite-renderer.ts:1884',message:'Single swing hinge offset resolved',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,hingeOff,widthAxis:widthAxis2,openAxis:openAxis2,frameWidth:frameW,clearWidth:clearW},timestamp:Date.now()})}\n`) } catch {}
-                // #endregion
                 drawLeaf(effectiveHingeSide, clearW, hingeOff)
             }
         }
