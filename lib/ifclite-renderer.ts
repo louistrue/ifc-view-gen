@@ -985,7 +985,10 @@ function emitElevationSvg(
         const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
         const cameraSideOffset = (wallCentreFacing - doorMidFacing) * cameraSign
         const isInFrontOfDoor = cameraSideOffset > 0.05
-        const wallLayer = isInFrontOfDoor ? 7 : 1
+        const wallLayer = isInFrontOfDoor ? 8 : 1
+        if (process.env.DEBUG_COVERING === '1' && (!process.env.DEBUG_DOOR_GUID || process.env.DEBUG_DOOR_GUID === ctx.guid)) {
+            console.log(`[DBG-COVER] wall-layer door=${ctx.guid} side=${side} wallEid=${w.expressId} wallLayer=${wallLayer} isInFrontOfDoor=${isInFrontOfDoor} cameraSideOffset=${cameraSideOffset.toFixed(3)}`)
+        }
         const verticalEdges: ProjectedSegment[] = []
         let minSx = +Infinity, maxSx = -Infinity, minSy = +Infinity, maxSy = -Infinity
         for (const p of rect) {
@@ -1114,22 +1117,69 @@ function emitElevationSvg(
             ? Math.min(ctx.slabAbove.bbox.min[1], viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS)
             : viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS
         drawHorizontalBand(slabBandBotY, viewportTopY, options.colors.elevation.wall, 2, slabAboveExpressId, true)
-        // Slab-above parts: only build-up tiles (IFCBUILDINGELEMENTPART) get
-        // band fills.  Suspended ceilings (IFCCOVERING) are dropped entirely
-        // so the elevation stays wall-dominant — the structural slab cap's
-        // own bottom-edge stroke (drawn above by drawHorizontalBand) is the
-        // architectural ceiling line, and adding a second covering line at a
-        // higher layer creates a horizontal bar that visually severs every
-        // perpendicular wall stroke it crosses.
+        // Slab-above parts: render both IFCBUILDINGELEMENTPART and IFCCOVERING
+        // fills so suspended ceilings / hinged slabs remain visible in
+        // elevation. Keep covering bands stroke-free to avoid adding heavy
+        // horizontal bars that can visually sever perpendicular wall strokes.
+        // #region agent log
+        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1e0c3a'},body:JSON.stringify({sessionId:'1e0c3a',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H2',location:'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts:preFilter',message:'Elevation pre-filter slabAboveParts visibility gates',data:{doorGuid:ctx.guid,side,viewportBottomY,viewportTopY,parts:ctx.slabAboveParts.map((p)=>({expressId:p.expressId,ifcType:p.meshes[0]?.ifcType ?? null,yMin:p.bbox.min[1],yMax:p.bbox.max[1],visible:intersectsElevationVolume(p.bbox)}))},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         const aboveParts = ctx.slabAboveParts
-            .filter((p) => intersectsElevationVolume(p.bbox))
-            .filter((p) => (p.meshes[0]?.ifcType?.toUpperCase() ?? '') !== 'IFCCOVERING')
+            .filter((p) => {
+                const inVolume = intersectsElevationVolume(p.bbox)
+                if (!inVolume) return false
+                const isCovering = (p.meshes[0]?.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING'
+                if (!isCovering) return true
+                // Coverings can straddle the host plane; choose a deterministic
+                // side using bbox centre on the facing axis so a single element
+                // doesn't render in both front/back just because it overlaps.
+                const centreFacing = (p.bbox.min[facingAxisIdx] + p.bbox.max[facingAxisIdx]) / 2
+                const facingMin = p.bbox.min[facingAxisIdx]
+                const facingMax = p.bbox.max[facingAxisIdx]
+                const spansDoorPlane = facingMin <= doorMidFacing && facingMax >= doorMidFacing
+                const sideGatePass = cameraSign > 0
+                    ? centreFacing >= doorMidFacing
+                    : centreFacing <= doorMidFacing
+                if (process.env.DEBUG_COVERING === '1' && (!process.env.DEBUG_DOOR_GUID || process.env.DEBUG_DOOR_GUID === ctx.guid)) {
+                    const type = p.meshes[0]?.ifcType ?? 'none'
+                    console.log(`[DBG-COVER] side-gate door=${ctx.guid} side=${side} eid=${p.expressId} ifcType=${type} inVolume=${inVolume} sideGatePass=${sideGatePass} spansDoorPlane=${spansDoorPlane} facingMin=${facingMin.toFixed(3)} facingMax=${facingMax.toFixed(3)} centreFacing=${centreFacing.toFixed(3)} doorMidFacing=${doorMidFacing.toFixed(3)} cameraSign=${cameraSign}`)
+                }
+                return sideGatePass
+            })
             .sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
+        if (process.env.DEBUG_COVERING === '1' && (!process.env.DEBUG_DOOR_GUID || process.env.DEBUG_DOOR_GUID === ctx.guid)) {
+            for (const p of ctx.slabAboveParts) {
+                const vis = intersectsElevationVolume(p.bbox)
+                const type = p.meshes[0]?.ifcType ?? 'none'
+                console.log(`[DBG-COVER] renderer-pre door=${ctx.guid} side=${side} eid=${p.expressId} ifcType=${type} visible=${vis} y=[${p.bbox.min[1].toFixed(3)},${p.bbox.max[1].toFixed(3)}]`)
+            }
+        }
         for (const part of aboveParts) {
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
-            if (yHi - yLo < 0.005) continue
-            drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
+            if (yHi - yLo < 0.005) {
+                // #region agent log
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1e0c3a'},body:JSON.stringify({sessionId:'1e0c3a',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H4',location:'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts:skipThin',message:'Skipping slabAbove part due to thin world band',data:{doorGuid:ctx.guid,side,expressId:part.expressId,ifcType:part.meshes[0]?.ifcType ?? null,yLo,yHi,delta:yHi-yLo},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
+                if (process.env.DEBUG_COVERING === '1' && (!process.env.DEBUG_DOOR_GUID || process.env.DEBUG_DOOR_GUID === ctx.guid)) {
+                    const type = part.meshes[0]?.ifcType ?? 'none'
+                    console.log(`[DBG-COVER] renderer-skip-thin door=${ctx.guid} side=${side} eid=${part.expressId} ifcType=${type} yLo=${yLo.toFixed(3)} yHi=${yHi.toFixed(3)} delta=${(yHi - yLo).toFixed(6)}`)
+                }
+                continue
+            }
+            const isCovering = (part.meshes[0]?.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING'
+            const fill = isCovering ? options.colors.elevation.suspendedCeiling : options.colors.elevation.wall
+            const addStrokes = isCovering ? true : !isCovering
+            const layer = isCovering ? 7 : 2
+            // #region agent log
+            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1e0c3a'},body:JSON.stringify({sessionId:'1e0c3a',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H3',location:'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts:draw',message:'Drawing slabAbove part band',data:{doorGuid:ctx.guid,side,expressId:part.expressId,ifcType:part.meshes[0]?.ifcType ?? null,isCovering,fill,addStrokes,layer,yLo,yHi},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+            if (process.env.DEBUG_COVERING === '1' && (!process.env.DEBUG_DOOR_GUID || process.env.DEBUG_DOOR_GUID === ctx.guid)) {
+                const type = part.meshes[0]?.ifcType ?? 'none'
+                const centreFacing = (part.bbox.min[facingAxisIdx] + part.bbox.max[facingAxisIdx]) / 2
+                console.log(`[DBG-COVER] renderer-draw door=${ctx.guid} side=${side} eid=${part.expressId} ifcType=${type} isCovering=${isCovering} fill=${fill} addStrokes=${addStrokes} layer=${layer} centreFacing=${centreFacing.toFixed(3)} doorMidFacing=${doorMidFacing.toFixed(3)} yLo=${yLo.toFixed(3)} yHi=${yHi.toFixed(3)}`)
+            }
+            drawHorizontalBand(yLo, yHi, fill, layer, part.expressId, addStrokes)
         }
     }
 
