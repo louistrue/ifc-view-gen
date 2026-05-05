@@ -14,6 +14,8 @@
     "analyze:door-plan-context": "node scripts/analyze-door-plan-context-runner.js",
     "airtable:setup": "node scripts/setup-airtable.js",
     "airtable:import-doors": "node scripts/import-doors-to-airtable.js",
+    "airtable:sync-cfc": "node scripts/sync-cfc-to-airtable-runner.js",
+    "airtable:sync-cfc:dry": "node scripts/sync-cfc-to-airtable-runner.js -- --dry-run",
     "round": "node scripts/airtable-render-round-runner.js",
     "round:dry": "node scripts/airtable-render-round-runner.js -- --dry-run",
     "round:force": "node scripts/airtable-render-round-runner.js -- --force",

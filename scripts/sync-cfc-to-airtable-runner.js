@@ -1,0 +1,16 @@
+/* eslint-disable */
+require('dotenv').config()
+
+require('ts-node').register({
+    skipProject: true,
+    transpileOnly: true,
+    compilerOptions: {
+        module: 'commonjs',
+        moduleResolution: 'node',
+        target: 'es2020',
+        esModuleInterop: true,
+        resolveJsonModule: true,
+    },
+})
+
+require('./sync-cfc-to-airtable.ts')
