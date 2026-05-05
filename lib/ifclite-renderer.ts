@@ -193,8 +193,16 @@ function classifyMesh(
         // door being reviewed.
         return { fill: colors.elevation.wall, fillOpacity: 0.5, layer: 4, role: 'window' }
     }
-    if (ctx.nearbyDoors.some((d) => d.expressId === id)) {
-        return { fill: elevationView ? colors.elevation.door.default : colors.plan.doorContext, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
+    const nearbyDoor = ctx.nearbyDoors.find((d) => d.expressId === id)
+    if (nearbyDoor) {
+        // Adjacent doors color by their OWN BKP in elevation (so a metal
+        // door reads metal, a wood door reads wood, regardless of focal
+        // door's BKP).  Plan keeps the single context fallback — no plan
+        // door-byBKP palette exists yet.
+        const fill = elevationView
+            ? resolveElevationDoorColor(nearbyDoor.cfcBkp, colors)
+            : colors.plan.doorContext
+        return { fill, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
     }
     const dev = ctx.nearbyDevices.find((d) => d.expressId === id)
     if (dev) {
@@ -962,6 +970,16 @@ function emitElevationSvg(
         }
         const rect = projectBoxToElevationRect(wbb, cam, pixelClip)
         if (!rect || rect.length < 3) continue
+        // Layer choice: camera-side perpendicular walls (bbox centre on the
+        // CAMERA side of door middle by more than half the host wall
+        // thickness) sit BETWEEN the camera and the focal door — they should
+        // occlude it.  Layer 7 paints over the door's layer 6.  Walls
+        // straddling doorMid (host wall, walls in/around the host plane)
+        // stay at layer 1 so the door reads through the host wall opening.
+        const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
+        const cameraSideOffset = (wallCentreFacing - doorMidFacing) * cameraSign
+        const isInFrontOfDoor = cameraSideOffset > 0.05
+        const wallLayer = isInFrontOfDoor ? 7 : 1
         const verticalEdges: ProjectedSegment[] = []
         let minSx = +Infinity, maxSx = -Infinity, minSy = +Infinity, maxSy = -Infinity
         for (const p of rect) {
@@ -975,21 +993,21 @@ function emitElevationSvg(
             const onLeftCrop = Math.abs(minSx - marginX) < 0.5
             const onRightCrop = Math.abs(maxSx - (W - marginX)) < 0.5
             if (!onLeftCrop) {
-                verticalEdges.push({ x1: minSx, y1: minSy, x2: minSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+                verticalEdges.push({ x1: minSx, y1: minSy, x2: minSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
             }
             if (!onRightCrop) {
-                verticalEdges.push({ x1: maxSx, y1: minSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+                verticalEdges.push({ x1: maxSx, y1: minSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
             }
             if (!onCropEdge(minSy)) {
-                verticalEdges.push({ x1: minSx, y1: minSy, x2: maxSx, y2: minSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+                verticalEdges.push({ x1: minSx, y1: minSy, x2: maxSx, y2: minSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
             }
             if (!onCropEdge(maxSy)) {
-                verticalEdges.push({ x1: minSx, y1: maxSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+                verticalEdges.push({ x1: minSx, y1: maxSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
             }
         }
         groups.push({
-            layer: 1,
-            polygons: [{ points: rect, fill: options.colors.elevation.wall, depth: 0, layer: 1, expressId: w.expressId }],
+            layer: wallLayer,
+            polygons: [{ points: rect, fill: options.colors.elevation.wall, depth: 0, layer: wallLayer, expressId: w.expressId }],
             segments: verticalEdges,
         })
     }
@@ -1217,7 +1235,7 @@ function emitElevationSvg(
 }
 
 // Plan-view constants — kept in sync with svg-renderer.ts so visual parity holds.
-const PLAN_CUT_HEIGHT_METERS = 1.0
+const PLAN_CUT_HEIGHT_METERS = 1.85
 const PLAN_SWING_OPEN_RAD = (15 * Math.PI) / 180
 const PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS = 0.025
 /** Depth crop around the host-wall plane (metres on each side along facing

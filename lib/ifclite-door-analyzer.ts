@@ -62,7 +62,7 @@ export interface DoorContextLite {
     slabAboveParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
 
     nearbyWalls: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
-    nearbyDoors: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
+    nearbyDoors: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; cfcBkp: string | null }>
     nearbyWindows: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
     nearbyDevices: Array<{
         expressId: number
@@ -425,6 +425,21 @@ function readOperationType(model: IfcLiteModel, doorId: number): string | null {
     return null
 }
 
+/** Lightweight BKP-only reader used per-nearby-door for context coloring.
+ *  Avoids the alTuernummer / Mass-Durchgangsbreite pulls that readCsetData
+ *  does for the focal door (those aren't needed for adjacent doors). */
+function readDoorBkp(model: IfcLiteModel, doorId: number): string | null {
+    const allPsets = [...model.psets(doorId), ...model.typePsets(doorId)]
+    for (const cset of allPsets) {
+        if (cset.name !== 'Cset_StandardCH') continue
+        for (const [k, v] of Object.entries(cset.properties)) {
+            const norm = k.toLowerCase().replace(/[\s_/-]/g, '')
+            if (norm === 'cfcbkpcccbcc') return v == null ? null : String(v)
+        }
+    }
+    return null
+}
+
 function readCsetData(model: IfcLiteModel, doorId: number): DoorContextLite['cset'] {
     // Cset_StandardCH props can live on the door instance OR on its IfcDoorType
     // (via IfcRelDefinesByType).  The legacy renderer reads both — without the
@@ -644,7 +659,12 @@ export function analyzeDoor(
     const nearbyDoors = queryPlanIndex(caches.doorIndex, centre, radius)
         .filter((c) => c.expressId !== doorId)
         .filter(filterY)
-        .map((c) => ({ expressId: c.expressId, meshes: c.meshes, bbox: c.bbox }))
+        .map((c) => ({
+            expressId: c.expressId,
+            meshes: c.meshes,
+            bbox: c.bbox,
+            cfcBkp: readDoorBkp(model, c.expressId),
+        }))
 
     const nearbyWindows = queryPlanIndex(caches.windowIndex, centre, radius)
         .filter(filterY)
