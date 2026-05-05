@@ -240,6 +240,7 @@ export function __resetRenderColorsCache(): void {
  *   CFC 2216  Portes extérieurs metal / Aussentüren, Tore aus Metall  → metal
  *   CFC 2720  Portes intérieurs en métal / Innentüren aus Metall      → metal
  *   CFC 2730  Portes intérieurs en bois / Innentüren aus Holz         → wood
+ *   CFC 2731  Armoires murales, rayonnages / Wandschränke, Gestelle   → context
  *
  * Unknown / missing values return null, which the renderer treats as
  * `elevation.door.default`.
@@ -249,6 +250,7 @@ export function classifyDoorBKP(cfcBkpCccBcc: string | null | undefined): DoorBK
     const code = cfcBkpCccBcc.toUpperCase()
     if (/\bCFC\s*2(216|720)\b/.test(code) || code.includes('METAL') || code.includes('MÉTAL')) return 'metal'
     if (/\bCFC\s*2730\b/.test(code) || code.includes('BOIS') || code.includes('HOLZ')) return 'wood'
+    if (/\bCFC\s*2731\b/.test(code) || code.includes('ARMOIRES MURALES') || code.includes('RAYONNAGES') || code.includes('WANDSCHRÄNKE') || code.includes('WANDSCHRAENKE') || code.includes('GESTELLE')) return 'context'
     return null
 }
 

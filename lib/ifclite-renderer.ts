@@ -152,6 +152,12 @@ interface MeshClassification {
     role: 'door' | 'host-wall' | 'nearby-wall' | 'slab' | 'window' | 'nearby-door' | 'device' | 'safety' | 'other'
 }
 
+function resolvePlanNearbyDoorColor(cfcBkp: string | null, colors: RenderColors): string {
+    const cat = classifyDoorBKP(cfcBkp)
+    if (cat === 'context') return colors.elevation.door.byBKP.context
+    return colors.plan.doorContext
+}
+
 // Layer ordering (higher number = drawn later = visually in front):
 //   1 = wall fill, 2 = slab fill (covers wall at floor/ceiling band),
 //   3 = nearby door fill, 4 = window/glass, 6 = current door, 7 = device,
@@ -197,11 +203,11 @@ function classifyMesh(
     if (nearbyDoor) {
         // Adjacent doors color by their OWN BKP in elevation (so a metal
         // door reads metal, a wood door reads wood, regardless of focal
-        // door's BKP).  Plan keeps the single context fallback — no plan
-        // door-byBKP palette exists yet.
+        // door's BKP).  Plan keeps context color by default, but CFC 2731
+        // maps to `context` (hellgrau) explicitly.
         const fill = elevationView
             ? resolveElevationDoorColor(nearbyDoor.cfcBkp, colors)
-            : colors.plan.doorContext
+            : resolvePlanNearbyDoorColor(nearbyDoor.cfcBkp, colors)
         return { fill, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
     }
     const dev = ctx.nearbyDevices.find((d) => d.expressId === id)
@@ -1541,6 +1547,11 @@ function emitPlanSvg(
         && b.min[0] <= planVolume.max[0]
         && b.max[2] >= planVolume.min[2]
         && b.min[2] <= planVolume.max[2]
+    const intersectsPlanFootprint = (b: AABB): boolean =>
+        b.max[0] >= planVolume.min[0]
+        && b.min[0] <= planVolume.max[0]
+        && b.max[2] >= planVolume.min[2]
+        && b.min[2] <= planVolume.max[2]
     const colors = options.colors
     const stroke = colors.strokes.outline
 
@@ -1700,6 +1711,7 @@ function emitPlanSvg(
     // bbox-rect).
     for (const d of ctx.nearbyDoors) {
         if (!intersectsPlanVolume(d.bbox)) continue
+        const nearbyPlanFill = resolvePlanNearbyDoorColor(d.cfcBkp, colors)
         for (const m of d.meshes) {
             const triCount = meshTriangleCount(m)
             for (let t = 0; t < triCount; t++) {
@@ -1711,7 +1723,7 @@ function emitPlanSvg(
                 if (Math.abs(area2) < 0.5) continue
                 polys.push({
                     points: [{ x: a.sx, y: a.sy }, { x: b.sx, y: b.sy }, { x: c.sx, y: c.sy }],
-                    fill: colors.plan.doorContext,
+                    fill: nearbyPlanFill,
                     stroke: false,
                     layer: 2,
                 })
@@ -1728,7 +1740,7 @@ function emitPlanSvg(
                 segs.push({ x1: sa.sx, y1: sa.sy, x2: sb.sx, y2: sb.sy, layer: 2 })
             }
         }
-        sectionGroup(d.meshes, colors.plan.doorContext, 3)
+        sectionGroup(d.meshes, nearbyPlanFill, 3)
     }
     // Nearby windows — section in the wall context colour, never blue.
     for (const w of ctx.nearbyWindows) {
@@ -1757,11 +1769,12 @@ function emitPlanSvg(
         sectionGroup(ctx.door.meshes, leafColor, 6)
     }
 
-    // Nearby electrical/safety devices at the cut plane (only the ones that
-    // straddle the cut height — typically wall-mounted alarms / switches).
+    // Nearby electrical/safety devices as a top projection between door bottom
+    // and cut plane (not just "cut = show").
     for (const dev of ctx.nearbyDevices) {
-        if (!intersectsPlanVolume(dev.bbox)) continue
-        if (dev.bbox.min[1] > cutY + 0.05 || dev.bbox.max[1] < cutY - 0.05) continue
+        if (!intersectsPlanFootprint(dev.bbox)) continue
+        if (dev.bbox.max[1] < ctx.viewFrame.origin[1]) continue
+        if (dev.bbox.min[1] > cutY) continue
         const safety = isSafetyDevice(dev.name, null, colors)
         const fill = safety ? colors.plan.safety : colors.plan.electrical
         const dbb = dev.bbox
@@ -1803,13 +1816,18 @@ function emitPlanSvg(
             const py = ctx.placementYAxis
             const facing = ctx.viewFrame.facing
             let effectiveHingeSide = op.hingeSide
+            const dotCurrent = py ? py[0] * facing[0] + py[1] * facing[2] : null
+            const widthAxis2 = cam.widthAxis     // {x,z} along door width
             if (op.hingeSide !== 'both' && py) {
                 const facingDotPlacement = py[0] * facing[0] + py[1] * facing[2]
                 if (facingDotPlacement < 0) {
                     effectiveHingeSide = op.hingeSide === 'left' ? 'right' : 'left'
                 }
             }
-            const widthAxis2 = cam.widthAxis     // {x,z} along door width
+            // Mirror the leaf/arc sweep around the width axis for doors whose
+            // object-local +Y aligns with semanticFacing. This handles doors
+            // rotated 180° in the building while preserving hinge-side logic.
+            const sweepSign = dotCurrent != null && dotCurrent > 0 ? -1 : 1
             const openAxis2 = cam.openAxis       // +facing → screen-down (room arc opens into)
             const frameW = ctx.viewFrame.width
             const clearW = (ctx.cset.massDurchgangsbreite != null && ctx.cset.massDurchgangsbreite > 0.05)
@@ -1824,8 +1842,11 @@ function emitPlanSvg(
                 const hingeX = ctx.viewFrame.origin[0] + widthAxis2.x * hingeOff
                 const hingeZ = ctx.viewFrame.origin[2] + widthAxis2.z * hingeOff
                 // Pivot offset along openAxis (door face), faceOffset ahead of wall plane.
-                const pivotX = hingeX + openAxis2.x * faceOffset
-                const pivotZ = hingeZ + openAxis2.z * faceOffset
+                const faceOffsetSigned = faceOffset * (sweepSign < 0 ? -1 : 1)
+                const pivotX = hingeX + openAxis2.x * faceOffsetSigned
+                const pivotZ = hingeZ + openAxis2.z * faceOffsetSigned
+                const pivotXFlippedFace = hingeX - openAxis2.x * faceOffset
+                const pivotZFlippedFace = hingeZ - openAxis2.z * faceOffset
                 const startAngle = hingeSide === 'left' ? 0 : Math.PI
                 const endAngle = hingeSide === 'left' ? PLAN_SWING_OPEN_RAD : Math.PI - PLAN_SWING_OPEN_RAD
                 const N = 24
@@ -1833,24 +1854,41 @@ function emitPlanSvg(
                 for (let i = 0; i <= N; i++) {
                     const t = i / N
                     const ang = startAngle + (endAngle - startAngle) * t
-                    const dirX = widthAxis2.x * Math.cos(ang) + openAxis2.x * Math.sin(ang)
-                    const dirZ = widthAxis2.z * Math.cos(ang) + openAxis2.z * Math.sin(ang)
+                    const sinTerm = Math.sin(ang) * sweepSign
+                    const dirX = widthAxis2.x * Math.cos(ang) + openAxis2.x * sinTerm
+                    const dirZ = widthAxis2.z * Math.cos(ang) + openAxis2.z * sinTerm
                     const px = pivotX + dirX * leafW
                     const pz = pivotZ + dirZ * leafW
-                    const s = projP({ x: px, z: pz })
+                    const arcPt = projP({ x: px, z: pz })
                     if (prevS) {
-                        segs.push({ x1: prevS.x, y1: prevS.y, x2: s.x, y2: s.y, layer: 7, color: '#666666' })
+                        segs.push({ x1: prevS.x, y1: prevS.y, x2: arcPt.x, y2: arcPt.y, layer: 7, color: '#666666' })
                     }
-                    prevS = s
+                    prevS = arcPt
                 }
                 // Leaf line: pivot → arc tip at 15° open position.
                 const tipAng = endAngle
-                const tipDirX = widthAxis2.x * Math.cos(tipAng) + openAxis2.x * Math.sin(tipAng)
-                const tipDirZ = widthAxis2.z * Math.cos(tipAng) + openAxis2.z * Math.sin(tipAng)
+                const tipSin = Math.sin(tipAng) * sweepSign
+                const tipDirX = widthAxis2.x * Math.cos(tipAng) + openAxis2.x * tipSin
+                const tipDirZ = widthAxis2.z * Math.cos(tipAng) + openAxis2.z * tipSin
                 const tipX = pivotX + tipDirX * leafW
                 const tipZ = pivotZ + tipDirZ * leafW
                 const hingeS = projP({ x: pivotX, z: pivotZ })
                 const tipS = projP({ x: tipX, z: tipZ })
+                const axisS = cam.project(ctx.viewFrame.origin[0], ctx.viewFrame.origin[2])
+                const hingeSFlippedFace = projP({ x: pivotXFlippedFace, z: pivotZFlippedFace })
+                const tipDirXFlipped = widthAxis2.x * Math.cos(tipAng) - openAxis2.x * Math.sin(tipAng)
+                const tipDirZFlipped = widthAxis2.z * Math.cos(tipAng) - openAxis2.z * Math.sin(tipAng)
+                const tipXFlipped = pivotX + tipDirXFlipped * leafW
+                const tipZFlipped = pivotZ + tipDirZFlipped * leafW
+                const tipSFlipped = projP({ x: tipXFlipped, z: tipZFlipped })
+                // #region agent log
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H9',location:'lib/ifclite-renderer.ts:1884',message:'Plan swing tip side diagnostics',data:{guid:ctx.guid,effectiveHingeSide,hingeSideDraw:hingeSide,tipSy:tipS.y,tipSyFlipped:tipSFlipped.y,axisSy:axisS.sy,tipMinusAxis:tipS.y-axisS.sy,tipFlippedMinusAxis:tipSFlipped.y-axisS.sy,pivotSy:hingeS.y},timestamp:Date.now()})}).catch(()=>{})
+                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H9',location:'lib/ifclite-renderer.ts:1884',message:'Plan swing tip side diagnostics',data:{guid:ctx.guid,effectiveHingeSide,hingeSideDraw:hingeSide,tipSy:tipS.y,tipSyFlipped:tipSFlipped.y,axisSy:axisS.sy,tipMinusAxis:tipS.y-axisS.sy,tipFlippedMinusAxis:tipSFlipped.y-axisS.sy,pivotSy:hingeS.y},timestamp:Date.now()})}\n`) } catch {}
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H11',location:'lib/ifclite-renderer.ts:1892',message:'Leaf thickness pivot diagnostics',data:{guid:ctx.guid,sweepSign,faceOffset,pivotSy:hingeS.y,pivotMinusAxis:hingeS.y-axisS.sy,pivotSyFlippedFace:hingeSFlippedFace.y,pivotFlippedFaceMinusAxis:hingeSFlippedFace.y-axisS.sy},timestamp:Date.now()})}).catch(()=>{})
+                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H11',location:'lib/ifclite-renderer.ts:1892',message:'Leaf thickness pivot diagnostics',data:{guid:ctx.guid,sweepSign,faceOffset,pivotSy:hingeS.y,pivotMinusAxis:hingeS.y-axisS.sy,pivotSyFlippedFace:hingeSFlippedFace.y,pivotFlippedFaceMinusAxis:hingeSFlippedFace.y-axisS.sy},timestamp:Date.now()})}\n`) } catch {}
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-post-fix',hypothesisId:'H12',location:'lib/ifclite-renderer.ts:1896',message:'Applied face-offset translation for mirrored sweep',data:{guid:ctx.guid,sweepSign,faceOffset,faceOffsetSigned,pivotMinusAxis:hingeS.y-axisS.sy},timestamp:Date.now()})}).catch(()=>{})
+                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-post-fix',hypothesisId:'H12',location:'lib/ifclite-renderer.ts:1896',message:'Applied face-offset translation for mirrored sweep',data:{guid:ctx.guid,sweepSign,faceOffset,faceOffsetSigned,pivotMinusAxis:hingeS.y-axisS.sy},timestamp:Date.now()})}\n`) } catch {}
+                // #endregion
                 segs.push({ x1: hingeS.x, y1: hingeS.y, x2: tipS.x, y2: tipS.y, layer: 7, color: '#666666' })
             }
             const halfClear = clearW / 2
@@ -1864,10 +1902,18 @@ function emitPlanSvg(
             // matching sub-mesh exists (simple symmetric doors).
             const leafCentreOffset = findLeafCentreOffset(ctx.door.meshes, ctx.viewFrame, clearW)
             if (effectiveHingeSide === 'both') {
+                // #region agent log
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H4',location:'lib/ifclite-renderer.ts:1876',message:'Double swing hinge offsets',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,widthAxis:widthAxis2,openAxis:openAxis2},timestamp:Date.now()})}).catch(()=>{})
+                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H4',location:'lib/ifclite-renderer.ts:1876',message:'Double swing hinge offsets',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,widthAxis:widthAxis2,openAxis:openAxis2},timestamp:Date.now()})}\n`) } catch {}
+                // #endregion
                 drawLeaf('left', halfClear, leafCentreOffset - halfClear)
                 drawLeaf('right', halfClear, leafCentreOffset + halfClear)
             } else {
                 const hingeOff = leafCentreOffset + (effectiveHingeSide === 'left' ? -halfClear : +halfClear)
+                // #region agent log
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6378e7'},body:JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H5',location:'lib/ifclite-renderer.ts:1884',message:'Single swing hinge offset resolved',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,hingeOff,widthAxis:widthAxis2,openAxis:openAxis2,frameWidth:frameW,clearWidth:clearW},timestamp:Date.now()})}).catch(()=>{})
+                try { appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({sessionId:'6378e7',runId:'opening-line-pre-fix',hypothesisId:'H5',location:'lib/ifclite-renderer.ts:1884',message:'Single swing hinge offset resolved',data:{guid:ctx.guid,effectiveHingeSide,leafCentreOffset,halfClear,hingeOff,widthAxis:widthAxis2,openAxis:openAxis2,frameWidth:frameW,clearWidth:clearW},timestamp:Date.now()})}\n`) } catch {}
+                // #endregion
                 drawLeaf(effectiveHingeSide, clearW, hingeOff)
             }
         }

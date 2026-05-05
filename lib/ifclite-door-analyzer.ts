@@ -110,6 +110,9 @@ const DEFAULT_OPTS: Required<AnalyzeOptions> = {
     neighbourPlanRadius: 4.5,
     neighbourElevationOverlap: 0.05,
 }
+// Keep in sync with ifclite-renderer plan section height so nearby-device
+// prefiltering matches the plan-view projection band.
+const PLAN_CUT_HEIGHT_METERS = 1.85
 
 function bboxOfMeshes(meshes: IfcLiteMesh[]): AABB | null {
     let minX = +Infinity, minY = +Infinity, minZ = +Infinity
@@ -650,6 +653,12 @@ export function analyzeDoor(
     const filterY = (cand: { bbox: AABB }) =>
         cand.bbox.max[1] >= bbox.min[1] - opts.neighbourElevationOverlap
         && cand.bbox.min[1] <= bbox.max[1] + opts.neighbourElevationOverlap
+    // Plan electrical projection should include components from door bottom up
+    // to the cut plane (not only elements crossing the cut slice).
+    const planCutY = viewFrame.origin[1] + PLAN_CUT_HEIGHT_METERS
+    const filterPlanDeviceBandY = (cand: { bbox: AABB }) =>
+        cand.bbox.max[1] >= bbox.min[1]
+        && cand.bbox.min[1] <= planCutY
 
     const nearbyWalls = queryPlanIndex(caches.wallIndex, centre, radius)
         .filter((c) => c.expressId !== hostWallId)
@@ -673,7 +682,7 @@ export function analyzeDoor(
     const nearbyDevices: DoorContextLite['nearbyDevices'] = []
     if (elec && caches.elecIndices) {
         for (const [t, idx] of caches.elecIndices.entries()) {
-            const found = queryPlanIndex(idx, centre, radius).filter(filterY)
+            const found = queryPlanIndex(idx, centre, radius).filter(filterPlanDeviceBandY)
             for (const item of found) {
                 const a = elec.attrs(item.expressId)
                 nearbyDevices.push({
