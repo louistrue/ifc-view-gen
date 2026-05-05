@@ -22,6 +22,7 @@
  * so the renderer / round can warn if they ever diverge.
  */
 import type { IfcLiteMesh, IfcLiteModel } from './ifclite-source'
+import { readDoorPlacementYAxis } from './ifclite-placement'
 
 export interface AABB {
     min: [number, number, number]
@@ -82,6 +83,13 @@ export interface DoorContextLite {
     /** IFC OperationType (e.g. "SINGLE_SWING_LEFT") read from the door instance
      *  or its IfcDoorType, used to pick the plan-view swing-arc handedness. */
     operationType: string | null
+    /** Door's local +Y axis in IFC-native (Z-up) world coords, normalised.
+     *  IFC4 LEFT/RIGHT swing handedness is "as viewed in the direction of
+     *  the positive y-axis", so the renderer needs this to detect when its
+     *  bbox-derived facing direction points OPPOSITE to IFC's localY and
+     *  the swing arc must be mirrored.  null when the placement chain can't
+     *  be parsed. */
+    placementYAxis: [number, number, number] | null
 }
 
 export interface AnalyzeOptions {
@@ -92,7 +100,14 @@ export interface AnalyzeOptions {
 }
 
 const DEFAULT_OPTS: Required<AnalyzeOptions> = {
-    neighbourPlanRadius: 1.6,
+    // Capture a generous pool of candidate neighbours.  The renderer does
+    // its own per-view 3D-AABB intersection (plan cut slab, elevation
+    // depth slab) to decide what to actually draw — the analyzer just
+    // makes sure every wall/door/window/device that COULD be in any of
+    // the three views is in the pool.  4.5 m comfortably covers the
+    // canvas-corner radius (≈ √(1.75²+1.75²) = 2.47 m) plus the host-wall
+    // depth and any T-junction stubs reaching ~2 m into the back room.
+    neighbourPlanRadius: 4.5,
     neighbourElevationOverlap: 0.05,
 }
 
@@ -210,20 +225,12 @@ function buildDoorViewFrame(bbox: AABB): DoorViewFrame {
     let facing: [number, number, number]
     let width: number
     let thickness: number
-    // widthAxis must equal `facing × upAxis` so a camera looking at the door
-    // (front view) and a camera looking down (plan view) both place +widthAxis
-    // on screen-right.  Picking widthAxis = +X with facing = +Z violated that
-    // and mirrored every plan view of an X-aligned door.
     if (ext[0] >= ext[2]) {
-        // Wall runs along X, door faces ±Z. Use facing = +Z, then
-        //   widthAxis = facing × upAxis = (0,0,1) × (0,1,0) = (-1,0,0)
-        widthAxis = [-1, 0, 0]
+        widthAxis = [1, 0, 0]
         facing = [0, 0, 1]
         width = ext[0]
         thickness = ext[2]
     } else {
-        // Wall runs along Z, door faces ±X. Use facing = +X, then
-        //   widthAxis = facing × upAxis = (1,0,0) × (0,1,0) = (0,0,1)
         widthAxis = [0, 0, 1]
         facing = [1, 0, 0]
         width = ext[2]
@@ -269,19 +276,51 @@ function findHostWallExpressId(model: IfcLiteModel, doorId: number): number | nu
 function findHostWallByBBox(
     model: IfcLiteModel,
     doorBbox: AABB,
-    wallIndex: ReturnType<typeof buildPlanIndex>
+    wallIndex: ReturnType<typeof buildPlanIndex>,
+    doorViewFrame?: { widthAxis: [number, number, number] },
 ): number | null {
     const centre = bboxCentre(doorBbox)
-    const candidates = queryPlanIndex(wallIndex, centre, 0.6)
+    const doorY: [number, number] = [doorBbox.min[1], doorBbox.max[1]]
+    // Door's expected host orientation: a host wall runs ALONG the door's
+    // widthAxis (a Z-aligned door sits in a Z-running wall, etc.).  When we
+    // have a viewFrame, treat orientation match as a HARD filter — a long
+    // perpendicular wall touching the door's south face is not a host wall,
+    // and without this filter its enormous slenderness score wins over
+    // properly-oriented but barely-not-overlapping segments.
+    const hostWidthAxis: 'x' | 'z' | null = doorViewFrame
+        ? Math.abs(doorViewFrame.widthAxis[0]) > Math.abs(doorViewFrame.widthAxis[2]) ? 'x' : 'z'
+        : null
+    // bbox-to-bbox plan distance: 0 if the bboxes touch or overlap.
+    const planBboxGap = (a: AABB, b: AABB): number => {
+        const dx = Math.max(0, b.min[0] - a.max[0], a.min[0] - b.max[0])
+        const dz = Math.max(0, b.min[2] - a.max[2], a.min[2] - b.max[2])
+        return Math.hypot(dx, dz)
+    }
+    // Search radius: 1.5 m so segmented walls (host stops 0.2–0.5 m short
+    // of the door bbox) can still be matched in the lenient pass.
+    const candidates = queryPlanIndex(wallIndex, centre, 1.5)
     let best: { id: number; score: number } | null = null
     for (const cand of candidates) {
-        if (!bboxesOverlap(cand.bbox, doorBbox, 0.05)) continue
-        const ext = bboxExtents(cand.bbox)
+        // Y overlap mandatory — different storeys must not match.
+        if (cand.bbox.max[1] < doorY[0] - 0.05) continue
+        if (cand.bbox.min[1] > doorY[1] + 0.05) continue
+        const cExt = bboxExtents(cand.bbox)
+        const cWallAlongX = cExt[0] >= cExt[2]
+        if (hostWidthAxis != null) {
+            const matches = hostWidthAxis === 'x' ? cWallAlongX : !cWallAlongX
+            if (!matches) continue
+        }
+        // Reject extremely-near-square walls (columns, piers): host walls are
+        // slender — at least 4:1 long-to-thin in plan.
+        const slenderness = Math.max(cExt[0], cExt[2]) / Math.max(0.05, Math.min(cExt[0], cExt[2]))
+        if (slenderness < 4) continue
+        const gap = planBboxGap(cand.bbox, doorBbox)
+        if (gap > 0.5) continue
+        // Score: prefer (low gap, then low containment expansion, then high slenderness).
         const dx = Math.max(0, doorBbox.min[0] - cand.bbox.min[0]) + Math.max(0, cand.bbox.max[0] - doorBbox.max[0])
         const dz = Math.max(0, doorBbox.min[2] - cand.bbox.min[2]) + Math.max(0, cand.bbox.max[2] - doorBbox.max[2])
         const containment = dx + dz
-        const slenderness = Math.max(ext[0], ext[2]) / Math.max(0.05, Math.min(ext[0], ext[2]))
-        const score = containment - slenderness * 0.05
+        const score = gap * 10 + containment * 0.05 - slenderness * 0.05
         if (!best || score < best.score) best = { id: cand.expressId, score }
     }
     return best?.id ?? null
@@ -501,7 +540,7 @@ export function analyzeDoor(
 
     let hostWallId = findHostWallExpressId(model, doorId)
     if (hostWallId == null) {
-        hostWallId = findHostWallByBBox(model, bbox, caches.wallIndex)
+        hostWallId = findHostWallByBBox(model, bbox, caches.wallIndex, viewFrame)
     }
     let hostWall: DoorContextLite['hostWall'] = null
     if (hostWallId != null) {
@@ -647,5 +686,6 @@ export function analyzeDoor(
         nearbyDevices,
         cset: readCsetData(model, doorId),
         operationType: readOperationType(model, doorId),
+        placementYAxis: readDoorPlacementYAxis(model.parserMod, model.store, doorId),
     }
 }

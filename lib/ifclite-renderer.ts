@@ -188,7 +188,10 @@ function classifyMesh(
         return { fill: colors.elevation.wall, layer: 2, role: 'slab' }
     }
     if (ctx.nearbyWindows.some((w) => w.expressId === id)) {
-        return { fill: colors.elevation.glass, fillOpacity: 0.32, layer: 4, role: 'window' }
+        // Glass blue is reserved for the FOCAL door's own glazing — adjacent
+        // windows render in the wall context colour so the eye stays on the
+        // door being reviewed.
+        return { fill: colors.elevation.wall, fillOpacity: 0.5, layer: 4, role: 'window' }
     }
     if (ctx.nearbyDoors.some((d) => d.expressId === id)) {
         return { fill: elevationView ? colors.elevation.door.default : colors.plan.doorContext, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
@@ -732,9 +735,17 @@ function emitElevationSvg(
         ? effectiveBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
         : -STRUCTURAL_SLAB_INTRUSION_METERS
     const topCapDy = bottomDy + STOREY_CONTENT_HEIGHT_METERS
-    const topDy = structAboveDy != null
+    const idealTopDy = structAboveDy != null
         ? Math.min(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDy)
         : topCapDy
+    // Always reserve 10 cm of headroom above the door bbox top so the slab
+    // cap band (drawn at viewportTopY) renders ABOVE the door rather than
+    // inside its vertical extent.  Some doors include a transom/frame in
+    // their bbox that reaches into the wall lintel — without this floor,
+    // slabAbove.bbox.min[1] sits at or below door head, viewportTopY = door
+    // head, and the door (layer 6) paints over the slab cap (layer 2).
+    const doorHeadDy = ctx.door.bbox.max[1] - doorBottom
+    const topDy = Math.max(idealTopDy, doorHeadDy + STRUCTURAL_SLAB_INTRUSION_METERS)
     const viewportBottomY = doorBottom + bottomDy
     const viewportTopY = doorBottom + topDy
 
@@ -749,28 +760,81 @@ function emitElevationSvg(
     // space anyway; this clip just kills triangulated meshes that fall
     // entirely outside the visible box.
     const halfCanvasMeters = (W / 2) / FIXED_PX_PER_METER
-    // Depth crop along the facing (wall-normal) axis: only include geometry
-    // within ±ELEVATION_DEPTH_HALF_M of the door plane.  Without this, walls
-    // / doors / fixtures sitting deep in the adjacent room project onto the
-    // elevation as ghost rectangles overlapping the door — legacy capped
-    // elevation depth at the door + a thin slice of the wall thickness.
-    const ELEVATION_DEPTH_HALF_M = 0.3
+    // Depth clip — ASYMMETRIC, matching real elevation behaviour:
+    //   • camera-side (in front of the door): include up to
+    //     ELEVATION_DEPTH_FRONT_M past the door origin so jambs, frames,
+    //     handles and devices mounted on the front of the wall still register.
+    //   • far side (behind the wall): clip exactly at the host wall's far
+    //     face — never leak the adjacent room's geometry into the elevation,
+    //     because architecturally the wall occludes everything past it.
+    //
+    // A symmetric ±0.3 m crop (the previous version) effectively rendered
+    // 30 cm of the OPPOSITE room into every view, which is wrong for an
+    // elevation drawing.
+    // Picture depth = door middle on the facing axis.  Each elevation
+    // renders the half-space BETWEEN the camera and the picture depth:
+    //   front: depth ∈ [doorMid, +∞)  — front room + front half of wall
+    //   back : depth ∈ (-∞, doorMid]  — back room + back half of wall
+    //
+    // Perpendicular walls sticking out on the camera side of the host wall
+    // get cut at picture depth and appear as their cross-section profile
+    // (a narrow vertical strip at the wall's widthAxis position).  Walls
+    // entirely in the FAR room (behind the host wall from the camera) are
+    // culled — they're occluded by the host wall.
+    const FAR_FACE_TOLERANCE_M = 0
     const elevationClip: WorldClip = {
         yMin: viewportBottomY - 0.02,
         yMax: viewportTopY + 0.02,
     }
-    if (Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])) {
-        // Width axis = X, facing axis = Z
+    const cameraSign = side === 'front' ? 1 : -1
+    const isXAligned = Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])
+    // When hostWall is missing (door at corner / fills+bbox both fail), fall
+    // back to an inflated door bbox along the facing axis so the depth clip
+    // still admits perpendicular wall returns / frame profiles within a
+    // typical wall-thickness band rather than collapsing to the door's own
+    // 8 cm leaf depth.
+    const hostBboxForClip: AABB = ctx.hostWall?.bbox ?? (() => {
+        const inflate = 0.5
+        const b = ctx.door.bbox
+        if (isXAligned) {
+            return { min: [b.min[0], b.min[1], b.min[2] - inflate], max: [b.max[0], b.max[1], b.max[2] + inflate] }
+        }
+        return { min: [b.min[0] - inflate, b.min[1], b.min[2]], max: [b.max[0] + inflate, b.max[1], b.max[2]] }
+    })()
+    // Camera-side depth: 35 cm (0.35 m) past the door middle on the facing
+    // axis.  Captures the front half of the host wall + a thin slice of the
+    // camera-side room (perpendicular jamb returns, frame profile,
+    // wall-mounted devices) without painting wall stubs that extend far
+    // into the camera-side room.
+    const DEPTH_FAR = 0.35
+    if (isXAligned) {
+        // Width axis = X, facing axis = Z. Width clip stays symmetric.
         elevationClip.xMin = ctx.viewFrame.origin[0] - halfCanvasMeters - 0.1
         elevationClip.xMax = ctx.viewFrame.origin[0] + halfCanvasMeters + 0.1
-        elevationClip.zMin = ctx.viewFrame.origin[2] - ELEVATION_DEPTH_HALF_M
-        elevationClip.zMax = ctx.viewFrame.origin[2] + ELEVATION_DEPTH_HALF_M
+        const cameraDirZ = cameraSign * ctx.viewFrame.facing[2]
+        const doorMidZ = ctx.viewFrame.origin[2]
+        if (cameraDirZ > 0) {
+            // Front camera on +Z side.  Visible: [doorMid, +∞).
+            elevationClip.zMin = doorMidZ - FAR_FACE_TOLERANCE_M
+            elevationClip.zMax = doorMidZ + DEPTH_FAR
+        } else {
+            // Back camera on -Z side.  Visible: (-∞, doorMid].
+            elevationClip.zMin = doorMidZ - DEPTH_FAR
+            elevationClip.zMax = doorMidZ + FAR_FACE_TOLERANCE_M
+        }
     } else {
-        // Width axis = Z, facing axis = X
+        // Width axis = Z, facing axis = X. Width clip stays symmetric.
         elevationClip.zMin = ctx.viewFrame.origin[2] - halfCanvasMeters - 0.1
         elevationClip.zMax = ctx.viewFrame.origin[2] + halfCanvasMeters + 0.1
-        elevationClip.xMin = ctx.viewFrame.origin[0] - ELEVATION_DEPTH_HALF_M
-        elevationClip.xMax = ctx.viewFrame.origin[0] + ELEVATION_DEPTH_HALF_M
+        const cameraDirX = cameraSign * ctx.viewFrame.facing[0]
+        const doorMidX = ctx.viewFrame.origin[0]
+        if (cameraDirX > 0) {
+            elevationClip.xMin = doorMidX - FAR_FACE_TOLERANCE_M
+            elevationClip.xMax = doorMidX + DEPTH_FAR
+        } else {
+            elevationClip.xMin = doorMidX - DEPTH_FAR
+            elevationClip.xMax = doorMidX + FAR_FACE_TOLERANCE_M
+        }
     }
 
     // Pixel rect for Sutherland-Hodgman polygon clipping. Top is the world
@@ -780,6 +844,9 @@ function emitElevationSvg(
     // renderer had — content is painted only inside [marginX, W-marginX].
     const yScreenAt = (yWorld: number) => cam.scaleY * yWorld + cam.offsetY
     const screenTopWorld = yScreenAt(viewportTopY)
+    const screenBottomWorld = yScreenAt(viewportBottomY)
+    const onCropEdge = (yPx: number) =>
+        Math.abs(yPx - screenTopWorld) < 0.5 || Math.abs(yPx - screenBottomWorld) < 0.5
     const marginX = computeContentMarginX(ctx, W)
     const pixelClip: PixelClipRect = {
         minX: marginX,
@@ -817,7 +884,60 @@ function emitElevationSvg(
         segments: [],
     })
 
-    if (ctx.hostWall) {
+    // Visibility test: bbox must overlap the canvas widthAxis range AND the
+    // storey Y viewport AND its CENTRE must lie on the camera side of the
+    // host wall plane (with a small slack for elements physically IN the
+    // wall, like adjacent doors / sidelights).
+    //
+    // Why centre-based on the depth axis (not bbox-AABB intersection): a
+    // perpendicular wall in the FRONT room has bbox.min[depth] = host.max
+    // (it abuts the wall).  An AABB-intersection test with +ε tolerance
+    // would let it kiss into the BACK view's depth clip, painting the
+    // wall on both elevations.  Centre-based correctly classifies it as
+    // "in front room" → front view only.  Walls that genuinely span the
+    // host plane (e.g. a corridor wall passing through) have their centre
+    // inside the wall thickness → still visible in both views.
+    const facingAxisIdx: 0 | 2 = isXAligned ? 2 : 0
+    const widthAxisIdx: 0 | 2 = isXAligned ? 0 : 2
+    const widthClipMin = isXAligned ? elevationClip.xMin : elevationClip.zMin
+    const widthClipMax = isXAligned ? elevationClip.xMax : elevationClip.zMax
+    const hostFacingMin = hostBboxForClip.min[facingAxisIdx]
+    const hostFacingMax = hostBboxForClip.max[facingAxisIdx]
+    const doorMidFacing = ctx.viewFrame.origin[facingAxisIdx]
+    const inWallSlackM = 0.05
+    const intersectsElevationVolume = (bbox: AABB): boolean => {
+        if (bbox.max[1] < (elevationClip.yMin ?? -Infinity)) return false
+        if (bbox.min[1] > (elevationClip.yMax ?? +Infinity)) return false
+        if (bbox.max[widthAxisIdx] < (widthClipMin ?? -Infinity)) return false
+        if (bbox.min[widthAxisIdx] > (widthClipMax ?? +Infinity)) return false
+        // Bbox-AABB intersection on facing axis against the camera-side slab
+        // [doorMid - slack, doorMid + DEPTH_FAR].  Elongated geometry —
+        // perpendicular walls reaching deep into the room, floor build-up
+        // tiles spanning the adjacent room — qualifies as long as ANY part
+        // of its bbox sits within DEPTH_FAR (0.35 m) of the door middle.
+        // A centre-based test would cull these because their centroid lies
+        // past the bound even though real geometry is within range.
+        // Front-room perpendicular walls don't leak into the back view
+        // because their near face is offset by ~half the host wall thickness
+        // (typically 0.10 m), so the bbox doesn't reach doorMid + slack.
+        const bMin = bbox.min[facingAxisIdx]
+        const bMax = bbox.max[facingAxisIdx]
+        if (cameraSign > 0) {
+            // Front camera: clip = [doorMid - slack, doorMid + DEPTH_FAR].
+            if (bMax < doorMidFacing - inWallSlackM) return false
+            if (bMin > doorMidFacing + DEPTH_FAR) return false
+            return true
+        }
+        // Back camera: clip = [doorMid - DEPTH_FAR, doorMid + slack].
+        if (bMax < doorMidFacing - DEPTH_FAR) return false
+        if (bMin > doorMidFacing + inWallSlackM) return false
+        return true
+    }
+    // Reference hostFacingMin/Max so unused-locals lint stays happy after the
+    // half-space simplification — we may still want them for future tweaks.
+    void hostFacingMin
+    void hostFacingMax
+    if (ctx.hostWall && intersectsElevationVolume(ctx.hostWall.bbox)) {
         const wallBbox: AABB = {
             min: [ctx.hostWall.bbox.min[0], Math.max(ctx.hostWall.bbox.min[1], viewportBottomY), ctx.hostWall.bbox.min[2]],
             max: [ctx.hostWall.bbox.max[0], Math.min(ctx.hostWall.bbox.max[1], viewportTopY), ctx.hostWall.bbox.max[2]],
@@ -834,49 +954,14 @@ function emitElevationSvg(
             })
         }
     }
-    // bbox centre helper (defined locally to avoid an analyzer import).
-    const bboxCenter = (b: AABB): [number, number, number] => [
-        (b.min[0] + b.max[0]) / 2,
-        (b.min[1] + b.max[1]) / 2,
-        (b.min[2] + b.max[2]) / 2,
-    ]
-    // Hide nearby walls that sit behind the host wall in this elevation: the
-    // host wall blocks the camera's view of anything on the opposite side, so
-    // perpendicular walls / room returns in the far room must NOT render here.
-    //
-    //   front view: camera at +facing → wall is visible if its centre lies on
-    //               the +facing side of the host-wall mid-plane (or in-plane).
-    //   back view : opposite.
-    //
-    // Tolerance: a 5 cm dead-band around the host plane keeps walls that
-    // straddle the plane (pass-through partitions, stub returns coplanar
-    // with the host) visible in BOTH views.
-    const facing = ctx.viewFrame.facing
-    const projectFacing = (p: [number, number, number]) => p[0] * facing[0] + p[2] * facing[2]
-    const hostPlaneFacing = ctx.hostWall
-        ? projectFacing(bboxCenter(ctx.hostWall.bbox))
-        : projectFacing(ctx.viewFrame.origin)
-    const cameraSign = side === 'front' ? 1 : -1
-    const isWallVisibleInElevation = (bbox: AABB): boolean => {
-        const c = bboxCenter(bbox)
-        const delta = projectFacing(c) - hostPlaneFacing
-        // delta >  0 → wall is on +facing side
-        // delta <  0 → wall is on -facing side
-        // We keep walls on the camera side OR in the host plane.
-        return delta * cameraSign > -0.05
-    }
     for (const w of ctx.nearbyWalls) {
-        if (!isWallVisibleInElevation(w.bbox)) continue
+        if (!intersectsElevationVolume(w.bbox)) continue
         const wbb: AABB = {
             min: [w.bbox.min[0], Math.max(w.bbox.min[1], viewportBottomY), w.bbox.min[2]],
             max: [w.bbox.max[0], Math.min(w.bbox.max[1], viewportTopY), w.bbox.max[2]],
         }
         const rect = projectBoxToElevationRect(wbb, cam, pixelClip)
         if (!rect || rect.length < 3) continue
-        // Outline the rect so perpendicular walls (T-junction returns, room
-        // returns adjacent to the door) are actually visible against the
-        // bg-wall fill, which uses the same colour.  Without strokes a wall
-        // perfectly matches the background and disappears.
         const verticalEdges: ProjectedSegment[] = []
         let minSx = +Infinity, maxSx = -Infinity, minSy = +Infinity, maxSy = -Infinity
         for (const p of rect) {
@@ -886,11 +971,6 @@ function emitElevationSvg(
             if (p.y > maxSy) maxSy = p.y
         }
         const widthPx = maxSx - minSx
-        // Skip drawing strokes if the wall is wider than ~80 % of canvas — that's
-        // the host-wall-spanning case where strokes would frame the whole canvas.
-        // Also suppress edges that landed exactly on the side gutter (the wall
-        // got clipped against the marginX crop): those would draw a vertical
-        // line along the page border, not a real wall edge.
         if (widthPx < W * 0.80) {
             const onLeftCrop = Math.abs(minSx - marginX) < 0.5
             const onRightCrop = Math.abs(maxSx - (W - marginX)) < 0.5
@@ -899,6 +979,12 @@ function emitElevationSvg(
             }
             if (!onRightCrop) {
                 verticalEdges.push({ x1: maxSx, y1: minSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+            }
+            if (!onCropEdge(minSy)) {
+                verticalEdges.push({ x1: minSx, y1: minSy, x2: maxSx, y2: minSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+            }
+            if (!onCropEdge(maxSy)) {
+                verticalEdges.push({ x1: minSx, y1: maxSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
             }
         }
         groups.push({
@@ -913,9 +999,6 @@ function emitElevationSvg(
     // Strokes that would land EXACTLY on a crop edge (top of viewport at
     // screenTopWorld, bottom of viewport at canvasH) are suppressed — those
     // would read as solid lines drawn along the image crop, not real geometry.
-    const screenBottomWorld = yScreenAt(viewportBottomY)
-    const onCropEdge = (yPx: number) =>
-        Math.abs(yPx - screenTopWorld) < 0.5 || Math.abs(yPx - screenBottomWorld) < 0.5
     const drawHorizontalBand = (
         yMinWorld: number,
         yMaxWorld: number,
@@ -975,7 +1058,14 @@ function emitElevationSvg(
         // Unterlagsboden / build-up parts above the structural slab — render
         // even when slabBelow is null (some doors sit at storey openings where
         // the structural slab plane is interrupted).
-        const belowParts = [...ctx.slabBelowParts].sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
+        //
+        // Depth filter: a covering or build-up tile sitting ENTIRELY on the
+        // far side of the host wall (in the adjacent room) must NOT smear
+        // across this elevation as a full-width band. We render only what
+        // is at or in front of the cut plane on the camera side.
+        const belowParts = ctx.slabBelowParts
+            .filter((p) => intersectsElevationVolume(p.bbox))
+            .sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
         for (const part of belowParts) {
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
@@ -989,11 +1079,28 @@ function emitElevationSvg(
     // an empty top edge for storeys without a detected ceiling slab.
     {
         const slabAboveExpressId = ctx.slabAbove?.expressId ?? -1
+        // Pin the slab cap to the top of the viewport: a tall door whose
+        // slabAbove sits above the 3.5 m storey-content cap would otherwise
+        // place the band off-canvas (slabAbove.bbox.min[1] > viewportTopY)
+        // and pixelClip culls it entirely — the elevation reads with no top
+        // cap.  Clamping slabBandBotY to viewportTopY − 10 cm guarantees a
+        // visible 10 cm structural-cap band even when the actual slab is
+        // beyond the cap.
         const slabBandBotY = ctx.slabAbove
-            ? ctx.slabAbove.bbox.min[1]
+            ? Math.min(ctx.slabAbove.bbox.min[1], viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS)
             : viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS
         drawHorizontalBand(slabBandBotY, viewportTopY, options.colors.elevation.wall, 2, slabAboveExpressId, true)
-        const aboveParts = [...ctx.slabAboveParts].sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
+        // Slab-above parts: only build-up tiles (IFCBUILDINGELEMENTPART) get
+        // band fills.  Suspended ceilings (IFCCOVERING) are dropped entirely
+        // so the elevation stays wall-dominant — the structural slab cap's
+        // own bottom-edge stroke (drawn above by drawHorizontalBand) is the
+        // architectural ceiling line, and adding a second covering line at a
+        // higher layer creates a horizontal bar that visually severs every
+        // perpendicular wall stroke it crosses.
+        const aboveParts = ctx.slabAboveParts
+            .filter((p) => intersectsElevationVolume(p.bbox))
+            .filter((p) => (p.meshes[0]?.ifcType?.toUpperCase() ?? '') !== 'IFCCOVERING')
+            .sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
         for (const part of aboveParts) {
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
@@ -1004,27 +1111,46 @@ function emitElevationSvg(
 
     // Triangulated mesh path for the door, nearby doors/windows, and devices.
     // These need triangle-level fills because they have meaningful interior
-    // detail (panels, glazing, frames, hardware).  Apply the same hidden-side
-    // filter as the host-wall background fill, so perpendicular doors / wall
-    // devices behind the host wall don't bleed handles or fixtures through.
+    // detail (panels, glazing, frames, hardware).
     const meshes: Array<{ mesh: IfcLiteMesh; expressId: number }> = []
     for (const m of ctx.door.meshes) meshes.push({ mesh: m, expressId: m.expressId })
     for (const d of ctx.nearbyDoors) {
-        if (!isWallVisibleInElevation(d.bbox)) continue
+        if (!intersectsElevationVolume(d.bbox)) continue
         for (const m of d.meshes) meshes.push({ mesh: m, expressId: m.expressId })
     }
     for (const w of ctx.nearbyWindows) {
-        if (!isWallVisibleInElevation(w.bbox)) continue
+        if (!intersectsElevationVolume(w.bbox)) continue
         for (const m of w.meshes) meshes.push({ mesh: m, expressId: m.expressId })
     }
     for (const d of ctx.nearbyDevices) {
-        if (!isWallVisibleInElevation(d.bbox)) continue
+        if (!intersectsElevationVolume(d.bbox)) continue
         for (const m of d.meshes) meshes.push({ mesh: m, expressId: m.expressId })
+    }
+    // Focal door is the subject of the elevation — always fully drawn in
+    // BOTH views.  The depth half-space clip exists for CONTEXT (nearby walls,
+    // adjacent doors, slabs, devices) so we don't paint the far room.  Applying
+    // it to the focal door's own mesh produces:
+    //   • asymmetric glazing — a glass panel offset to one face has all
+    //     vertices on one side of doorMid, so one camera keeps it and the
+    //     other culls it (front shows blue glass, back doesn't).
+    //   • stray slivers over the door — side-faces of the door leaf span
+    //     doorMid, partially survive the all-3-outside test, and project
+    //     as thin lines on the door area.
+    // Solution: render focal door with depth axis removed from the clip;
+    // keep Y range and width-axis clip for the storey content / canvas crop.
+    const focalDoorClip: WorldClip = {
+        yMin: elevationClip.yMin,
+        yMax: elevationClip.yMax,
+        xMin: isXAligned ? elevationClip.xMin : undefined,
+        xMax: isXAligned ? elevationClip.xMax : undefined,
+        zMin: !isXAligned ? elevationClip.zMin : undefined,
+        zMax: !isXAligned ? elevationClip.zMax : undefined,
     }
     for (const { mesh, expressId } of meshes) {
         const cls = classifyMesh(mesh, ctx, true, options.colors)
-        const polys = projectMeshFill(mesh, cam, cls, expressId, elevationClip, pixelClip)
-        const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+        const meshClip = expressId === ctx.door.expressId ? focalDoorClip : elevationClip
+        const polys = projectMeshFill(mesh, cam, cls, expressId, meshClip, pixelClip)
+        const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, meshClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
     }
@@ -1034,7 +1160,7 @@ function emitElevationSvg(
     // right-side margin.  Mirrors legacy `renderStoreyMarkerSvg`:
     //   - filled black ▼ triangle pointing AT the slab top (the floor line)
     //   - storey CODE (first whitespace-separated token of the long name)
-    //     placed ABOVE the triangle, right-anchored
+    //     centred horizontally above the triangle
     // Falls back to door-foot Y when storeyElevation is unknown.
     const labelShort = ctx.storeyName ? ctx.storeyName.split(/\s+/)[0] : ''
     const fontFamily = DEFAULT_SVG_FONT_FAMILY
@@ -1063,7 +1189,7 @@ function emitElevationSvg(
         return [
             `<g id="storey-marker">`,
             `<polygon points="${triPts}" fill="#000000"/>`,
-            `<text x="${markerX.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="end" font-family="${fontFamily}" font-size="${labelFont}" font-weight="600" fill="#000">${escaped}</text>`,
+            `<text x="${markerX.toFixed(2)}" y="${labelY.toFixed(2)}" text-anchor="middle" font-family="${fontFamily}" font-size="${labelFont}" font-weight="600" fill="#000">${escaped}</text>`,
             `</g>`,
         ].join('')
     })()
@@ -1347,25 +1473,56 @@ function emitPlanSvg(
     const W = options.width
     const H = options.height
     const cam = buildPlanCameraNew(ctx, W, H)
-    // Compute a depth (facing-axis) crop band around the door plane so perpendicular
-    // walls extending into adjacent rooms get cut off ~1 m past the door (legacy
-    // parity).  The arc extends further into the open side, so we widen that side.
+    // Plan view volume — a 3D AABB derived from door extents, sliced thin
+    // in Y at the cut height.  Anything whose bbox INTERSECTS this volume
+    // is rendered.  Vertical (Y) slice is tight at cutY so floor/ceiling
+    // slabs DON'T appear in plan as grey background — only walls cut at
+    // door midheight register.  The screen-Y crop band stays at the
+    // legacy 0.5 m pad around the door plane to match the original framing.
     const halfT = ctx.viewFrame.thickness / 2
     const arcReach = halfT + ctx.viewFrame.width * Math.sin(PLAN_SWING_OPEN_RAD)
     const backPadMeters = halfT + PLAN_DEPTH_PAD_METERS
     const frontPadMeters = Math.max(arcReach, halfT + PLAN_DEPTH_PAD_METERS)
-    // Map depth pads to screen pixels: door anchored at canvas Y = 0.30 H.
-    // facing direction = +screen-Y, so:
-    //   front band (open side) extends toward larger Y
-    //   back band extends toward smaller Y
     const doorScreenY = cam.project(ctx.viewFrame.origin[0], ctx.viewFrame.origin[2]).sy
     const planClipMinY = Math.max(0, doorScreenY - backPadMeters * FIXED_PX_PER_METER)
     const planClipMaxY = Math.min(H, doorScreenY + frontPadMeters * FIXED_PX_PER_METER)
-    // Cut the world at door-bottom + 1.0 m. (Legacy uses +1.8 m near the door
-    // head where wall is widest; +1.0 m at the waist gives the same wall
-    // section since walls are uniform between slabs.)
+    // Cut the world at door-bottom + 1.0 m.
     const cutY = ctx.viewFrame.origin[1] + PLAN_CUT_HEIGHT_METERS
     const planMarginX = computeContentMarginX(ctx, W)
+    // World-space view volume for plan: a thin Y slab at cutY, covering
+    // the same canvas footprint as the legacy clip band.  Walls intersect
+    // iff their bbox straddles cutY AND overlaps the canvas footprint.
+    // Slabs (floor / ceiling) sit entirely below or above cutY so they
+    // never register — keeps the plan free of grey slab background.
+    const halfCanvasWMeters = (W / 2) / FIXED_PX_PER_METER
+    const isXAlignedDoor = Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])
+    const planVolume: AABB = {
+        min: [
+            isXAlignedDoor
+                ? ctx.viewFrame.origin[0] - halfCanvasWMeters
+                : ctx.viewFrame.origin[0] - frontPadMeters,
+            cutY - 0.05,
+            isXAlignedDoor
+                ? ctx.viewFrame.origin[2] - frontPadMeters
+                : ctx.viewFrame.origin[2] - halfCanvasWMeters,
+        ],
+        max: [
+            isXAlignedDoor
+                ? ctx.viewFrame.origin[0] + halfCanvasWMeters
+                : ctx.viewFrame.origin[0] + frontPadMeters,
+            cutY + 0.05,
+            isXAlignedDoor
+                ? ctx.viewFrame.origin[2] + frontPadMeters
+                : ctx.viewFrame.origin[2] + halfCanvasWMeters,
+        ],
+    }
+    const intersectsPlanVolume = (b: AABB): boolean =>
+        b.max[1] >= planVolume.min[1]
+        && b.min[1] <= planVolume.max[1]
+        && b.max[0] >= planVolume.min[0]
+        && b.min[0] <= planVolume.max[0]
+        && b.max[2] >= planVolume.min[2]
+        && b.min[2] <= planVolume.max[2]
     const colors = options.colors
     const stroke = colors.strokes.outline
 
@@ -1424,76 +1581,141 @@ function emitPlanSvg(
         const hwbb = ctx.hostWall.bbox
         if (hwbb.min[1] <= cutY && hwbb.max[1] >= cutY) {
             const dbb = ctx.door.bbox
-            const fillC = wallFillFor(ctx.cset.cfcBkp)
+            // Host wall uses neutral plan.wallCut, NEVER the door's BKP — the
+            // door leaf and the wall must read as different elements.  The
+            // wall's own BKP is not surfaced by the analyzer (would need a
+            // per-wall pset read); using neutral here is the architecturally
+            // correct default since wall fills in plan are about cut hatching,
+            // not material classification.
+            const fillC = wallFillFor(null)
             const wallAlongX = Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])
-            if (wallAlongX) {
-                // Wall length axis = X, thickness = Z.
-                if (dbb.min[0] > hwbb.min[0] + 0.001) {
-                    const r: Pt[] = [
-                        { x: hwbb.min[0], z: hwbb.min[2] },
-                        { x: dbb.min[0],  z: hwbb.min[2] },
-                        { x: dbb.min[0],  z: hwbb.max[2] },
-                        { x: hwbb.min[0], z: hwbb.max[2] },
-                    ].map((p) => projP(p))
-                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+            // Carve adjacent doors / windows that sit IN the host wall out of
+            // the flanking rect along the wall's length axis.  Without this,
+            // the host-wall fill paints over an adjacent opening's section
+            // and the plan reads as a solid wall where there's actually
+            // another door — exactly the bug user flagged on 0V8JTrpT, where
+            // the right flank covered the adjacent door at midheight.
+            const lengthAxis: 0 | 2 = wallAlongX ? 0 : 2
+            const thickAxis: 0 | 2 = wallAlongX ? 2 : 0
+            const subtractOpenings = (start: number, end: number): Array<[number, number]> => {
+                let segs: Array<[number, number]> = [[start, end]]
+                const isInHostWall = (b: AABB): boolean => {
+                    // Adjacent must straddle the cut height AND overlap the
+                    // host wall's thickness range (i.e. sit IN the wall).
+                    if (b.max[1] < cutY - 0.05 || b.min[1] > cutY + 0.05) return false
+                    const tMin = b.min[thickAxis], tMax = b.max[thickAxis]
+                    const hMin = hwbb.min[thickAxis], hMax = hwbb.max[thickAxis]
+                    return tMax >= hMin - 0.05 && tMin <= hMax + 0.05
                 }
-                if (dbb.max[0] < hwbb.max[0] - 0.001) {
-                    const r: Pt[] = [
-                        { x: dbb.max[0],  z: hwbb.min[2] },
-                        { x: hwbb.max[0], z: hwbb.min[2] },
-                        { x: hwbb.max[0], z: hwbb.max[2] },
-                        { x: dbb.max[0],  z: hwbb.max[2] },
-                    ].map((p) => projP(p))
-                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+                const carve = (b: AABB) => {
+                    if (!isInHostWall(b)) return
+                    const aMin = b.min[lengthAxis]
+                    const aMax = b.max[lengthAxis]
+                    const next: Array<[number, number]> = []
+                    for (const [s, e] of segs) {
+                        if (aMax <= s || aMin >= e) { next.push([s, e]); continue }
+                        if (aMin > s) next.push([s, aMin])
+                        if (aMax < e) next.push([aMax, e])
+                    }
+                    segs = next
                 }
-            } else {
-                // Wall length axis = Z, thickness = X.
-                if (dbb.min[2] > hwbb.min[2] + 0.001) {
-                    const r: Pt[] = [
-                        { x: hwbb.min[0], z: hwbb.min[2] },
-                        { x: hwbb.max[0], z: hwbb.min[2] },
-                        { x: hwbb.max[0], z: dbb.min[2] },
-                        { x: hwbb.min[0], z: dbb.min[2] },
-                    ].map((p) => projP(p))
-                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
-                }
-                if (dbb.max[2] < hwbb.max[2] - 0.001) {
-                    const r: Pt[] = [
-                        { x: hwbb.min[0], z: dbb.max[2] },
-                        { x: hwbb.max[0], z: dbb.max[2] },
-                        { x: hwbb.max[0], z: hwbb.max[2] },
-                        { x: hwbb.min[0], z: hwbb.max[2] },
-                    ].map((p) => projP(p))
-                    polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
-                }
+                for (const d of ctx.nearbyDoors) carve(d.bbox)
+                for (const w of ctx.nearbyWindows) carve(w.bbox)
+                return segs.filter(([s, e]) => e - s > 0.001)
+            }
+            const emitFlank = (lengthRange: [number, number]) => {
+                const [s, e] = lengthRange
+                const r: Pt[] = wallAlongX
+                    ? [
+                        { x: s, z: hwbb.min[2] },
+                        { x: e, z: hwbb.min[2] },
+                        { x: e, z: hwbb.max[2] },
+                        { x: s, z: hwbb.max[2] },
+                      ].map((p) => projP(p))
+                    : [
+                        { x: hwbb.min[0], z: s },
+                        { x: hwbb.max[0], z: s },
+                        { x: hwbb.max[0], z: e },
+                        { x: hwbb.min[0], z: e },
+                      ].map((p) => projP(p))
+                polys.push({ points: r, fill: fillC, stroke: true, layer: 1 })
+            }
+            const dMin = dbb.min[lengthAxis]
+            const dMax = dbb.max[lengthAxis]
+            const hMin = hwbb.min[lengthAxis]
+            const hMax = hwbb.max[lengthAxis]
+            if (dMin > hMin + 0.001) {
+                for (const seg of subtractOpenings(hMin, dMin)) emitFlank(seg)
+            }
+            if (dMax < hMax - 0.001) {
+                for (const seg of subtractOpenings(dMax, hMax)) emitFlank(seg)
             }
         }
-        sectionGroup(ctx.hostWall.meshes, wallFillFor(ctx.cset.cfcBkp), 1)
+        sectionGroup(ctx.hostWall.meshes, wallFillFor(null), 1)
     }
-    // Nearby walls (perpendicular, T-junction returns).  Emit a bbox-rect
-    // backdrop FIRST so thin / T-stub walls whose mesh-section produces only
-    // an open chain still render as a filled wall body — without this, the
-    // perpendicular returns appear as empty outlined boxes in plan.
+    // Nearby walls (perpendicular, T-junction returns).  Render every wall
+    // whose bbox INTERSECTS the plan view volume (cut slab × canvas footprint).
+    // Bbox-rect first so thin / T-stub walls whose mesh-section produces only
+    // an open chain still register as a filled wall body, then mesh-section
+    // for sharper detail.
     for (const w of ctx.nearbyWalls) {
+        if (!intersectsPlanVolume(w.bbox)) continue
         const wbb = w.bbox
-        if (wbb.min[1] <= cutY && wbb.max[1] >= cutY) {
-            const rectPts: Pt[] = [
-                { x: wbb.min[0], z: wbb.min[2] },
-                { x: wbb.max[0], z: wbb.min[2] },
-                { x: wbb.max[0], z: wbb.max[2] },
-                { x: wbb.min[0], z: wbb.max[2] },
-            ].map((p) => projP(p))
-            polys.push({ points: rectPts, fill: wallFillFor(null), stroke: false, layer: 1 })
-        }
+        const rectPts: Pt[] = [
+            { x: wbb.min[0], z: wbb.min[2] },
+            { x: wbb.max[0], z: wbb.min[2] },
+            { x: wbb.max[0], z: wbb.max[2] },
+            { x: wbb.min[0], z: wbb.max[2] },
+        ].map((p) => projP(p))
+        polys.push({ points: rectPts, fill: wallFillFor(null), stroke: false, layer: 1 })
         sectionGroup(w.meshes, wallFillFor(null), 1)
     }
-    // Nearby doors (faded so the focal door reads).
+    // Nearby doors (faded so the focal door reads).  Project every triangle
+    // top-down (real mesh, ignoring Y) so the door's full footprint —
+    // including any frame/threshold geometry below the cut — reads in plan.
+    // Sectioning at cutY alone catches only the panel/glass plane (a thin
+    // line); projecting the full mesh from above captures the lower frame
+    // width whenever the IFC actually contains it, and degenerates to just
+    // the leaf rectangle when it doesn't.  Section overlay then draws the
+    // sharper cut-line on top.  Boundary/sharp mesh edges projected as plan
+    // segments give the silhouette outline (real geometry — no synthesised
+    // bbox-rect).
     for (const d of ctx.nearbyDoors) {
+        if (!intersectsPlanVolume(d.bbox)) continue
+        for (const m of d.meshes) {
+            const triCount = meshTriangleCount(m)
+            for (let t = 0; t < triCount; t++) {
+                const [p1, p2, p3] = readMeshTriangle(m, t)
+                const a = cam.project(p1.x, p1.z)
+                const b = cam.project(p2.x, p2.z)
+                const c = cam.project(p3.x, p3.z)
+                const area2 = (b.sx - a.sx) * (c.sy - a.sy) - (c.sx - a.sx) * (b.sy - a.sy)
+                if (Math.abs(area2) < 0.5) continue
+                polys.push({
+                    points: [{ x: a.sx, y: a.sy }, { x: b.sx, y: b.sy }, { x: c.sx, y: c.sy }],
+                    fill: colors.plan.doorContext,
+                    stroke: false,
+                    layer: 2,
+                })
+            }
+            // Outline: project boundary/sharp mesh edges to plan.  Vertical
+            // edges (panel sides) collapse to points and are filtered out;
+            // top/bottom face edges project as the door's outer rectangle.
+            for (const { a, b } of extractMeshEdges(m)) {
+                const sa = cam.project(a.x, a.z)
+                const sb = cam.project(b.x, b.z)
+                const dx = sb.sx - sa.sx
+                const dy = sb.sy - sa.sy
+                if (dx * dx + dy * dy < 0.25) continue  // <0.5 px = degenerate
+                segs.push({ x1: sa.sx, y1: sa.sy, x2: sb.sx, y2: sb.sy, layer: 2 })
+            }
+        }
         sectionGroup(d.meshes, colors.plan.doorContext, 3)
     }
-    // Nearby windows.
+    // Nearby windows — section in the wall context colour, never blue.
     for (const w of ctx.nearbyWindows) {
-        sectionGroup(w.meshes, colors.elevation.glass, 4)
+        if (!intersectsPlanVolume(w.bbox)) continue
+        sectionGroup(w.meshes, colors.plan.wallCut, 4)
     }
     // Focal door section.  Always emit a bbox-rect first as the BKP-coloured
     // backdrop so the leaf reads even for glass doors (whose leaf mesh is too
@@ -1520,6 +1742,7 @@ function emitPlanSvg(
     // Nearby electrical/safety devices at the cut plane (only the ones that
     // straddle the cut height — typically wall-mounted alarms / switches).
     for (const dev of ctx.nearbyDevices) {
+        if (!intersectsPlanVolume(dev.bbox)) continue
         if (dev.bbox.min[1] > cutY + 0.05 || dev.bbox.max[1] < cutY - 0.05) continue
         const safety = isSafetyDevice(dev.name, null, colors)
         const fill = safety ? colors.plan.safety : colors.plan.electrical
@@ -1549,6 +1772,25 @@ function emitPlanSvg(
             console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)} frameW=${ctx.viewFrame.width.toFixed(2)} clearW=${ctx.cset.massDurchgangsbreite}`)
         }
         if (op.kind === 'swing' && op.hingeSide) {
+            // IFC4 LEFT/RIGHT is "as viewed in +localY". When the renderer's
+            // bbox-derived facing points OPPOSITE to IFC's localY, the
+            // observer's left/right flip and we have to mirror hingeSide so
+            // the rendered hinge lands on the correct jamb.
+            //
+            // Comparison is in the IFC's horizontal plane: renderer's facing
+            // (in Y-up world's XZ plane) maps to IFC's XY plane via the
+            // ifc-lite axis swap (renderer +Z ↔ IFC +Y). So we test the dot
+            // product of (placementYAxis.x, placementYAxis.y) against
+            // (facing.x, facing.z) — negative means 180° flip.
+            const py = ctx.placementYAxis
+            const facing = ctx.viewFrame.facing
+            let effectiveHingeSide = op.hingeSide
+            if (op.hingeSide !== 'both' && py) {
+                const facingDotPlacement = py[0] * facing[0] + py[1] * facing[2]
+                if (facingDotPlacement < 0) {
+                    effectiveHingeSide = op.hingeSide === 'left' ? 'right' : 'left'
+                }
+            }
             const widthAxis2 = cam.widthAxis     // {x,z} along door width
             const openAxis2 = cam.openAxis       // +facing → screen-down (room arc opens into)
             const frameW = ctx.viewFrame.width
@@ -1603,12 +1845,12 @@ function emitPlanSvg(
             // is the actual leaf centre.  Falls back to bbox centre when no
             // matching sub-mesh exists (simple symmetric doors).
             const leafCentreOffset = findLeafCentreOffset(ctx.door.meshes, ctx.viewFrame, clearW)
-            if (op.hingeSide === 'both') {
+            if (effectiveHingeSide === 'both') {
                 drawLeaf('left', halfClear, leafCentreOffset - halfClear)
                 drawLeaf('right', halfClear, leafCentreOffset + halfClear)
             } else {
-                const hingeOff = leafCentreOffset + (op.hingeSide === 'left' ? -halfClear : +halfClear)
-                drawLeaf(op.hingeSide, clearW, hingeOff)
+                const hingeOff = leafCentreOffset + (effectiveHingeSide === 'left' ? -halfClear : +halfClear)
+                drawLeaf(effectiveHingeSide, clearW, hingeOff)
             }
         }
     }

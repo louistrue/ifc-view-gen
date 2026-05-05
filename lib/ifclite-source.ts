@@ -71,6 +71,9 @@ export interface IfcLiteModel {
     rtcOffset: { x: number; y: number; z: number }
     /** ifc-lite parser store (pset/rel access). */
     store: any
+    /** ifc-lite @ifc-lite/parser module — exposes parseEntityOnDemand for
+     *  walking attribute references the higher-level helpers strip out. */
+    parserMod: any
     schemaVersion: string
     byType(type: string): number[]
     attrs(expressId: number): IfcLiteEntityAttrs | null
@@ -397,6 +400,7 @@ export async function loadIfcLiteModel(path: string): Promise<IfcLiteModel> {
             allMeshes,
             rtcOffset,
             store,
+            parserMod,
             schemaVersion: store.schemaVersion,
             byType,
             attrs,
