@@ -970,16 +970,6 @@ function emitElevationSvg(
         }
         const rect = projectBoxToElevationRect(wbb, cam, pixelClip)
         if (!rect || rect.length < 3) continue
-        // Layer choice: camera-side perpendicular walls (bbox centre on the
-        // CAMERA side of door middle by more than half the host wall
-        // thickness) sit BETWEEN the camera and the focal door — they should
-        // occlude it.  Layer 7 paints over the door's layer 6.  Walls
-        // straddling doorMid (host wall, walls in/around the host plane)
-        // stay at layer 1 so the door reads through the host wall opening.
-        const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
-        const cameraSideOffset = (wallCentreFacing - doorMidFacing) * cameraSign
-        const isInFrontOfDoor = cameraSideOffset > 0.05
-        const wallLayer = isInFrontOfDoor ? 7 : 1
         const verticalEdges: ProjectedSegment[] = []
         let minSx = +Infinity, maxSx = -Infinity, minSy = +Infinity, maxSy = -Infinity
         for (const p of rect) {
@@ -989,6 +979,18 @@ function emitElevationSvg(
             if (p.y > maxSy) maxSy = p.y
         }
         const widthPx = maxSx - minSx
+        // Layer choice: only NARROW perpendicular walls (thin vertical strip
+        // = wall thickness, far less than canvas width) on the camera side
+        // of doorMid go to layer 7 where they occlude the focal door at
+        // layer 6.  Wide walls projecting >80% of canvas width are NOT
+        // perp returns — they're parallel walls in the adjacent room and
+        // would blanket the entire elevation if rendered above the door.
+        // They stay at layer 1 (under the door).
+        const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
+        const cameraSideOffset = (wallCentreFacing - doorMidFacing) * cameraSign
+        const isNarrowProjection = widthPx < W * 0.80
+        const isInFrontOfDoor = cameraSideOffset > 0.05 && isNarrowProjection
+        const wallLayer = isInFrontOfDoor ? 7 : 1
         if (widthPx < W * 0.80) {
             const onLeftCrop = Math.abs(minSx - marginX) < 0.5
             const onRightCrop = Math.abs(maxSx - (W - marginX)) < 0.5
@@ -1583,6 +1585,33 @@ function emitPlanSvg(
         }
     }
 
+    /** Outline-only variant for walls.  Closed loops from a wall mesh's
+     *  section can span the full wall body INCLUDING the door opening (for
+     *  raw wall meshes that aren't boolean'd with the IfcOpeningElement
+     *  void).  Filling those loops paints wall grey THROUGH the door area
+     *  and defeats the bbox-rect carve.  Wall fill is provided by the
+     *  bbox-rect path with subtractOpenings carving; this section pass
+     *  only contributes outline strokes (closed loops + open chains both
+     *  emit their edges as stroked segments). */
+    const sectionGroupOutlineOnly = (meshes: IfcLiteMesh[], layer: number) => {
+        const all: SectionSegment[] = []
+        for (const m of meshes) all.push(...extractMeshSectionSegments(m, cutY))
+        if (all.length === 0) return
+        const { closedLoops, openChains } = reconstructPolygons(all)
+        const emitChainEdges = (chain: Array<{ x: number; z: number }>, close: boolean) => {
+            for (let i = 0; i + 1 < chain.length; i++) {
+                const a = projP(chain[i]); const b = projP(chain[i + 1])
+                segs.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, layer })
+            }
+            if (close && chain.length >= 2) {
+                const a = projP(chain[chain.length - 1]); const b = projP(chain[0])
+                segs.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, layer })
+            }
+        }
+        for (const loop of closedLoops) emitChainEdges(loop, true)
+        for (const chain of openChains) emitChainEdges(chain, false)
+    }
+
     // Wall colour resolution mirrors elevation logic.
     const wallFillFor = (cfcBkp: string | null): string =>
         resolveWallCutColor(cfcBkp, colors)
@@ -1669,24 +1698,61 @@ function emitPlanSvg(
                 for (const seg of subtractOpenings(dMax, hMax)) emitFlank(seg)
             }
         }
-        sectionGroup(ctx.hostWall.meshes, wallFillFor(null), 1)
+        sectionGroupOutlineOnly(ctx.hostWall.meshes, 1)
     }
     // Nearby walls (perpendicular, T-junction returns).  Render every wall
-    // whose bbox INTERSECTS the plan view volume (cut slab × canvas footprint).
-    // Bbox-rect first so thin / T-stub walls whose mesh-section produces only
-    // an open chain still register as a filled wall body, then mesh-section
-    // for sharper detail.
+    // whose bbox INTERSECTS the plan view volume.  Bbox-rect first so thin
+    // / T-stub walls whose mesh-section produces only an open chain still
+    // register as a filled wall body — but CARVED for adjacent doors /
+    // windows that sit IN this nearby wall, so the wall fill doesn't bleed
+    // across the opening.  Then overlay mesh-section for sharper detail.
     for (const w of ctx.nearbyWalls) {
         if (!intersectsPlanVolume(w.bbox)) continue
         const wbb = w.bbox
-        const rectPts: Pt[] = [
-            { x: wbb.min[0], z: wbb.min[2] },
-            { x: wbb.max[0], z: wbb.min[2] },
-            { x: wbb.max[0], z: wbb.max[2] },
-            { x: wbb.min[0], z: wbb.max[2] },
-        ].map((p) => projP(p))
-        polys.push({ points: rectPts, fill: wallFillFor(null), stroke: false, layer: 1 })
-        sectionGroup(w.meshes, wallFillFor(null), 1)
+        const wExtX = wbb.max[0] - wbb.min[0]
+        const wExtZ = wbb.max[2] - wbb.min[2]
+        const wallAlongX = wExtX >= wExtZ
+        const lAxis: 0 | 2 = wallAlongX ? 0 : 2
+        const tAxis: 0 | 2 = wallAlongX ? 2 : 0
+        const lMin = wbb.min[lAxis], lMax = wbb.max[lAxis]
+        const isOpeningInWall = (ob: AABB): boolean => {
+            if (ob.max[1] < cutY - 0.05 || ob.min[1] > cutY + 0.05) return false
+            const tMin = ob.min[tAxis], tMax = ob.max[tAxis]
+            return tMax >= wbb.min[tAxis] - 0.05 && tMin <= wbb.max[tAxis] + 0.05
+        }
+        let segs: Array<[number, number]> = [[lMin, lMax]]
+        const carve = (ob: AABB) => {
+            if (!isOpeningInWall(ob)) return
+            const aMin = ob.min[lAxis]
+            const aMax = ob.max[lAxis]
+            const next: Array<[number, number]> = []
+            for (const [s, e] of segs) {
+                if (aMax <= s || aMin >= e) { next.push([s, e]); continue }
+                if (aMin > s) next.push([s, aMin])
+                if (aMax < e) next.push([aMax, e])
+            }
+            segs = next
+        }
+        for (const d of ctx.nearbyDoors) carve(d.bbox)
+        for (const win of ctx.nearbyWindows) carve(win.bbox)
+        const liveSegs = segs.filter(([s, e]) => e - s > 0.001)
+        for (const [s, e] of liveSegs) {
+            const r: Pt[] = wallAlongX
+                ? [
+                    { x: s, z: wbb.min[2] },
+                    { x: e, z: wbb.min[2] },
+                    { x: e, z: wbb.max[2] },
+                    { x: s, z: wbb.max[2] },
+                ].map((p) => projP(p))
+                : [
+                    { x: wbb.min[0], z: s },
+                    { x: wbb.max[0], z: s },
+                    { x: wbb.max[0], z: e },
+                    { x: wbb.min[0], z: e },
+                ].map((p) => projP(p))
+            polys.push({ points: r, fill: wallFillFor(null), stroke: false, layer: 1 })
+        }
+        sectionGroupOutlineOnly(w.meshes, 1)
     }
     // Nearby doors (faded so the focal door reads).  Project every triangle
     // top-down (real mesh, ignoring Y) so the door's full footprint —
@@ -1755,6 +1821,20 @@ function emitPlanSvg(
         polys.push({ points: rectPts, fill: leafColor, stroke: true, layer: 5 })
         // Mesh section overlays sharper boundaries on top.
         sectionGroup(ctx.door.meshes, leafColor, 6)
+        // Boundary/sharp mesh edges projected top-down at layer 6 — same
+        // outline pattern as adjacent doors, so the focal door's full
+        // silhouette reads with a clean edge instead of relying on the
+        // bbox-rect's stroke being visible underneath the section overlays.
+        for (const m of ctx.door.meshes) {
+            for (const { a, b } of extractMeshEdges(m)) {
+                const sa = cam.project(a.x, a.z)
+                const sb = cam.project(b.x, b.z)
+                const dx = sb.sx - sa.sx
+                const dy = sb.sy - sa.sy
+                if (dx * dx + dy * dy < 0.25) continue
+                segs.push({ x1: sa.sx, y1: sa.sy, x2: sb.sx, y2: sb.sy, layer: 6 })
+            }
+        }
     }
 
     // Nearby electrical/safety devices at the cut plane (only the ones that
@@ -1790,25 +1870,12 @@ function emitPlanSvg(
             console.log(`[plan ${ctx.guid}] op=${ctx.operationType} parsed=${JSON.stringify(op)} frameW=${ctx.viewFrame.width.toFixed(2)} clearW=${ctx.cset.massDurchgangsbreite}`)
         }
         if (op.kind === 'swing' && op.hingeSide) {
-            // IFC4 LEFT/RIGHT is "as viewed in +localY". When the renderer's
-            // bbox-derived facing points OPPOSITE to IFC's localY, the
-            // observer's left/right flip and we have to mirror hingeSide so
-            // the rendered hinge lands on the correct jamb.
-            //
-            // Comparison is in the IFC's horizontal plane: renderer's facing
-            // (in Y-up world's XZ plane) maps to IFC's XY plane via the
-            // ifc-lite axis swap (renderer +Z ↔ IFC +Y). So we test the dot
-            // product of (placementYAxis.x, placementYAxis.y) against
-            // (facing.x, facing.z) — negative means 180° flip.
-            const py = ctx.placementYAxis
-            const facing = ctx.viewFrame.facing
-            let effectiveHingeSide = op.hingeSide
-            if (op.hingeSide !== 'both' && py) {
-                const facingDotPlacement = py[0] * facing[0] + py[1] * facing[2]
-                if (facingDotPlacement < 0) {
-                    effectiveHingeSide = op.hingeSide === 'left' ? 'right' : 'left'
-                }
-            }
+            // viewFrame.facing and widthAxis are pre-aligned by the analyzer
+            // to match the door's IFC localY / localX placement axes, so
+            // IFC LEFT (hinge on −localX end as viewed from +localY) maps
+            // directly to the renderer's −widthAxis end via 'left'.  No
+            // hinge mirror needed here.
+            const effectiveHingeSide = op.hingeSide
             const widthAxis2 = cam.widthAxis     // {x,z} along door width
             const openAxis2 = cam.openAxis       // +facing → screen-down (room arc opens into)
             const frameW = ctx.viewFrame.width

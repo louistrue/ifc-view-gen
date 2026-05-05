@@ -22,7 +22,7 @@
  * so the renderer / round can warn if they ever diverge.
  */
 import type { IfcLiteMesh, IfcLiteModel } from './ifclite-source'
-import { readDoorPlacementYAxis } from './ifclite-placement'
+import { readDoorPlacementXAxis, readDoorPlacementYAxis } from './ifclite-placement'
 
 export interface AABB {
     min: [number, number, number]
@@ -552,6 +552,33 @@ export function analyzeDoor(
     const name = attrs?.name ?? ''
     const storey = model.storeyOf(doorId)
     const viewFrame = buildDoorViewFrame(bbox)
+    // Bbox alone gives a directionless facing axis (always +X or +Z).  Align
+    // viewFrame.facing and widthAxis to the door's IFC-native local +Y / +X
+    // axes (read from IfcLocalPlacement).  Without this, doors whose IFC
+    // localY or localX points in a negative world direction render the
+    // swing arc on the wrong side and/or the hinge on the wrong jamb.
+    // facing and widthAxis are flipped INDEPENDENTLY because a 90° plan
+    // rotation flips one but not the other (e.g. localY→-X flips facing,
+    // but localX→+Y leaves widthAxis aligned).  IFC stores directions in
+    // Z-up coords; the axis swap maps IFC X→renderer X, IFC Y→renderer Z.
+    const placementYAxis = readDoorPlacementYAxis(model.parserMod, model.store, doorId)
+    const placementXAxis = readDoorPlacementXAxis(model.parserMod, model.store, doorId)
+    if (placementYAxis) {
+        const ifcYDotFacing =
+            placementYAxis[0] * viewFrame.facing[0]
+            + placementYAxis[1] * viewFrame.facing[2]
+        if (ifcYDotFacing < 0) {
+            viewFrame.facing = [-viewFrame.facing[0], -viewFrame.facing[1], -viewFrame.facing[2]]
+        }
+    }
+    if (placementXAxis) {
+        const ifcXDotWidth =
+            placementXAxis[0] * viewFrame.widthAxis[0]
+            + placementXAxis[1] * viewFrame.widthAxis[2]
+        if (ifcXDotWidth < 0) {
+            viewFrame.widthAxis = [-viewFrame.widthAxis[0], -viewFrame.widthAxis[1], -viewFrame.widthAxis[2]]
+        }
+    }
 
     let hostWallId = findHostWallExpressId(model, doorId)
     if (hostWallId == null) {
@@ -706,6 +733,6 @@ export function analyzeDoor(
         nearbyDevices,
         cset: readCsetData(model, doorId),
         operationType: readOperationType(model, doorId),
-        placementYAxis: readDoorPlacementYAxis(model.parserMod, model.store, doorId),
+        placementYAxis,
     }
 }
