@@ -165,6 +165,45 @@ interface MeshClassification {
     role: 'door' | 'host-wall' | 'nearby-wall' | 'slab' | 'window' | 'nearby-door' | 'device' | 'safety' | 'other'
 }
 
+function segmentOrientationStats(segments: ProjectedSegment[]) {
+    let horizontal = 0
+    let vertical = 0
+    let oblique = 0
+    let maxObliqueLength = 0
+    for (const s of segments) {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) continue
+        const ax = Math.abs(dx) / len
+        const ay = Math.abs(dy) / len
+        if (ax > 0.985) horizontal++
+        else if (ay > 0.985) vertical++
+        else {
+            oblique++
+            if (len > maxObliqueLength) maxObliqueLength = len
+        }
+    }
+    return { horizontal, vertical, oblique, maxObliqueLength }
+}
+
+function filterWallSeamSegments(segments: ProjectedSegment[]): ProjectedSegment[] {
+    const out: ProjectedSegment[] = []
+    for (const s of segments) {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) continue
+        const ax = Math.abs(dx) / len
+        const ay = Math.abs(dy) / len
+        const axisAligned = ax > 0.985 || ay > 0.985
+        // Long oblique wall strokes are typically triangulation seams.
+        if (!axisAligned && len > 25) continue
+        out.push(s)
+    }
+    return out
+}
+
 function resolvePlanNearbyDoorColor(cfcBkp: string | null, colors: RenderColors): string {
     const cat = classifyDoorBKP(cfcBkp)
     if (cat === 'context') return colors.elevation.door.byBKP.context
@@ -1346,20 +1385,49 @@ function emitElevationSvg(
         return true
     }
     if (ctx.hostWall && intersectsElevationVolume(ctx.hostWall.bbox)) {
-        const wallBbox: AABB = {
-            min: [ctx.hostWall.bbox.min[0], Math.max(ctx.hostWall.bbox.min[1], viewportBottomY), ctx.hostWall.bbox.min[2]],
-            max: [ctx.hostWall.bbox.max[0], Math.min(ctx.hostWall.bbox.max[1], viewportTopY), ctx.hostWall.bbox.max[2]],
-        }
-        const rect = projectBoxToElevationRect(wallBbox, cam, pixelClip)
-        if (rect && rect.length >= 3) {
-            const fill = ctx.cset.cfcBkp != null
-                ? resolveWallElevationColor(ctx.cset.cfcBkp, options.colors)
-                : options.colors.elevation.wall
+        const hostFill = ctx.cset.cfcBkp != null
+            ? resolveWallElevationColor(ctx.cset.cfcBkp, options.colors)
+            : options.colors.elevation.wall
+        let hostPolyCount = 0
+        let hostSegCount = 0
+        const hostSegsAll: ProjectedSegment[] = []
+        for (const mesh of ctx.hostWall.meshes) {
+            const cls: MeshClassification = { fill: hostFill, layer: 1, role: 'host-wall' }
+            const polys = projectMeshFill(mesh, cam, cls, ctx.hostWall.expressId, elevationClip, pixelClip)
+            const segsRaw = projectMeshSegments(mesh, cam, options.colors.strokes.outline, 1, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+            const segs = filterWallSeamSegments(segsRaw)
+            hostPolyCount += polys.length
+            hostSegCount += segs.length
+            hostSegsAll.push(...segs)
+            if (polys.length === 0 && segs.length === 0) continue
             groups.push({
                 layer: 1,
-                polygons: [{ points: rect, fill, depth: 0, layer: 1, expressId: ctx.hostWall.expressId }],
-                segments: [],
+                polygons: polys,
+                segments: segs,
             })
+        }
+        if (debugEnabled) {
+            // #region agent log H10
+            const orient = segmentOrientationStats(hostSegsAll)
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H6',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:hostWall',
+                message: 'host wall segment orientation stats',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    expressId: ctx.hostWall.expressId,
+                    renderPath: 'meshProjection',
+                    polyCount: hostPolyCount,
+                    segCount: hostSegCount,
+                    horizontal: orient.horizontal,
+                    vertical: orient.vertical,
+                    oblique: orient.oblique,
+                    maxObliqueLength: orient.maxObliqueLength,
+                },
+            })
+            // #endregion
         }
     }
     for (const w of ctx.nearbyWalls) {
@@ -1416,12 +1484,6 @@ function emitElevationSvg(
             }
         }
         if (!inVolume) continue
-        const wbb: AABB = {
-            min: [w.bbox.min[0], Math.max(w.bbox.min[1], viewportBottomY), w.bbox.min[2]],
-            max: [w.bbox.max[0], Math.min(w.bbox.max[1], viewportTopY), w.bbox.max[2]],
-        }
-        const rect = projectBoxToElevationRect(wbb, cam, pixelClip)
-        if (!rect || rect.length < 3) continue
         // Layer choice: camera-side perpendicular walls (bbox centre on the
         // CAMERA side of door middle by more than half the host wall
         // thickness) sit BETWEEN the camera and the focal door — they should
@@ -1432,31 +1494,21 @@ function emitElevationSvg(
         const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSign
         const isInFrontOfDoor = cameraSideOffset > 0.05
         const wallLayer = isInFrontOfDoor ? 8 : 1
-        const verticalEdges: ProjectedSegment[] = []
-        let minSx = +Infinity, maxSx = -Infinity, minSy = +Infinity, maxSy = -Infinity
-        for (const p of rect) {
-            if (p.x < minSx) minSx = p.x
-            if (p.x > maxSx) maxSx = p.x
-            if (p.y < minSy) minSy = p.y
-            if (p.y > maxSy) maxSy = p.y
+        let polyCount = 0
+        let segCount = 0
+        const polysAll: ProjectedPolygon[] = []
+        const segsAll: ProjectedSegment[] = []
+        for (const mesh of w.meshes) {
+            const cls: MeshClassification = { fill: options.colors.elevation.wall, layer: wallLayer, role: 'nearby-wall' }
+            const polys = projectMeshFill(mesh, cam, cls, w.expressId, elevationClip, pixelClip)
+            const segsRaw = projectMeshSegments(mesh, cam, options.colors.strokes.outline, wallLayer, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+            const segs = filterWallSeamSegments(segsRaw)
+            polyCount += polys.length
+            segCount += segs.length
+            polysAll.push(...polys)
+            segsAll.push(...segs)
         }
-        const widthPx = maxSx - minSx
-        if (widthPx < W * 0.80) {
-            const onLeftCrop = Math.abs(minSx - marginX) < 0.5
-            const onRightCrop = Math.abs(maxSx - (W - marginX)) < 0.5
-            if (!onLeftCrop) {
-                verticalEdges.push({ x1: minSx, y1: minSy, x2: minSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
-            }
-            if (!onRightCrop) {
-                verticalEdges.push({ x1: maxSx, y1: minSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
-            }
-            if (!onCropEdge(minSy)) {
-                verticalEdges.push({ x1: minSx, y1: minSy, x2: maxSx, y2: minSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
-            }
-            if (!onCropEdge(maxSy)) {
-                verticalEdges.push({ x1: minSx, y1: maxSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
-            }
-        }
+        if (polysAll.length === 0 && segsAll.length === 0) continue
         if (debugEnabled) {
             const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
             const wallGuid = w.guid ?? null
@@ -1468,7 +1520,7 @@ function emitElevationSvg(
                 // #region agent log H10
                 debugLogRenderer({
                     runId,
-                    hypothesisId: 'H10',
+                    hypothesisId: 'H6',
                     location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
                     message: 'target wall render path',
                     data: {
@@ -1476,9 +1528,11 @@ function emitElevationSvg(
                         side,
                         expressId: w.expressId,
                         guid: wallGuid,
-                        renderPath: 'bboxRect',
+                        renderPath: 'meshProjection',
                         wallLayer,
-                        widthPx,
+                        polyCount,
+                        segCount,
+                        ...segmentOrientationStats(segsAll),
                     },
                 })
                 // #endregion
@@ -1486,8 +1540,8 @@ function emitElevationSvg(
         }
         groups.push({
             layer: wallLayer,
-            polygons: [{ points: rect, fill: options.colors.elevation.wall, depth: 0, layer: wallLayer, expressId: w.expressId }],
-            segments: verticalEdges,
+            polygons: polysAll,
+            segments: segsAll,
         })
     }
     // Horizontal band rendering: a full-canvas-width strip clipped to the
