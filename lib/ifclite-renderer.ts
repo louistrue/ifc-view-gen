@@ -1550,38 +1550,6 @@ function emitElevationSvg(
     // Strokes that would land EXACTLY on a crop edge (top of viewport at
     // screenTopWorld, bottom of viewport at canvasH) are suppressed — those
     // would read as solid lines drawn along the image crop, not real geometry.
-    const drawHorizontalBand = (
-        yMinWorld: number,
-        yMaxWorld: number,
-        fill: string,
-        layer: number,
-        expressId: number,
-        addStrokes: boolean,
-    ) => {
-        const yTop = yScreenAt(yMaxWorld)
-        const yBot = yScreenAt(yMinWorld)
-        const yMin = Math.min(yTop, yBot)
-        const yMax = Math.max(yTop, yBot)
-        if (yMax - yMin < 0.3) return
-        const rect: Pt[] = [
-            { x: marginX, y: yMin }, { x: W - marginX, y: yMin },
-            { x: W - marginX, y: yMax }, { x: marginX, y: yMax },
-        ]
-        const segments: ProjectedSegment[] = []
-        if (addStrokes) {
-            if (!onCropEdge(yMin)) {
-                segments.push({ x1: marginX, y1: yMin, x2: W - marginX, y2: yMin, color: options.colors.strokes.outline, depth: 0, layer, width: options.lineWidth })
-            }
-            if (!onCropEdge(yMax)) {
-                segments.push({ x1: marginX, y1: yMax, x2: W - marginX, y2: yMax, color: options.colors.strokes.outline, depth: 0, layer, width: options.lineWidth })
-            }
-        }
-        groups.push({
-            layer,
-            polygons: [{ points: rect, fill, depth: 0, layer, expressId }],
-            segments,
-        })
-    }
     function drawPartGeometry(
         part: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null },
         yLo: number,
@@ -1803,37 +1771,25 @@ function emitElevationSvg(
         }
     }
 
-    // Bottom of viewport: 10 cm INTO the structural slab below
-    //   = slabBelow.top - 10 cm  (i.e. show the top 10 cm of the slab body).
-    // Above that, render the structural slab cap stripe (10 cm) with strokes,
-    // then the Unterlagsboden parts (build-up / screed / finish) up to the
-    // door foot — typically 5–20 cm of additional layers stacked on top.
-    // ── Bottom 10 cm structural slab cap ────────────────────────────────────
-    // Always render a 10 cm band at the bottom of the storey viewport, even
-    // when the analyzer couldn't locate a slabBelow.  viewportBottomY is
-    //   slabBelow.top − 0.10 m   when slab is found
-    //   doorBottom    − 0.10 m   fallback
-    // so the band ALWAYS sits exactly under the door foot (or the slab top
-    // when known).  This guarantees the 10 cm structural-slab cap reads
-    // consistently across every door, including basement entrances and
-    // raised-threshold doors where the analyzer's plan-radius search misses.
+    // Structural slabs: real mesh only. Do not synthesize full-width cap bands.
     {
-        const slabBelowExpressId = ctx.slabBelow?.expressId ?? -1
-        // When we fell back to the buildup-derived floor, treat that Y as the
-        // structural top so the 10 cm cap reads as a separate band UNDER the
-        // build-up rather than smearing into it.
-        const slabBandTopY = ctx.slabBelow
-            ? ctx.slabBelow.bbox.max[1]
-            : (buildupFloorDy != null ? doorBottom + buildupFloorDy : doorBottom)
-        drawHorizontalBand(viewportBottomY, slabBandTopY, options.colors.elevation.wall, 2, slabBelowExpressId, true)
-        // Unterlagsboden / build-up parts above the structural slab — render
-        // even when slabBelow is null (some doors sit at storey openings where
-        // the structural slab plane is interrupted).
-        //
-        // Depth filter: a covering or build-up tile sitting ENTIRELY on the
-        // far side of the host wall (in the adjacent room) must NOT smear
-        // across this elevation as a full-width band. We render only what
-        // is at or in front of the cut plane on the camera side.
+        if (ctx.slabBelow && intersectsElevationVolume(ctx.slabBelow.bbox)) {
+            const yLo = Math.max(ctx.slabBelow.bbox.min[1], viewportBottomY)
+            const yHi = Math.min(ctx.slabBelow.bbox.max[1], viewportTopY)
+            if (yHi - yLo >= 0.005) {
+                drawPartGeometry(
+                    { expressId: ctx.slabBelow.expressId, meshes: ctx.slabBelow.meshes, bbox: ctx.slabBelow.bbox, guid: null },
+                    yLo,
+                    yHi,
+                    options.colors.elevation.wall,
+                    2,
+                    true,
+                    'lib/ifclite-renderer.ts:emitElevationSvg:belowStructuralSlab'
+                )
+            }
+        }
+        // Unterlagsboden / build-up parts above the structural slab. Also real
+        // geometry only; no synthetic bbox fallback.
         const belowParts = ctx.slabBelowParts
             .filter((p) => intersectsElevationVolume(p.bbox))
             .sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
@@ -1868,50 +1824,21 @@ function emitElevationSvg(
             drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, 2, true, 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts')
         }
     }
-    // ── Top 10 cm structural slab cap (slabAbove) ───────────────────────────
-    // Same idea: always paint a 10 cm band at the storey-top reference.
-    // Falls back to viewportTopY when slabAbove is missing, so we never have
-    // an empty top edge for storeys without a detected ceiling slab.
     {
-        const slabAboveExpressId = ctx.slabAbove?.expressId ?? -1
-        // Pin the slab cap to the top of the viewport: a tall door whose
-        // slabAbove sits above the 3.5 m storey-content cap would otherwise
-        // place the band off-canvas (slabAbove.bbox.min[1] > viewportTopY)
-        // and pixelClip culls it entirely — the elevation reads with no top
-        // cap.  Clamping slabBandBotY to viewportTopY − 10 cm guarantees a
-        // visible 10 cm structural-cap band even when the actual slab is
-        // beyond the cap.
-        const slabBandBotY = ctx.slabAbove
-            ? Math.min(ctx.slabAbove.bbox.min[1], viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS)
-            : viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS
-        const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
-        const suppressTopCapBand = ctx.slabAboveParts.some((p) => {
-            const g = p.guid ?? null
-            if (!g) return false
-            if (!(NO_FALLBACK_PART_GUIDS.includes(g) || noFallbackNorms.has(g.replace(/\$/g, '_')))) return false
-            if (!intersectsElevationVolume(p.bbox)) return false
-            const yHi = Math.min(p.bbox.max[1], viewportTopY)
-            const yLo = Math.max(p.bbox.min[1], viewportBottomY)
-            return yHi - yLo >= 0.005
-        })
-        if (!suppressTopCapBand) {
-            drawHorizontalBand(slabBandBotY, viewportTopY, options.colors.elevation.wall, 2, slabAboveExpressId, true)
-        } else if (debugEnabled) {
-            // #region agent log H24
-            debugLogRenderer({
-                runId,
-                hypothesisId: 'H24',
-                location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
-                message: 'suppressed structural top cap band due to no-fallback part',
-                data: {
-                    doorGuid: ctx.guid,
-                    side,
-                    slabBandBotY,
-                    viewportTopY,
-                    noFallbackGuids: NO_FALLBACK_PART_GUIDS,
-                },
-            })
-            // #endregion
+        if (ctx.slabAbove && intersectsElevationVolume(ctx.slabAbove.bbox)) {
+            const yLo = Math.max(ctx.slabAbove.bbox.min[1], viewportBottomY)
+            const yHi = Math.min(ctx.slabAbove.bbox.max[1], viewportTopY)
+            if (yHi - yLo >= 0.005) {
+                drawPartGeometry(
+                    { expressId: ctx.slabAbove.expressId, meshes: ctx.slabAbove.meshes, bbox: ctx.slabAbove.bbox, guid: null },
+                    yLo,
+                    yHi,
+                    options.colors.elevation.wall,
+                    2,
+                    true,
+                    'lib/ifclite-renderer.ts:emitElevationSvg:aboveStructuralSlab'
+                )
+            }
         }
         if (debugEnabled) {
             const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
