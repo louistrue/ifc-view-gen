@@ -785,10 +785,10 @@ function emitElevationSvg(
     // A symmetric ±0.3 m crop (the previous version) effectively rendered
     // 30 cm of the OPPOSITE room into every view, which is wrong for an
     // elevation drawing.
-    // Picture depth = door middle on the facing axis.  Each elevation
-    // renders the half-space BETWEEN the camera and the picture depth:
-    //   front: depth ∈ [doorMid, +∞)  — front room + front half of wall
-    //   back : depth ∈ (-∞, doorMid]  — back room + back half of wall
+    // Depth anchor = camera-side DOOR FACE (not door middle).  Each elevation
+    // renders from that face into the camera-side room by DEPTH_FAR:
+    //   front: depth ∈ [doorFaceFront, doorFaceFront + 0.35]
+    //   back : depth ∈ [doorFaceBack - 0.35, doorFaceBack]
     //
     // Perpendicular walls sticking out on the camera side of the host wall
     // get cut at picture depth and appear as their cross-section profile
@@ -815,39 +815,35 @@ function emitElevationSvg(
         }
         return { min: [b.min[0] - inflate, b.min[1], b.min[2]], max: [b.max[0] + inflate, b.max[1], b.max[2]] }
     })()
-    // Camera-side depth: 35 cm (0.35 m) past the door middle on the facing
-    // axis.  Captures the front half of the host wall + a thin slice of the
-    // camera-side room (perpendicular jamb returns, frame profile,
-    // wall-mounted devices) without painting wall stubs that extend far
-    // into the camera-side room.
+    // Camera-side depth: 35 cm (0.35 m) measured from the camera-side DOOR
+    // FACE on the facing axis. This follows the requested "door bbox +0.35 m"
+    // mental model for front/back device visibility.
     const DEPTH_FAR = 0.35
     if (isXAligned) {
         // Width axis = X, facing axis = Z. Width clip stays symmetric.
         elevationClip.xMin = ctx.viewFrame.origin[0] - halfCanvasMeters - 0.1
         elevationClip.xMax = ctx.viewFrame.origin[0] + halfCanvasMeters + 0.1
         const cameraDirZ = cameraSign * ctx.viewFrame.facing[2]
-        const doorMidZ = ctx.viewFrame.origin[2]
+        const doorFaceZ = cameraDirZ > 0 ? ctx.door.bbox.max[2] : ctx.door.bbox.min[2]
         if (cameraDirZ > 0) {
-            // Front camera on +Z side.  Visible: [doorMid, +∞).
-            elevationClip.zMin = doorMidZ - FAR_FACE_TOLERANCE_M
-            elevationClip.zMax = doorMidZ + DEPTH_FAR
+            elevationClip.zMin = doorFaceZ - FAR_FACE_TOLERANCE_M
+            elevationClip.zMax = doorFaceZ + DEPTH_FAR
         } else {
-            // Back camera on -Z side.  Visible: (-∞, doorMid].
-            elevationClip.zMin = doorMidZ - DEPTH_FAR
-            elevationClip.zMax = doorMidZ + FAR_FACE_TOLERANCE_M
+            elevationClip.zMin = doorFaceZ - DEPTH_FAR
+            elevationClip.zMax = doorFaceZ + FAR_FACE_TOLERANCE_M
         }
     } else {
         // Width axis = Z, facing axis = X. Width clip stays symmetric.
         elevationClip.zMin = ctx.viewFrame.origin[2] - halfCanvasMeters - 0.1
         elevationClip.zMax = ctx.viewFrame.origin[2] + halfCanvasMeters + 0.1
         const cameraDirX = cameraSign * ctx.viewFrame.facing[0]
-        const doorMidX = ctx.viewFrame.origin[0]
+        const doorFaceX = cameraDirX > 0 ? ctx.door.bbox.max[0] : ctx.door.bbox.min[0]
         if (cameraDirX > 0) {
-            elevationClip.xMin = doorMidX - FAR_FACE_TOLERANCE_M
-            elevationClip.xMax = doorMidX + DEPTH_FAR
+            elevationClip.xMin = doorFaceX - FAR_FACE_TOLERANCE_M
+            elevationClip.xMax = doorFaceX + DEPTH_FAR
         } else {
-            elevationClip.xMin = doorMidX - DEPTH_FAR
-            elevationClip.xMax = doorMidX + FAR_FACE_TOLERANCE_M
+            elevationClip.xMin = doorFaceX - DEPTH_FAR
+            elevationClip.xMax = doorFaceX + FAR_FACE_TOLERANCE_M
         }
     }
 
@@ -915,42 +911,22 @@ function emitElevationSvg(
     const widthAxisIdx: 0 | 2 = isXAligned ? 0 : 2
     const widthClipMin = isXAligned ? elevationClip.xMin : elevationClip.zMin
     const widthClipMax = isXAligned ? elevationClip.xMax : elevationClip.zMax
-    const hostFacingMin = hostBboxForClip.min[facingAxisIdx]
-    const hostFacingMax = hostBboxForClip.max[facingAxisIdx]
-    const doorMidFacing = ctx.viewFrame.origin[facingAxisIdx]
-    const inWallSlackM = 0.05
+    const doorCenterFacing = (ctx.door.bbox.min[facingAxisIdx] + ctx.door.bbox.max[facingAxisIdx]) / 2
+    const facingClipMin = (isXAligned ? elevationClip.zMin : elevationClip.xMin) ?? -Infinity
+    const facingClipMax = (isXAligned ? elevationClip.zMax : elevationClip.xMax) ?? +Infinity
     const intersectsElevationVolume = (bbox: AABB): boolean => {
         if (bbox.max[1] < (elevationClip.yMin ?? -Infinity)) return false
         if (bbox.min[1] > (elevationClip.yMax ?? +Infinity)) return false
         if (bbox.max[widthAxisIdx] < (widthClipMin ?? -Infinity)) return false
         if (bbox.min[widthAxisIdx] > (widthClipMax ?? +Infinity)) return false
-        // Bbox-AABB intersection on facing axis against the camera-side slab
-        // [doorMid - slack, doorMid + DEPTH_FAR].  Elongated geometry —
-        // perpendicular walls reaching deep into the room, floor build-up
-        // tiles spanning the adjacent room — qualifies as long as ANY part
-        // of its bbox sits within DEPTH_FAR (0.35 m) of the door middle.
-        // A centre-based test would cull these because their centroid lies
-        // past the bound even though real geometry is within range.
-        // Front-room perpendicular walls don't leak into the back view
-        // because their near face is offset by ~half the host wall thickness
-        // (typically 0.10 m), so the bbox doesn't reach doorMid + slack.
+        // Facing-axis test mirrors the exact elevation clip bounds so coarse
+        // bbox gating and per-triangle clipping stay consistent.
         const bMin = bbox.min[facingAxisIdx]
         const bMax = bbox.max[facingAxisIdx]
-        if (cameraSign > 0) {
-            // Front camera: clip = [doorMid - slack, doorMid + DEPTH_FAR].
-            if (bMax < doorMidFacing - inWallSlackM) return false
-            if (bMin > doorMidFacing + DEPTH_FAR) return false
-            return true
-        }
-        // Back camera: clip = [doorMid - DEPTH_FAR, doorMid + slack].
-        if (bMax < doorMidFacing - DEPTH_FAR) return false
-        if (bMin > doorMidFacing + inWallSlackM) return false
+        if (bMax < facingClipMin) return false
+        if (bMin > facingClipMax) return false
         return true
     }
-    // Reference hostFacingMin/Max so unused-locals lint stays happy after the
-    // half-space simplification — we may still want them for future tweaks.
-    void hostFacingMin
-    void hostFacingMax
     if (ctx.hostWall && intersectsElevationVolume(ctx.hostWall.bbox)) {
         const wallBbox: AABB = {
             min: [ctx.hostWall.bbox.min[0], Math.max(ctx.hostWall.bbox.min[1], viewportBottomY), ctx.hostWall.bbox.min[2]],
@@ -983,7 +959,7 @@ function emitElevationSvg(
         // straddling doorMid (host wall, walls in/around the host plane)
         // stay at layer 1 so the door reads through the host wall opening.
         const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
-        const cameraSideOffset = (wallCentreFacing - doorMidFacing) * cameraSign
+        const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSign
         const isInFrontOfDoor = cameraSideOffset > 0.05
         const wallLayer = isInFrontOfDoor ? 8 : 1
         const verticalEdges: ProjectedSegment[] = []
@@ -1129,8 +1105,8 @@ function emitElevationSvg(
                 // doesn't render in both front/back just because it overlaps.
                 const centreFacing = (p.bbox.min[facingAxisIdx] + p.bbox.max[facingAxisIdx]) / 2
                 const sideGatePass = cameraSign > 0
-                    ? centreFacing >= doorMidFacing
-                    : centreFacing <= doorMidFacing
+                    ? centreFacing >= doorCenterFacing
+                    : centreFacing <= doorCenterFacing
                 return sideGatePass
             })
             .sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
@@ -1792,9 +1768,12 @@ function emitPlanSvg(
     // Nearby electrical/safety devices as a top projection between door bottom
     // and cut plane (not just "cut = show").
     for (const dev of ctx.nearbyDevices) {
-        if (!intersectsPlanFootprint(dev.bbox)) continue
-        if (dev.bbox.max[1] < ctx.viewFrame.origin[1]) continue
-        if (dev.bbox.min[1] > cutY) continue
+        const inFootprint = intersectsPlanFootprint(dev.bbox)
+        const aboveBottom = dev.bbox.max[1] >= ctx.viewFrame.origin[1]
+        const belowCut = dev.bbox.min[1] <= cutY
+        if (!inFootprint) continue
+        if (!aboveBottom) continue
+        if (!belowCut) continue
         const safety = isSafetyDevice(dev.name, null, colors)
         const fill = safety ? colors.plan.safety : colors.plan.electrical
         const dbb = dev.bbox

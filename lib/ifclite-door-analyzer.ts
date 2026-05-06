@@ -753,8 +753,9 @@ export function analyzeDoor(
         .map((c) => ({ expressId: c.expressId, meshes: c.meshes, bbox: c.bbox }))
 
     const nearbyDevices: DoorContextLite['nearbyDevices'] = []
-    if (elec && caches.elecIndices) {
-        for (const [t, idx] of caches.elecIndices.entries()) {
+    const elecIndices = caches.elecIndices
+    if (elec && elecIndices) {
+        for (const [t, idx] of elecIndices.entries()) {
             const found = queryPlanIndex(idx, centre, radius).filter(filterDeviceCandidateBandY)
             for (const item of found) {
                 const a = elec.attrs(item.expressId)
