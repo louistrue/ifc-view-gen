@@ -47,22 +47,6 @@ import type { AABB, DoorContextLite, DoorViewFrame } from './ifclite-door-analyz
 import type { IfcLiteMesh } from './ifclite-source'
 
 const COLORS = loadRenderColors()
-const DEBUG_GUIDS: ReadonlySet<string> = new Set([
-    '00aWpxa_nMJugVbA_gUV4',
-    '00aWpxa$nMJugVbA$gUV4_',
-    '1mRZBdiTM$IuoH2sbb2zBQ',
-    '3AweLhpG7eIeBpUEeWKmNf',
-    '3jw6gOgAfSHxkdx8yO58yl',
-    '08v$5$g4ScGA26DW5Jh6Mz',
-])
-const DEBUG_EXPECTED_AXIS: Record<string, 'mirror-x' | 'mirror-y' | 'ok'> = {
-    '00aWpxa_nMJugVbA_gUV4': 'mirror-x',
-    '00aWpxa$nMJugVbA$gUV4_': 'mirror-x',
-    '1mRZBdiTM$IuoH2sbb2zBQ': 'mirror-x',
-    '3AweLhpG7eIeBpUEeWKmNf': 'mirror-x',
-    '3jw6gOgAfSHxkdx8yO58yl': 'mirror-y',
-    '08v$5$g4ScGA26DW5Jh6Mz': 'ok',
-}
 
 export const FIXED_PX_PER_METER = 285
 // Canvas matches the legacy 1000×1000 SVG.  The PNG rasteriser upscales to
@@ -1526,16 +1510,6 @@ function emitPlanSvg(
     const W = options.width
     const H = options.height
     const cam = buildPlanCameraNew(ctx, W, H)
-    if (DEBUG_GUIDS.has(ctx.guid)) {
-        const origin = ctx.viewFrame.origin
-        const wa = ctx.viewFrame.widthAxis
-        const sample = Math.max(ctx.viewFrame.width * 0.25, 0.1)
-        const pPlus = cam.project(origin[0] + wa[0] * sample, origin[2] + wa[2] * sample)
-        const pMinus = cam.project(origin[0] - wa[0] * sample, origin[2] - wa[2] * sample)
-        // #region agent log
-        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H3',location:'lib/ifclite-renderer.ts:emitPlanSvg',message:'Plan projection handedness check',data:{guid:ctx.guid,expectedAxis:DEBUG_EXPECTED_AXIS[ctx.guid] ?? null,viewWidthAxis:ctx.viewFrame.widthAxis,viewFacing:ctx.viewFrame.facing,plusX:pPlus.sx,minusX:pMinus.sx,isScreenMirrored:pPlus.sx<pMinus.sx,canvasW:W,canvasH:H},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-    }
     // Plan view volume — a 3D AABB derived from door extents, sliced thin
     // in Y at the cut height.  Anything whose bbox INTERSECTS this volume
     // is rendered.  Vertical (Y) slice is tight at cutY so floor/ceiling
@@ -1578,11 +1552,6 @@ function emitPlanSvg(
                 ? ctx.viewFrame.origin[2] + frontPadMeters
                 : ctx.viewFrame.origin[2] + halfCanvasWMeters,
         ],
-    }
-    if (DEBUG_GUIDS.has(ctx.guid)) {
-        // #region agent log
-        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H9',location:'lib/ifclite-renderer.ts:emitPlanSvg',message:'Plan camera and crop context',data:{guid:ctx.guid,expectedAxis:DEBUG_EXPECTED_AXIS[ctx.guid] ?? null,isXAlignedDoor,viewWidthAxis:ctx.viewFrame.widthAxis,viewFacing:ctx.viewFrame.facing,doorOrigin:ctx.viewFrame.origin,planVolume,doorScreenY,planClipMinY,planClipMaxY,hostWallId:ctx.hostWall?.expressId ?? null,hostWallBBox:ctx.hostWall?.bbox ?? null},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
     }
     const intersectsPlanVolume = (b: AABB): boolean =>
         b.max[1] >= planVolume.min[1]
@@ -1884,11 +1853,6 @@ function emitPlanSvg(
                     effectiveHingeSide = op.hingeSide === 'left' ? 'right' : 'left'
                 }
             }
-            if (DEBUG_GUIDS.has(ctx.guid)) {
-                // #region agent log
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H4',location:'lib/ifclite-renderer.ts:emitPlanSvg',message:'Hinge mirror decision inputs',data:{guid:ctx.guid,expectedAxis:DEBUG_EXPECTED_AXIS[ctx.guid] ?? null,operationType:ctx.operationType,parsedHingeSide:op.hingeSide,effectiveHingeSide,placementYAxis:py,facing,dotCurrent,facingDotPlacement,widthIsZAligned,shouldSwapHinge,widthAxis:widthAxis2,openAxis:cam.openAxis},timestamp:Date.now()})}).catch(()=>{});
-                // #endregion
-            }
             // Base rule: sweep sign follows the door-width orientation family.
             // - width mainly on X: use legacy sign (dot>0 => upward in screen)
             // - width mainly on Z: inverted sign (dot>0 => downward in screen)
@@ -1896,11 +1860,6 @@ function emitPlanSvg(
             const sweepSign = dotCurrent != null
                 ? (widthIsZAligned ? (dotCurrent > 0 ? 1 : -1) : (dotCurrent > 0 ? -1 : 1))
                 : 1
-            if (DEBUG_GUIDS.has(ctx.guid)) {
-                // #region agent log
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H5',location:'lib/ifclite-renderer.ts:emitPlanSvg',message:'Sweep sign decision',data:{guid:ctx.guid,expectedAxis:DEBUG_EXPECTED_AXIS[ctx.guid] ?? null,isSideFixedOp,widthIsZAligned,dotCurrent,sweepSign,faceThickness:ctx.viewFrame.thickness,clearWidth:ctx.cset.massDurchgangsbreite ?? null},timestamp:Date.now()})}).catch(()=>{});
-                // #endregion
-            }
             const openAxis2 = cam.openAxis       // +facing → screen-down (room arc opens into)
             const frameW = ctx.viewFrame.width
             const clearW = (ctx.cset.massDurchgangsbreite != null && ctx.cset.massDurchgangsbreite > 0.05)
@@ -1945,12 +1904,6 @@ function emitPlanSvg(
                 const tipZ = pivotZ + tipDirZ * leafW
                 const hingeS = projP({ x: pivotX, z: pivotZ })
                 const tipS = projP({ x: tipX, z: tipZ })
-                if (DEBUG_GUIDS.has(ctx.guid)) {
-                    const doorCenterS = projP({ x: ctx.viewFrame.origin[0], z: ctx.viewFrame.origin[2] })
-                    // #region agent log
-                    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H12',location:'lib/ifclite-renderer.ts:emitPlanSvg/drawLeaf',message:'Rendered hinge anchor side in screen space',data:{guid:ctx.guid,expectedAxis:DEBUG_EXPECTED_AXIS[ctx.guid] ?? null,hingeSide,hingeOff,leafW,hingeScreen:{x:hingeS.x,y:hingeS.y},tipScreen:{x:tipS.x,y:tipS.y},doorCenterScreen:{x:doorCenterS.x,y:doorCenterS.y},hingeIsScreenLeft:hingeS.x<doorCenterS.x,lineDx:tipS.x-hingeS.x,lineDy:tipS.y-hingeS.y},timestamp:Date.now()})}).catch(()=>{});
-                    // #endregion
-                }
                 segs.push({ x1: hingeS.x, y1: hingeS.y, x2: tipS.x, y2: tipS.y, layer: 7, color: '#666666' })
             }
             const halfClear = clearW / 2
@@ -1973,18 +1926,8 @@ function emitPlanSvg(
                 // when OperationType label and real leaf placement disagree).
                 const inferredFromLeafCenter: 'left' | 'right' = leafCentreOffset < 0 ? 'left' : 'right'
                 if (effectiveHingeSide !== inferredFromLeafCenter) {
-                    if (DEBUG_GUIDS.has(ctx.guid)) {
-                        // #region agent log
-                        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H14',location:'lib/ifclite-renderer.ts:emitPlanSvg',message:'Override side-fixed hinge by leaf center',data:{guid:ctx.guid,expectedAxis:DEBUG_EXPECTED_AXIS[ctx.guid] ?? null,operationType:ctx.operationType,previousHingeSide:effectiveHingeSide,inferredFromLeafCenter,leafCentreOffset,clearW},timestamp:Date.now()})}).catch(()=>{});
-                        // #endregion
-                    }
                     effectiveHingeSide = inferredFromLeafCenter
                 }
-            }
-            if (DEBUG_GUIDS.has(ctx.guid)) {
-                // #region agent log
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H13',location:'lib/ifclite-renderer.ts:emitPlanSvg',message:'Leaf center offset used for swing anchor',data:{guid:ctx.guid,expectedAxis:DEBUG_EXPECTED_AXIS[ctx.guid] ?? null,clearW,frameW,leafCentreOffset,effectiveHingeSide},timestamp:Date.now()})}).catch(()=>{});
-                // #endregion
             }
             if (effectiveHingeSide === 'both') {
                 drawLeaf('left', halfClear, leafCentreOffset - halfClear)

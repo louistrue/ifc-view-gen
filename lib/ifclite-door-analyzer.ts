@@ -23,13 +23,6 @@
  */
 import type { IfcLiteMesh, IfcLiteModel } from './ifclite-source'
 import { readDoorPlacementYAxis } from './ifclite-placement'
-const DEBUG_GUIDS: ReadonlySet<string> = new Set([
-    '00aWpxa_nMJugVbA_gUV4',
-    '1mRZBdiTM$IuoH2sbb2zBQ',
-    '3AweLhpG7eIeBpUEeWKmNf',
-    '3jw6gOgAfSHxkdx8yO58yl',
-    '08v$5$g4ScGA26DW5Jh6Mz',
-])
 
 export interface AABB {
     min: [number, number, number]
@@ -250,7 +243,6 @@ function buildDoorViewFrame(
         width = ext[2]
         thickness = ext[0]
     }
-    let facingFlippedByPlacement = false
     if (placementYAxis) {
         // Map IFC local +Y (XY in IFC world) to renderer XZ and use it to lock
         // the sign of plan facing so 90° doors do not get canonicalized to the
@@ -264,16 +256,12 @@ function buildDoorViewFrame(
             const facingDotPlacement = pnx * facing[0] + pnz * facing[2]
             if (facingDotPlacement < 0) {
                 facing = [-facing[0], 0, -facing[2]]
-                facingFlippedByPlacement = true
             }
             // Keep a consistent right-handed local frame when facing flips.
             widthAxis = [facing[2], 0, -facing[0]]
         }
     }
     const height = ext[1]
-    // #region agent log
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H1',location:'lib/ifclite-door-analyzer.ts:buildDoorViewFrame',message:'Axis canonicalization from bbox extents',data:{extX:ext[0],extY:ext[1],extZ:ext[2],branch:ext[0]>=ext[2]?'X-width':'Z-width',placementYAxis,facingFlippedByPlacement,widthAxis,facing,width,thickness},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     // Origin: bottom centre of door bbox in plan, Y at bbox bottom.
     const origin: [number, number, number] = [centre[0], bbox.min[1], centre[2]]
     return {
@@ -366,7 +354,8 @@ function findHostWallByBBox(
 function findSlabsAroundDoor(
     model: IfcLiteModel,
     doorBbox: AABB,
-    slabIndex: ReturnType<typeof buildPlanIndex>
+    slabIndex: ReturnType<typeof buildPlanIndex>,
+    buildingPartIndex: ReturnType<typeof buildPlanIndex>
 ): {
     below: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB } | null
     above: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB } | null
@@ -381,24 +370,39 @@ function findSlabsAroundDoor(
     const yTop = doorBbox.max[1]
     // Use a generous plan radius — 2 m covers most door-adjacent floor stacks
     // including separate Unterlagsboden / screed slab tiles.
-    const candidates = queryPlanIndex(slabIndex, centre, 2.0)
+    const slabCandidates = queryPlanIndex(slabIndex, centre, 2.0)
+    const partCandidates = queryPlanIndex(buildingPartIndex, centre, 2.0)
+    const candidates = [...slabCandidates]
+    for (const cand of partCandidates) {
+        if (candidates.some((c) => c.expressId === cand.expressId)) continue
+        candidates.push(cand)
+    }
     let below: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; gap: number } | null = null
     let above: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; gap: number } | null = null
     const belowAll: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; gap: number }> = []
     const aboveAll: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; gap: number }> = []
+    // Numerical tolerance so near-threshold meshes don't flap due to floating
+    // point noise from IFC tessellation/RTC transforms.
+    const GAP_EPS = 1e-6
+    const BELOW_MIN_GAP = -0.15
+    const BELOW_MAX_GAP = 0.50
+    const ABOVE_MIN_GAP = -0.30
+    const ABOVE_MAX_GAP = 1.80
+    const inRange = (v: number, lo: number, hi: number) =>
+        v >= lo - GAP_EPS && v <= hi + GAP_EPS
     for (const cand of candidates) {
         const gapBelow = yBottom - cand.bbox.max[1]
-        // Allow up to 1 m gap so we capture both the structural slab buried
-        // under Unterlagsboden and the build-up tiles themselves.  Negative
-        // overlap up to 0.30 m so a slab whose top intrudes into the door
-        // bottom (raised threshold) still registers.
-        if (gapBelow > -0.30 && gapBelow < 1.0) {
+        // Accept slab tops in a narrow intrusion band above door bottom and a
+        // wider band below it:
+        //   gapBelow ∈ [-0.15, 0.50]
+        // This maps to slabTop in [doorBottom + 0.15, doorBottom - 0.50].
+        if (inRange(gapBelow, BELOW_MIN_GAP, BELOW_MAX_GAP)) {
             const entry = { expressId: cand.expressId, meshes: cand.meshes, bbox: cand.bbox, gap: gapBelow }
             belowAll.push(entry)
             if (!below || gapBelow < below.gap) below = entry
         }
         const gapAbove = cand.bbox.min[1] - yTop
-        if (gapAbove > -0.30 && gapAbove < 1.8) {
+        if (inRange(gapAbove, ABOVE_MIN_GAP, ABOVE_MAX_GAP)) {
             const entry = { expressId: cand.expressId, meshes: cand.meshes, bbox: cand.bbox, gap: gapAbove }
             aboveAll.push(entry)
             if (!above || gapAbove < above.gap) above = entry
@@ -590,12 +594,6 @@ export function analyzeDoor(
     const storey = model.storeyOf(doorId)
     const placementYAxis = readDoorPlacementYAxis(model.parserMod, model.store, doorId)
     const viewFrame = buildDoorViewFrame(bbox, placementYAxis)
-    if (DEBUG_GUIDS.has(guid)) {
-        const dotPlacementFacing = placementYAxis ? placementYAxis[0] * viewFrame.facing[0] + placementYAxis[1] * viewFrame.facing[2] : null
-        // #region agent log
-        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H2',location:'lib/ifclite-door-analyzer.ts:analyzeDoor',message:'Target door frame vs IFC placement axis',data:{guid,doorId,viewFacing:viewFrame.facing,viewWidthAxis:viewFrame.widthAxis,placementYAxis,dotPlacementFacing,bboxMin:bbox.min,bboxMax:bbox.max},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-    }
 
     const relationHostWallId = findHostWallExpressId(model, doorId)
     const bboxFallbackHostWallId = findHostWallByBBox(model, bbox, caches.wallIndex, viewFrame)
@@ -612,24 +610,7 @@ export function analyzeDoor(
         }
     }
 
-    const slabs = findSlabsAroundDoor(model, bbox, caches.slabIndex)
-    if (DEBUG_GUIDS.has(guid)) {
-        const planGap = (a: AABB, b: AABB): number => {
-            const dx = Math.max(0, b.min[0] - a.max[0], a.min[0] - b.max[0])
-            const dz = Math.max(0, b.min[2] - a.max[2], a.min[2] - b.max[2])
-            return Math.hypot(dx, dz)
-        }
-        const relationHostMeshes = relationHostWallId != null ? model.meshesByExpressId.get(relationHostWallId) : null
-        const relationHostBBox = relationHostMeshes && relationHostMeshes.length > 0 ? bboxOfMeshes(relationHostMeshes) : null
-        const fallbackHostMeshes = bboxFallbackHostWallId != null ? model.meshesByExpressId.get(bboxFallbackHostWallId) : null
-        const fallbackHostBBox = fallbackHostMeshes && fallbackHostMeshes.length > 0 ? bboxOfMeshes(fallbackHostMeshes) : null
-        // #region agent log
-        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H10',location:'lib/ifclite-door-analyzer.ts:analyzeDoor',message:'Target host/slab resolution context',data:{guid,doorId,hostWallId:hostWall?.expressId ?? null,hostWallBBox:hostWall?.bbox ?? null,slabBelowId:slabs.below?.expressId ?? null,slabAboveId:slabs.above?.expressId ?? null},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-        // #region agent log
-        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H11',location:'lib/ifclite-door-analyzer.ts:analyzeDoor',message:'Host wall source comparison',data:{guid,doorId,relationHostWallId,bboxFallbackHostWallId,chosenHostWallId:hostWallId,relationPlanGap:relationHostBBox?planGap(relationHostBBox,bbox):null,fallbackPlanGap:fallbackHostBBox?planGap(fallbackHostBBox,bbox):null,relationHostBBox,fallbackHostBBox},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-    }
+    const slabs = findSlabsAroundDoor(model, bbox, caches.slabIndex, caches.buildingPartIndex)
     const centre = bboxCentre(bbox)
 
     const collectParts = (slabId: number | null | undefined): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> => {
