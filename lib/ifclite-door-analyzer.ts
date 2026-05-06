@@ -57,11 +57,11 @@ export interface DoorContextLite {
     /** IfcBuildingElementPart children of slabBelow (Unterlagsboden / floor
      *  build-up).  Rendered as separate bands on top of the structural slab
      *  in elevation views. */
-    slabBelowParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
+    slabBelowParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
     /** Same for slabAbove (suspended ceiling / build-up under the slab). */
-    slabAboveParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
+    slabAboveParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
 
-    nearbyWalls: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
+    nearbyWalls: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
     nearbyDoors: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; cfcBkp: string | null }>
     nearbyWindows: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
     nearbyDevices: Array<{
@@ -114,6 +114,20 @@ const DEFAULT_OPTS: Required<AnalyzeOptions> = {
 // as a floor for device candidate collection so plan always sees clip-plane
 // context, while elevation-specific clipping is handled later in rendering.
 const PLAN_CUT_HEIGHT_METERS = 1.85
+const DEBUG_TARGET_DOOR_GUID = ''
+const DEBUG_TARGET_ELEMENT_GUIDS: readonly string[] = []
+
+function debugLogIfclite(
+    _payload: {
+        runId: string
+        hypothesisId: string
+        location: string
+        message: string
+        data: Record<string, unknown>
+    }
+) {
+    // instrumentation removed
+}
 
 function bboxOfMeshes(meshes: IfcLiteMesh[]): AABB | null {
     let minX = +Infinity, minY = +Infinity, minZ = +Infinity
@@ -612,10 +626,12 @@ export function analyzeDoor(
 
     const slabs = findSlabsAroundDoor(model, bbox, caches.slabIndex, caches.buildingPartIndex)
     const centre = bboxCentre(bbox)
+    const debugEnabled = guid === DEBUG_TARGET_DOOR_GUID
+    const runId = process.env.DEBUG_RUN_ID ?? 'run-1'
 
-    const collectParts = (slabId: number | null | undefined): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> => {
+    const collectParts = (slabId: number | null | undefined): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }> => {
         if (slabId == null) return []
-        const out: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> = []
+        const out: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }> = []
         for (const childId of model.aggregatedChildren(slabId)) {
             const childType = (model.typeOf(childId) ?? '').toUpperCase()
             if (childType !== 'IFCBUILDINGELEMENTPART') continue
@@ -623,7 +639,7 @@ export function analyzeDoor(
             if (!meshes || meshes.length === 0) continue
             const partBbox = bboxOfMeshes(meshes)
             if (!partBbox) continue
-            out.push({ expressId: childId, meshes, bbox: partBbox })
+            out.push({ expressId: childId, meshes, bbox: partBbox, guid: model.attrs(childId)?.globalId ?? null })
         }
         return out
     }
@@ -647,15 +663,41 @@ export function analyzeDoor(
         yLo: number,
         yHi: number,
         radius: number,
-    ): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> => {
-        const out: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> = []
+    ): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }> => {
+        const out: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }> = []
         for (const cand of queryPlanIndex(index, centre, radius)) {
-            // bbox vertical mid-point in target band — accommodates very thin
-            // sheets (5 mm finishes) whose top + bottom both round to the
-            // boundary.
+            const candGuid = model.attrs(cand.expressId)?.globalId ?? null
+            // Use overlap instead of midpoint so thin layers touching the band
+            // edge are still collected (e.g. 00GW... around -0.60/-0.55).
             const yMid = (cand.bbox.min[1] + cand.bbox.max[1]) / 2
-            if (yMid < yLo - 0.005 || yMid > yHi + 0.005) continue
-            out.push({ expressId: cand.expressId, meshes: cand.meshes, bbox: cand.bbox })
+            const yPass = cand.bbox.max[1] >= yLo - 0.005 && cand.bbox.min[1] <= yHi + 0.005
+            if (debugEnabled && candGuid) {
+                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(candGuid) || targetNorms.has(candGuid.replace(/\$/g, '_'))
+                if (isTarget) {
+                    // #region agent log H17
+                    debugLogIfclite({
+                        runId,
+                        hypothesisId: 'H17',
+                        location: 'lib/ifclite-door-analyzer.ts:collectBuildupParts',
+                        message: 'target buildup candidate gate',
+                        data: {
+                            doorGuid: guid,
+                            targetGuid: candGuid,
+                            expressId: cand.expressId,
+                            yLo,
+                            yHi,
+                            yMid,
+                            yPass,
+                            bbox: cand.bbox,
+                            radius,
+                        },
+                    })
+                    // #endregion
+                }
+            }
+            if (!yPass) continue
+            out.push({ expressId: cand.expressId, meshes: cand.meshes, bbox: cand.bbox, guid: model.attrs(cand.expressId)?.globalId ?? null })
         }
         return out
     }
@@ -663,26 +705,35 @@ export function analyzeDoor(
     const belowYLo = slabs.below ? slabs.below.bbox.max[1] - 0.01 : bbox.min[1] - 0.50
     const belowYHi = bbox.min[1] + 0.05
     const belowBuildup = [
-        ...collectBuildupParts(caches.buildingPartIndex, belowYLo, belowYHi, 1.5),
-        ...collectBuildupParts(caches.coveringIndex, belowYLo, belowYHi, 1.5),
+        ...collectBuildupParts(caches.buildingPartIndex, belowYLo, belowYHi, 1.6),
+        ...collectBuildupParts(caches.coveringIndex, belowYLo, belowYHi, 1.6),
     ]
     // Above stack: door head → slab-above bottom (suspended ceiling, finish).
-    const aboveYLo = bbox.max[1] - 0.05
+    // Include ceiling build-up layers that can sit up to ~30 cm below door head.
+    // This captures thin suspended layers like 00GW... that were previously
+    // excluded by the narrow -0.05 m band.
+    const aboveYLo = bbox.max[1] - 0.30
     const aboveYHi = slabs.above ? slabs.above.bbox.min[1] + 0.01 : bbox.max[1] + 1.5
     const aboveBuildup = [
-        ...collectBuildupParts(caches.buildingPartIndex, aboveYLo, aboveYHi, 1.5),
-        ...collectBuildupParts(caches.coveringIndex, aboveYLo, aboveYHi, 1.5),
+        ...collectBuildupParts(caches.buildingPartIndex, aboveYLo, aboveYHi, 1.6),
+        ...collectBuildupParts(caches.coveringIndex, aboveYLo, aboveYHi, 1.6),
     ]
     const slabBelowParts = [
         ...aggParts(slabs.below?.expressId),
         ...slabs.belowExtras,
         ...belowBuildup,
-    ]
+    ].map((p) => ({
+        ...p,
+        guid: (typeof (p as { guid?: unknown }).guid === 'string' ? (p as { guid?: string }).guid : null) ?? model.attrs(p.expressId)?.globalId ?? null,
+    }))
     const slabAboveParts = [
         ...aggParts(slabs.above?.expressId),
         ...slabs.aboveExtras,
         ...aboveBuildup,
-    ]
+    ].map((p) => ({
+        ...p,
+        guid: (typeof (p as { guid?: unknown }).guid === 'string' ? (p as { guid?: string }).guid : null) ?? model.attrs(p.expressId)?.globalId ?? null,
+    }))
     if (process.env.DEBUG_PARTS === '1') {
         console.log(`[parts] door=${doorId} slabBelow=${slabs.below?.expressId ?? 'none'} top=${slabs.below?.bbox.max[1].toFixed(3) ?? 'none'} doorBottom=${bbox.min[1].toFixed(3)} belowParts=${slabBelowParts.length} (extras=${slabs.belowExtras.length} buildup=${belowBuildup.length}) slabAbove=${slabs.above?.expressId ?? 'none'} aboveBot=${slabs.above?.bbox.min[1].toFixed(3) ?? 'none'} doorTop=${bbox.max[1].toFixed(3)} aboveParts=${slabAboveParts.length}`)
         for (const p of belowBuildup) {
@@ -726,12 +777,22 @@ export function analyzeDoor(
     const nearbyWallsFromWallTypes = queryPlanIndex(caches.wallIndex, centre, radius)
         .filter((c) => c.expressId !== hostWallId)
         .filter(filterY)
-        .map((c) => ({ expressId: c.expressId, meshes: c.meshes, bbox: c.bbox }))
+        .map((c) => ({
+            expressId: c.expressId,
+            meshes: c.meshes,
+            bbox: c.bbox,
+            guid: model.attrs(c.expressId)?.globalId ?? null,
+        }))
     const nearbyWallsFromWallLikeParts = queryPlanIndex(caches.buildingPartIndex, centre, radius)
         .filter((c) => c.expressId !== hostWallId)
         .filter(filterY)
         .filter(isWallLikeBuildingPart)
-        .map((c) => ({ expressId: c.expressId, meshes: c.meshes, bbox: c.bbox }))
+        .map((c) => ({
+            expressId: c.expressId,
+            meshes: c.meshes,
+            bbox: c.bbox,
+            guid: model.attrs(c.expressId)?.globalId ?? null,
+        }))
     const nearbyWalls = [...nearbyWallsFromWallTypes]
     for (const part of nearbyWallsFromWallLikeParts) {
         if (nearbyWalls.some((w) => w.expressId === part.expressId)) continue
@@ -768,6 +829,195 @@ export function analyzeDoor(
                     modelTag: 'elec',
                 })
             }
+        }
+    }
+
+    if (debugEnabled) {
+        const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+        const modelTargetHits: Array<{ ifcType: string; expressId: number; guid: string | null; bbox: AABB | null }> = []
+        const searchTypes = ['IFCWALL', 'IFCWALLSTANDARDCASE', 'IFCBUILDINGELEMENTPART', 'IFCSLAB', 'IFCCOVERING', 'IFCDOOR', 'IFCWINDOW']
+        for (const ifcType of searchTypes) {
+            for (const id of model.byType(ifcType)) {
+                const g = model.attrs(id)?.globalId ?? null
+                if (!g) continue
+                if (!DEBUG_TARGET_ELEMENT_GUIDS.includes(g) && !targetNorms.has(g.replace(/\$/g, '_'))) continue
+                const m = model.meshesByExpressId.get(id) ?? []
+                const bb = m.length > 0 ? bboxOfMeshes(m) : null
+                modelTargetHits.push({ ifcType, expressId: id, guid: g, bbox: bb })
+            }
+        }
+        // #region agent log H1
+        debugLogIfclite({
+            runId,
+            hypothesisId: 'H1',
+            location: 'lib/ifclite-door-analyzer.ts:analyzeDoor',
+            message: 'target guid global search in model',
+            data: {
+                doorGuid: guid,
+                targetGuids: DEBUG_TARGET_ELEMENT_GUIDS,
+                hitCount: modelTargetHits.length,
+                hits: modelTargetHits,
+            },
+        })
+        // #endregion
+
+        const probe = (
+            label: string,
+            candidates: Array<{ expressId: number; bbox: AABB }>
+        ) => {
+            for (const c of candidates) {
+                const a = model.attrs(c.expressId)
+                const cGuid = a?.globalId ?? null
+                if (!cGuid) continue
+                if (!DEBUG_TARGET_ELEMENT_GUIDS.includes(cGuid) && !targetNorms.has(cGuid.replace(/\$/g, '_'))) continue
+                const dist = planDistanceToBox(c.bbox, centre)
+                const yPass = filterY(c)
+                debugLogIfclite({
+                    runId,
+                    hypothesisId: 'H1-H2-H3',
+                    location: 'lib/ifclite-door-analyzer.ts:analyzeDoor',
+                    message: 'target element candidate observed in bucket',
+                    data: {
+                        doorGuid: guid,
+                        targetGuid: cGuid,
+                        bucket: label,
+                        expressId: c.expressId,
+                        planDistance: dist,
+                        radius,
+                        yPass,
+                        candYMin: c.bbox.min[1],
+                        candYMax: c.bbox.max[1],
+                        doorYMin: bbox.min[1],
+                        doorYMax: bbox.max[1],
+                    },
+                })
+            }
+        }
+        const probeList = (
+            label: string,
+            candidates: Array<{ expressId: number }>
+        ) => {
+            for (const c of candidates) {
+                const a = model.attrs(c.expressId)
+                const cGuid = a?.globalId ?? null
+                if (!cGuid) continue
+                if (!DEBUG_TARGET_ELEMENT_GUIDS.includes(cGuid) && !targetNorms.has(cGuid.replace(/\$/g, '_'))) continue
+                debugLogIfclite({
+                    runId,
+                    hypothesisId: 'H4',
+                    location: 'lib/ifclite-door-analyzer.ts:analyzeDoor',
+                    message: 'target element survived into final list',
+                    data: {
+                        doorGuid: guid,
+                        targetGuid: cGuid,
+                        finalList: label,
+                        expressId: c.expressId,
+                    },
+                })
+            }
+        }
+        probe('wallIndex(raw)', queryPlanIndex(caches.wallIndex, centre, radius))
+        probe('buildingPartIndex(raw)', queryPlanIndex(caches.buildingPartIndex, centre, radius))
+        probe('doorIndex(raw)', queryPlanIndex(caches.doorIndex, centre, radius))
+        probe('windowIndex(raw)', queryPlanIndex(caches.windowIndex, centre, radius))
+        probeList('nearbyWalls', nearbyWalls)
+        probeList('nearbyDoors', nearbyDoors)
+        probeList('nearbyWindows', nearbyWindows)
+        if (hostWall) {
+            const hostAttrs = model.attrs(hostWall.expressId)
+            const hostGuid = hostAttrs?.globalId ?? null
+            if (hostGuid && (DEBUG_TARGET_ELEMENT_GUIDS.includes(hostGuid) || targetNorms.has(hostGuid.replace(/\$/g, '_')))) {
+                debugLogIfclite({
+                    runId,
+                    hypothesisId: 'H5',
+                    location: 'lib/ifclite-door-analyzer.ts:analyzeDoor',
+                    message: 'target element is host wall',
+                    data: {
+                        doorGuid: guid,
+                        targetGuid: hostGuid,
+                        hostWallExpressId: hostWall.expressId,
+                        relationHostWallId,
+                        bboxFallbackHostWallId,
+                    },
+                })
+            }
+        }
+        debugLogIfclite({
+            runId,
+            hypothesisId: 'H4-H5',
+            location: 'lib/ifclite-door-analyzer.ts:analyzeDoor',
+            message: 'door-level summary for target visibility',
+            data: {
+                doorGuid: guid,
+                targetGuids: DEBUG_TARGET_ELEMENT_GUIDS,
+                hostWallId: hostWall?.expressId ?? null,
+                hostWallGuid: hostWall ? (model.attrs(hostWall.expressId)?.globalId ?? null) : null,
+                nearbyWallsCount: nearbyWalls.length,
+                nearbyWalls: nearbyWalls.map((w) => ({
+                    expressId: w.expressId,
+                    guid: model.attrs(w.expressId)?.globalId ?? null,
+                    bbox: w.bbox,
+                })),
+                nearbyDoorsCount: nearbyDoors.length,
+                nearbyWindowsCount: nearbyWindows.length,
+                nearbyDevicesCount: nearbyDevices.length,
+            },
+        })
+        const targetNormParts = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+        const matchGuid = (g: string | null | undefined) =>
+            !!g && (DEBUG_TARGET_ELEMENT_GUIDS.includes(g) || targetNormParts.has(g.replace(/\$/g, '_')))
+        const belowMatch = slabBelowParts
+            .map((p) => ({ part: p, guid: model.attrs(p.expressId)?.globalId ?? null }))
+            .filter((x) => matchGuid(x.guid))
+            .map((x) => ({ expressId: x.part.expressId, guid: x.guid, yMin: x.part.bbox.min[1], yMax: x.part.bbox.max[1] }))
+        const aboveMatch = slabAboveParts
+            .map((p) => ({ part: p, guid: model.attrs(p.expressId)?.globalId ?? null }))
+            .filter((x) => matchGuid(x.guid))
+            .map((x) => ({ expressId: x.part.expressId, guid: x.guid, yMin: x.part.bbox.min[1], yMax: x.part.bbox.max[1] }))
+        debugLogIfclite({
+            runId,
+            hypothesisId: 'H6',
+            location: 'lib/ifclite-door-analyzer.ts:analyzeDoor',
+            message: 'target part presence in slab build-up lists',
+            data: {
+                doorGuid: guid,
+                targetGuids: DEBUG_TARGET_ELEMENT_GUIDS,
+                belowMatch,
+                aboveMatch,
+                belowTotal: slabBelowParts.length,
+                aboveTotal: slabAboveParts.length,
+            },
+        })
+        for (const hit of modelTargetHits) {
+            const inNearbyWalls = nearbyWalls.some((w) => w.expressId === hit.expressId)
+            const inSlabBelowParts = slabBelowParts.some((p) => p.expressId === hit.expressId)
+            const inSlabAboveParts = slabAboveParts.some((p) => p.expressId === hit.expressId)
+            const bb = hit.bbox
+            const planDistance = bb ? planDistanceToBox(bb, centre) : null
+            const yPass = bb ? filterY({ bbox: bb }) : null
+            const wallLike = bb ? isWallLikeBuildingPart({ bbox: bb }) : null
+            // #region agent log H11
+            debugLogIfclite({
+                runId,
+                hypothesisId: 'H11',
+                location: 'lib/ifclite-door-analyzer.ts:analyzeDoor',
+                message: 'target membership across final analyzer buckets',
+                data: {
+                    doorGuid: guid,
+                    targetGuid: hit.guid,
+                    expressId: hit.expressId,
+                    ifcType: hit.ifcType,
+                    planDistance,
+                    radius,
+                    yPass,
+                    wallLike,
+                    inNearbyWalls,
+                    inSlabBelowParts,
+                    inSlabAboveParts,
+                    bbox: bb,
+                },
+            })
+            // #endregion
         }
     }
 

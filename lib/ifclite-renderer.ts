@@ -47,6 +47,19 @@ import type { AABB, DoorContextLite, DoorViewFrame } from './ifclite-door-analyz
 import type { IfcLiteMesh } from './ifclite-source'
 
 const COLORS = loadRenderColors()
+const DEBUG_TARGET_DOOR_GUID = ''
+const DEBUG_TARGET_ELEMENT_GUIDS: readonly string[] = []
+const NO_FALLBACK_PART_GUIDS: readonly string[] = [
+    '3HuvnrKbA$kTf3k1qPn15K',
+]
+
+function debugLogRenderer(_payload: {
+    runId: string
+    hypothesisId: string
+    location: string
+    message: string
+    data: Record<string, unknown>
+}) {}
 
 export const FIXED_PX_PER_METER = 285
 // Canvas matches the legacy 1000×1000 SVG.  The PNG rasteriser upscales to
@@ -201,6 +214,9 @@ function classifyMesh(
     }
     const nearbyDoor = ctx.nearbyDoors.find((d) => d.expressId === id)
     if (nearbyDoor) {
+        if (elevationView && isLikelyGlazingPanelMesh(mesh)) {
+            return { fill: colors.elevation.glass, fillOpacity: 0.32, layer: 5, role: 'nearby-door' }
+        }
         // Adjacent doors color by their OWN BKP in elevation (so a metal
         // door reads metal, a wood door reads wood, regardless of focal
         // door's BKP).  Plan keeps context color by default, but CFC 2731
@@ -232,7 +248,17 @@ function isLikelyGlazingPanelMesh(mesh: IfcLiteMesh): boolean {
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
     }
     const extents = [maxX - minX, maxY - minY, maxZ - minZ]
-    return Math.min(...extents) <= 0.005
+    const minExtent = Math.min(...extents)
+    // Strict geometric check (legacy behaviour): true thin sheet in one axis.
+    if (minExtent <= 0.005) return true
+    // Some context-door exports flatten glass/material assignments so the pane
+    // is slightly thicker than 5 mm, but still carries transparent material.
+    // Use alpha as a fallback to keep focal + nearby door glazing logic aligned.
+    const alpha = mesh.color?.[3]
+    if (typeof alpha === 'number' && Number.isFinite(alpha) && alpha < 0.98) {
+        return minExtent <= 0.06
+    }
+    return false
 }
 
 /** Build a list of all meshes the elevation view should consider — for the
@@ -501,6 +527,149 @@ interface PixelClipRect {
     maxY: number
 }
 
+type Vec3 = { x: number; y: number; z: number }
+
+function clipPolygonAgainstPlane(
+    poly: Vec3[],
+    inside: (p: Vec3) => boolean,
+    intersect: (a: Vec3, b: Vec3) => Vec3,
+): Vec3[] {
+    if (poly.length === 0) return poly
+    const out: Vec3[] = []
+    let prev = poly[poly.length - 1]
+    let prevIn = inside(prev)
+    for (const cur of poly) {
+        const curIn = inside(cur)
+        if (curIn) {
+            if (!prevIn) out.push(intersect(prev, cur))
+            out.push(cur)
+        } else if (prevIn) {
+            out.push(intersect(prev, cur))
+        }
+        prev = cur
+        prevIn = curIn
+    }
+    return out
+}
+
+function clipPolygonWorld(
+    poly: Vec3[],
+    clip: WorldClip,
+    debugStats?: {
+        rejectWorldClipYMin: number
+        rejectWorldClipYMax: number
+        rejectWorldClipXMin: number
+        rejectWorldClipXMax: number
+        rejectWorldClipZMin: number
+        rejectWorldClipZMax: number
+    },
+): Vec3[] {
+    let p = poly
+    if (clip.yMin != null) {
+        const yMin = clip.yMin
+        const before = p.length
+        p = clipPolygonAgainstPlane(
+            p,
+            (v) => v.y >= yMin,
+            (a, b) => {
+                const t = (yMin - a.y) / (b.y - a.y)
+                return { x: a.x + (b.x - a.x) * t, y: yMin, z: a.z + (b.z - a.z) * t }
+            },
+        )
+        if (debugStats && before > 0 && p.length === 0) debugStats.rejectWorldClipYMin++
+    }
+    if (p.length === 0) return p
+    if (clip.yMax != null) {
+        const yMax = clip.yMax
+        const before = p.length
+        p = clipPolygonAgainstPlane(
+            p,
+            (v) => v.y <= yMax,
+            (a, b) => {
+                const t = (yMax - a.y) / (b.y - a.y)
+                return { x: a.x + (b.x - a.x) * t, y: yMax, z: a.z + (b.z - a.z) * t }
+            },
+        )
+        if (debugStats && before > 0 && p.length === 0) debugStats.rejectWorldClipYMax++
+    }
+    if (p.length === 0) return p
+    if (clip.xMin != null) {
+        const xMin = clip.xMin
+        const before = p.length
+        p = clipPolygonAgainstPlane(
+            p,
+            (v) => v.x >= xMin,
+            (a, b) => {
+                const t = (xMin - a.x) / (b.x - a.x)
+                return { x: xMin, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t }
+            },
+        )
+        if (debugStats && before > 0 && p.length === 0) debugStats.rejectWorldClipXMin++
+    }
+    if (p.length === 0) return p
+    if (clip.xMax != null) {
+        const xMax = clip.xMax
+        const before = p.length
+        p = clipPolygonAgainstPlane(
+            p,
+            (v) => v.x <= xMax,
+            (a, b) => {
+                const t = (xMax - a.x) / (b.x - a.x)
+                return { x: xMax, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t }
+            },
+        )
+        if (debugStats && before > 0 && p.length === 0) debugStats.rejectWorldClipXMax++
+    }
+    if (p.length === 0) return p
+    if (clip.zMin != null) {
+        const zMin = clip.zMin
+        const before = p.length
+        p = clipPolygonAgainstPlane(
+            p,
+            (v) => v.z >= zMin,
+            (a, b) => {
+                const t = (zMin - a.z) / (b.z - a.z)
+                return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: zMin }
+            },
+        )
+        if (debugStats && before > 0 && p.length === 0) debugStats.rejectWorldClipZMin++
+    }
+    if (p.length === 0) return p
+    if (clip.zMax != null) {
+        const zMax = clip.zMax
+        const before = p.length
+        p = clipPolygonAgainstPlane(
+            p,
+            (v) => v.z <= zMax,
+            (a, b) => {
+                const t = (zMax - a.z) / (b.z - a.z)
+                return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: zMax }
+            },
+        )
+        if (debugStats && before > 0 && p.length === 0) debugStats.rejectWorldClipZMax++
+    }
+    return p
+}
+
+function polygonViewNormal(poly: Vec3[], cam: CameraSetup): { nx: number; ny: number; nz: number } | null {
+    if (poly.length < 3) return null
+    const toView = (p: Vec3) => new THREE.Vector3(p.x, p.y, p.z).applyMatrix4(cam.worldToView)
+    const a = toView(poly[0])
+    for (let i = 1; i < poly.length - 1; i++) {
+        const b = toView(poly[i])
+        const c = toView(poly[i + 1])
+        const e1 = new THREE.Vector3().subVectors(b, a)
+        const e2 = new THREE.Vector3().subVectors(c, a)
+        const n = new THREE.Vector3().crossVectors(e1, e2)
+        const len = n.length()
+        if (len > 1e-9) {
+            n.multiplyScalar(1 / len)
+            return { nx: n.x, ny: n.y, nz: n.z }
+        }
+    }
+    return null
+}
+
 function projectMeshFill(
     mesh: IfcLiteMesh,
     cam: CameraSetup,
@@ -508,45 +677,160 @@ function projectMeshFill(
     expressId: number,
     clip?: WorldClip,
     pixelClip?: PixelClipRect,
+    debugStats?: {
+        triTotal: number
+        rawTriHorizontal: number
+        rawTriVertical: number
+        rawTriOblique: number
+        rawTriCrossDepth: number
+        rawNormalDominantX: number
+        rawNormalDominantY: number
+        rawNormalDominantZ: number
+        rejectYBelow: number
+        rejectYAbove: number
+        rejectPlanCut: number
+        rejectWorldClip: number
+        rejectWorldClipYMin: number
+        rejectWorldClipYMax: number
+        rejectWorldClipXMin: number
+        rejectWorldClipXMax: number
+        rejectWorldClipZMin: number
+        rejectWorldClipZMax: number
+        rejectPixelClip: number
+        rejectArea: number
+        rejectAreaViewNzNearZero: number
+        rejectAreaViewNzNonZero: number
+        rejectAreaSpanXSmall: number
+        rejectAreaSpanYSmall: number
+        depthBandTouchNearPlane: number
+        depthBandTouchFarPlane: number
+        depthBandStrictInterior: number
+        accepted: number
+    },
 ): ProjectedPolygon[] {
     const triCount = meshTriangleCount(mesh)
+    if (debugStats) debugStats.triTotal += triCount
     const out: ProjectedPolygon[] = []
+    const depthAxis: 'x' | 'z' | null = clip && clip.xMin != null && clip.xMax != null && clip.zMin != null && clip.zMax != null
+        ? ((clip.xMax - clip.xMin) <= (clip.zMax - clip.zMin) ? 'x' : 'z')
+        : null
     for (let t = 0; t < triCount; t++) {
         const [p1, p2, p3] = readMeshTriangle(mesh, t)
+        if (debugStats) {
+            const ux = p2.x - p1.x
+            const uy = p2.y - p1.y
+            const uz = p2.z - p1.z
+            const vx = p3.x - p1.x
+            const vy = p3.y - p1.y
+            const vz = p3.z - p1.z
+            const nx = uy * vz - uz * vy
+            const ny = uz * vx - ux * vz
+            const nz = ux * vy - uy * vx
+            const nLen = Math.hypot(nx, ny, nz)
+            const absNx = nLen > 1e-9 ? Math.abs(nx / nLen) : 0
+            const absNy = nLen > 1e-9 ? Math.abs(ny / nLen) : 1
+            const absNz = nLen > 1e-9 ? Math.abs(nz / nLen) : 0
+            if (absNx >= absNy && absNx >= absNz) debugStats.rawNormalDominantX++
+            else if (absNy >= absNx && absNy >= absNz) debugStats.rawNormalDominantY++
+            else debugStats.rawNormalDominantZ++
+            if (absNy > 0.9) debugStats.rawTriHorizontal++
+            else if (absNy < 0.1) debugStats.rawTriVertical++
+            else debugStats.rawTriOblique++
+            if (depthAxis === 'x') {
+                const triMin = Math.min(p1.x, p2.x, p3.x)
+                const triMax = Math.max(p1.x, p2.x, p3.x)
+                if (clip && clip.xMin != null && clip.xMax != null && triMax >= clip.xMin && triMin <= clip.xMax) {
+                    debugStats.rawTriCrossDepth++
+                    const eps = 1e-4
+                    if (triMin <= clip.xMin + eps) debugStats.depthBandTouchNearPlane++
+                    if (triMax >= clip.xMax - eps) debugStats.depthBandTouchFarPlane++
+                    if (triMin < clip.xMax - eps && triMax > clip.xMin + eps) debugStats.depthBandStrictInterior++
+                }
+            } else if (depthAxis === 'z') {
+                const triMin = Math.min(p1.z, p2.z, p3.z)
+                const triMax = Math.max(p1.z, p2.z, p3.z)
+                if (clip && clip.zMin != null && clip.zMax != null && triMax >= clip.zMin && triMin <= clip.zMax) {
+                    debugStats.rawTriCrossDepth++
+                    const eps = 1e-4
+                    if (triMin <= clip.zMin + eps) debugStats.depthBandTouchNearPlane++
+                    if (triMax >= clip.zMax - eps) debugStats.depthBandTouchFarPlane++
+                    if (triMin < clip.zMax - eps && triMax > clip.zMin + eps) debugStats.depthBandStrictInterior++
+                }
+            }
+        }
+        let poly3d: Vec3[] = [
+            { x: p1.x, y: p1.y, z: p1.z },
+            { x: p2.x, y: p2.y, z: p2.z },
+            { x: p3.x, y: p3.y, z: p3.z },
+        ]
         if (clip) {
-            if (clip.yMin != null && p1.y < clip.yMin && p2.y < clip.yMin && p3.y < clip.yMin) continue
-            if (clip.yMax != null && p1.y > clip.yMax && p2.y > clip.yMax && p3.y > clip.yMax) continue
+            if (clip.yMin != null && p1.y < clip.yMin && p2.y < clip.yMin && p3.y < clip.yMin) {
+                if (debugStats) debugStats.rejectYBelow++
+                continue
+            }
+            if (clip.yMax != null && p1.y > clip.yMax && p2.y > clip.yMax && p3.y > clip.yMax) {
+                if (debugStats) debugStats.rejectYAbove++
+                continue
+            }
             if (clip.planCutY != null) {
                 const triMinY = Math.min(p1.y, p2.y, p3.y)
                 const triMaxY = Math.max(p1.y, p2.y, p3.y)
-                if (clip.planCutY < triMinY || clip.planCutY > triMaxY) continue
+                if (clip.planCutY < triMinY || clip.planCutY > triMaxY) {
+                    if (debugStats) debugStats.rejectPlanCut++
+                    continue
+                }
             }
-            if (clip.xMin != null && p1.x < clip.xMin && p2.x < clip.xMin && p3.x < clip.xMin) continue
-            if (clip.xMax != null && p1.x > clip.xMax && p2.x > clip.xMax && p3.x > clip.xMax) continue
-            if (clip.zMin != null && p1.z < clip.zMin && p2.z < clip.zMin && p3.z < clip.zMin) continue
-            if (clip.zMax != null && p1.z > clip.zMax && p2.z > clip.zMax && p3.z > clip.zMax) continue
+            poly3d = clipPolygonWorld(poly3d, clip, debugStats)
+            if (poly3d.length < 3) {
+                if (debugStats) debugStats.rejectWorldClip++
+                continue
+            }
         }
-        const a = projectPoint(new THREE.Vector3(p1.x, p1.y, p1.z), cam)
-        const b = projectPoint(new THREE.Vector3(p2.x, p2.y, p2.z), cam)
-        const c = projectPoint(new THREE.Vector3(p3.x, p3.y, p3.z), cam)
-        const area2 = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)
-        if (Math.abs(area2) < 0.5) continue
-        let pts: Pt[] = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }, { x: c.x, y: c.y }]
+        const projected = poly3d.map((p) => projectPoint(new THREE.Vector3(p.x, p.y, p.z), cam))
+        let pts: Pt[] = projected.map((p) => ({ x: p.x, y: p.y }))
         if (pixelClip) {
             // Sutherland-Hodgman polygon clip against the storey content rect.
             // Triangles may degenerate to quads/pentagons after clipping but
             // SVG <polygon> handles arbitrary-vertex convex shapes fine.
             pts = clipPolygonRect(pts, pixelClip.minX, pixelClip.minY, pixelClip.maxX, pixelClip.maxY)
-            if (pts.length < 3) continue
+            if (pts.length < 3) {
+                if (debugStats) debugStats.rejectPixelClip++
+                continue
+            }
+        }
+        let area2 = 0
+        for (let i = 0; i < pts.length; i++) {
+            const a = pts[i]
+            const b = pts[(i + 1) % pts.length]
+            area2 += a.x * b.y - b.x * a.y
+        }
+        if (Math.abs(area2) < 0.5) {
+            if (debugStats) {
+                debugStats.rejectArea++
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+                for (const p of pts) {
+                    if (p.x < minX) minX = p.x
+                    if (p.x > maxX) maxX = p.x
+                    if (p.y < minY) minY = p.y
+                    if (p.y > maxY) maxY = p.y
+                }
+                if (Number.isFinite(minX) && Number.isFinite(maxX) && maxX - minX < 0.5) debugStats.rejectAreaSpanXSmall++
+                if (Number.isFinite(minY) && Number.isFinite(maxY) && maxY - minY < 0.5) debugStats.rejectAreaSpanYSmall++
+                const n = polygonViewNormal(poly3d, cam)
+                if (n && Math.abs(n.nz) < 0.05) debugStats.rejectAreaViewNzNearZero++
+                else debugStats.rejectAreaViewNzNonZero++
+            }
+            continue
         }
         out.push({
             points: pts,
             fill: classification.fill,
             fillOpacity: classification.fillOpacity,
-            depth: (a.depth + b.depth + c.depth) / 3,
+            depth: projected.reduce((s, p) => s + p.depth, 0) / projected.length,
             layer: classification.layer,
             expressId,
         })
+        if (debugStats) debugStats.accepted++
     }
     return out
 }
@@ -630,6 +914,88 @@ function clipLine2D(
         x1 + t0 * dx, y1 + t0 * dy,
         x1 + t1 * dx, y1 + t1 * dy,
     ]
+}
+
+function pointsEqual(a: Pt, b: Pt, eps = 0.5): boolean {
+    return Math.abs(a.x - b.x) <= eps && Math.abs(a.y - b.y) <= eps
+}
+
+function polygonSignedArea2(poly: Pt[]): number {
+    if (poly.length < 3) return 0
+    let area2 = 0
+    for (let i = 0; i < poly.length; i++) {
+        const a = poly[i]
+        const b = poly[(i + 1) % poly.length]
+        area2 += a.x * b.y - b.x * a.y
+    }
+    return area2
+}
+
+function convexHull(points: Pt[]): Pt[] {
+    if (points.length <= 2) return points.slice()
+    const pts = points
+        .slice()
+        .sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x))
+    const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+    const lower: Pt[] = []
+    for (const p of pts) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop()
+        lower.push(p)
+    }
+    const upper: Pt[] = []
+    for (let i = pts.length - 1; i >= 0; i--) {
+        const p = pts[i]
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop()
+        upper.push(p)
+    }
+    lower.pop()
+    upper.pop()
+    return [...lower, ...upper]
+}
+
+function segmentClosureDiagnostics(segs: ProjectedSegment[]): {
+    uniquePointCount: number
+    hullPointCount: number
+    hullArea2: number
+    bbox: { minX: number; maxX: number; minY: number; maxY: number; width: number; height: number }
+    sampleSegments: Array<{ x1: number; y1: number; x2: number; y2: number }>
+} {
+    const points: Pt[] = []
+    for (const s of segs) {
+        points.push({ x: s.x1, y: s.y1 })
+        points.push({ x: s.x2, y: s.y2 })
+    }
+    const unique: Pt[] = []
+    for (const p of points) {
+        if (!unique.some((q) => pointsEqual(p, q))) unique.push(p)
+    }
+    const hull = unique.length >= 3 ? convexHull(unique) : []
+    const hullArea2 = Math.abs(polygonSignedArea2(hull))
+    let minX = Infinity
+    let maxX = -Infinity
+    let minY = Infinity
+    let maxY = -Infinity
+    for (const p of unique) {
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+        if (p.y < minY) minY = p.y
+        if (p.y > maxY) maxY = p.y
+    }
+    const sampleSegments = segs.slice(0, 4).map((s) => ({ x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 }))
+    return {
+        uniquePointCount: unique.length,
+        hullPointCount: hull.length,
+        hullArea2,
+        bbox: {
+            minX: Number.isFinite(minX) ? minX : 0,
+            maxX: Number.isFinite(maxX) ? maxX : 0,
+            minY: Number.isFinite(minY) ? minY : 0,
+            maxY: Number.isFinite(maxY) ? maxY : 0,
+            width: Number.isFinite(minX) && Number.isFinite(maxX) ? maxX - minX : 0,
+            height: Number.isFinite(minY) && Number.isFinite(maxY) ? maxY - minY : 0,
+        },
+        sampleSegments,
+    }
 }
 
 function projectMeshSegments(
@@ -721,6 +1087,8 @@ function emitElevationSvg(
     side: 'front' | 'back',
     options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs'>>,
 ): string {
+    const debugEnabled = ctx.guid === DEBUG_TARGET_DOOR_GUID
+    const runId = process.env.DEBUG_RUN_ID ?? 'run-1'
     const W = options.width
     const H = options.height
     const doorBottom = ctx.viewFrame.origin[1]
@@ -764,6 +1132,39 @@ function emitElevationSvg(
     const viewportTopY = doorBottom + topDy
 
     const cam = buildElevationCamera(ctx.viewFrame, side, viewportBottomY, W, H, options.doorFootAnchor)
+    if (debugEnabled) {
+        const norm = (g: string) => g.replace(/\$/g, '_')
+        const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map(norm))
+        const summarizeGuids = (parts: Array<{ guid?: string | null; expressId: number }>) => {
+            const matched: Array<{ guid: string; expressId: number }> = []
+            for (const p of parts) {
+                const guid = p.guid ?? ''
+                if (!guid) continue
+                if (DEBUG_TARGET_ELEMENT_GUIDS.includes(guid) || targetNorms.has(norm(guid))) {
+                    matched.push({ guid, expressId: p.expressId })
+                }
+            }
+            return matched
+        }
+        // #region agent log H18
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H18',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:start',
+            message: 'elevation debug heartbeat',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                slabAbovePartCount: ctx.slabAboveParts.length,
+                slabBelowPartCount: ctx.slabBelowParts.length,
+                nearbyWallCount: ctx.nearbyWalls.length,
+                matchedAboveParts: summarizeGuids(ctx.slabAboveParts),
+                matchedBelowParts: summarizeGuids(ctx.slabBelowParts),
+                matchedNearbyWalls: summarizeGuids(ctx.nearbyWalls),
+            },
+        })
+        // #endregion
+    }
 
     if (process.env.DEBUG_VIEWPORT === '1') {
         console.log(`[viewport ${side}] door=${ctx.guid} doorBottom=${doorBottom.toFixed(3)} structAboveDy=${structAboveDy} structBelowDy=${structBelowDy} bottomDy=${bottomDy.toFixed(3)} topDy=${topDy.toFixed(3)} viewport=[${viewportBottomY.toFixed(3)}, ${viewportTopY.toFixed(3)}]`)
@@ -845,6 +1246,23 @@ function emitElevationSvg(
             elevationClip.xMin = doorFaceX - DEPTH_FAR
             elevationClip.xMax = doorFaceX + FAR_FACE_TOLERANCE_M
         }
+    }
+    if (debugEnabled) {
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H2',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg',
+            message: 'elevation clip bounds for target door',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                isXAligned,
+                elevationClip,
+                doorBbox: ctx.door.bbox,
+                viewOrigin: ctx.viewFrame.origin,
+                facing: ctx.viewFrame.facing,
+            },
+        })
     }
 
     // Pixel rect for Sutherland-Hodgman polygon clipping. Top is the world
@@ -945,7 +1363,59 @@ function emitElevationSvg(
         }
     }
     for (const w of ctx.nearbyWalls) {
-        if (!intersectsElevationVolume(w.bbox)) continue
+        const inBaseVolume = intersectsElevationVolume(w.bbox)
+        const inVolume = inBaseVolume
+        if (debugEnabled) {
+            const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
+            const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSign
+            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+            const wallGuid = w.guid ?? null
+            const isTargetWall = !!wallGuid && (
+                DEBUG_TARGET_ELEMENT_GUIDS.includes(wallGuid)
+                || targetNorms.has(wallGuid.replace(/\$/g, '_'))
+            )
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H3',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
+                message: 'nearby wall depth classification',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    expressId: w.expressId,
+                    guid: w.guid ?? null,
+                    inVolume,
+                    wallBBox: w.bbox,
+                    wallCentreFacing,
+                    doorCenterFacing,
+                    cameraSideOffset,
+                    facingClipMin,
+                    facingClipMax,
+                },
+            })
+            if (isTargetWall) {
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H8',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:targetWall',
+                    message: 'target wall pass/fail detail',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: w.expressId,
+                        guid: wallGuid,
+                        inBaseVolume,
+                        inWallVolume: inVolume,
+                        wallCentreFacing,
+                        facingClipMin,
+                        facingClipMax,
+                        cameraSideOffset,
+                        wallBBox: w.bbox,
+                    },
+                })
+            }
+        }
+        if (!inVolume) continue
         const wbb: AABB = {
             min: [w.bbox.min[0], Math.max(w.bbox.min[1], viewportBottomY), w.bbox.min[2]],
             max: [w.bbox.max[0], Math.min(w.bbox.max[1], viewportTopY), w.bbox.max[2]],
@@ -985,6 +1455,33 @@ function emitElevationSvg(
             }
             if (!onCropEdge(maxSy)) {
                 verticalEdges.push({ x1: minSx, y1: maxSy, x2: maxSx, y2: maxSy, color: options.colors.strokes.outline, depth: 0, layer: wallLayer, width: options.lineWidth })
+            }
+        }
+        if (debugEnabled) {
+            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+            const wallGuid = w.guid ?? null
+            const isTargetWall = !!wallGuid && (
+                DEBUG_TARGET_ELEMENT_GUIDS.includes(wallGuid)
+                || targetNorms.has(wallGuid.replace(/\$/g, '_'))
+            )
+            if (isTargetWall) {
+                // #region agent log H10
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H10',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
+                    message: 'target wall render path',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: w.expressId,
+                        guid: wallGuid,
+                        renderPath: 'bboxRect',
+                        wallLayer,
+                        widthPx,
+                    },
+                })
+                // #endregion
             }
         }
         groups.push({
@@ -1031,6 +1528,226 @@ function emitElevationSvg(
             segments,
         })
     }
+    function drawPartGeometry(
+        part: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null },
+        yLo: number,
+        yHi: number,
+        fill: string,
+        layer: number,
+        addStrokes: boolean,
+        debugLocation: string,
+    ) {
+        const partClip: WorldClip = {
+            yMin: yLo,
+            yMax: yHi,
+            xMin: elevationClip.xMin,
+            xMax: elevationClip.xMax,
+            zMin: elevationClip.zMin,
+            zMax: elevationClip.zMax,
+        }
+        let polyCount = 0
+        let segCount = 0
+        const polysAll: ProjectedPolygon[] = []
+        const segsAll: ProjectedSegment[] = []
+        for (const mesh of part.meshes) {
+            const cls: MeshClassification = { fill, layer, role: 'slab' }
+            const meshStats = {
+                triTotal: 0,
+                rawTriHorizontal: 0,
+                rawTriVertical: 0,
+                rawTriOblique: 0,
+                rawTriCrossDepth: 0,
+                rawNormalDominantX: 0,
+                rawNormalDominantY: 0,
+                rawNormalDominantZ: 0,
+                rejectYBelow: 0,
+                rejectYAbove: 0,
+                rejectPlanCut: 0,
+                rejectWorldClip: 0,
+                rejectWorldClipYMin: 0,
+                rejectWorldClipYMax: 0,
+                rejectWorldClipXMin: 0,
+                rejectWorldClipXMax: 0,
+                rejectWorldClipZMin: 0,
+                rejectWorldClipZMax: 0,
+                rejectPixelClip: 0,
+                rejectArea: 0,
+                rejectAreaViewNzNearZero: 0,
+                rejectAreaViewNzNonZero: 0,
+                rejectAreaSpanXSmall: 0,
+                rejectAreaSpanYSmall: 0,
+                depthBandTouchNearPlane: 0,
+                depthBandTouchFarPlane: 0,
+                depthBandStrictInterior: 0,
+                accepted: 0,
+            }
+            const polys = projectMeshFill(mesh, cam, cls, part.expressId, partClip, pixelClip, meshStats)
+            const segs = addStrokes
+                ? projectMeshSegments(mesh, cam, options.colors.strokes.outline, layer, options.lineWidth, partClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+                : []
+            polyCount += polys.length
+            segCount += segs.length
+            polysAll.push(...polys)
+            segsAll.push(...segs)
+            if (debugEnabled && part.guid) {
+                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
+                if (isTarget) {
+                    // #region agent log H19
+                    debugLogRenderer({
+                        runId,
+                        hypothesisId: 'H19',
+                        location: debugLocation,
+                        message: 'projectMeshFill rejection breakdown',
+                        data: {
+                            doorGuid: ctx.guid,
+                            side,
+                            expressId: part.expressId,
+                            guid: part.guid,
+                            yLo,
+                            yHi,
+                            meshStats,
+                        },
+                    })
+                    // #endregion
+                }
+            }
+        }
+        const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
+        const noFallbackForPart = !!part.guid
+            && (NO_FALLBACK_PART_GUIDS.includes(part.guid) || noFallbackNorms.has(part.guid.replace(/\$/g, '_')))
+        if (noFallbackForPart && polysAll.length === 0) {
+            if (debugEnabled && part.guid) {
+                // #region agent log H23
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H23',
+                    location: debugLocation,
+                    message: 'fallback suppressed for configured no-fallback part',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: part.expressId,
+                        guid: part.guid,
+                        yLo,
+                        yHi,
+                        polyCount,
+                        segCount,
+                    },
+                })
+                // #endregion
+            }
+            return
+        }
+        if (polysAll.length === 0 && segsAll.length === 0) {
+            if (debugEnabled && part.guid) {
+                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
+                if (isTarget) {
+                    // #region agent log H12
+                    debugLogRenderer({
+                        runId,
+                        hypothesisId: 'H12',
+                        location: debugLocation,
+                        message: 'target slab part geometry fully clipped',
+                        data: {
+                            doorGuid: ctx.guid,
+                            side,
+                            expressId: part.expressId,
+                            guid: part.guid,
+                            yLo,
+                            yHi,
+                            polyCount,
+                            segCount,
+                            clip: partClip,
+                            bbox: part.bbox,
+                        },
+                    })
+                    // #endregion
+                }
+            }
+            return
+        }
+        if (polysAll.length === 0 && segsAll.length > 0 && debugEnabled && part.guid) {
+            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+            const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
+            if (isTarget) {
+                const closureDiag = segmentClosureDiagnostics(segsAll)
+                // #region agent log H15
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H15',
+                    location: debugLocation,
+                    message: 'segment topology with zero polys',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: part.expressId,
+                        guid: part.guid,
+                        yLo,
+                        yHi,
+                        segCount,
+                        endpointCount: segsAll.length * 2,
+                        uniquePointCount: closureDiag.uniquePointCount,
+                        hullPointCount: closureDiag.hullPointCount,
+                        hullArea2: closureDiag.hullArea2,
+                        endpointBBox: closureDiag.bbox,
+                        sampleSegments: closureDiag.sampleSegments,
+                    },
+                })
+                // #endregion
+            }
+        }
+        groups.push({
+            layer,
+            polygons: polysAll,
+            segments: segsAll,
+        })
+        if (debugEnabled && part.guid) {
+            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+            const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
+            if (isTarget) {
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H9',
+                    location: debugLocation,
+                    message: 'target slab part rendered as real geometry',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: part.expressId,
+                        guid: part.guid,
+                        yLo,
+                        yHi,
+                        polyCount,
+                        segCount,
+                        bbox: part.bbox,
+                    },
+                })
+            }
+        }
+        if (debugEnabled && debugLocation === 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts') {
+            // #region agent log H14
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H14',
+                location: debugLocation,
+                message: 'slab-above part geometry counts',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    expressId: part.expressId,
+                    guid: part.guid ?? null,
+                    yLo,
+                    yHi,
+                    polyCount,
+                    segCount,
+                    bbox: part.bbox,
+                },
+            })
+            // #endregion
+        }
+    }
 
     // Bottom of viewport: 10 cm INTO the structural slab below
     //   = slabBelow.top - 10 cm  (i.e. show the top 10 cm of the slab body).
@@ -1070,7 +1787,31 @@ function emitElevationSvg(
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
             if (yHi - yLo < 0.005) continue
-            drawHorizontalBand(yLo, yHi, options.colors.elevation.wall, 2, part.expressId, true)
+            if (debugEnabled && part.guid) {
+                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
+                if (isTarget) {
+                    debugLogRenderer({
+                        runId,
+                        hypothesisId: 'H7',
+                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts',
+                        message: 'target slab-below part rendered as horizontal band',
+                        data: {
+                            doorGuid: ctx.guid,
+                            side,
+                            expressId: part.expressId,
+                            guid: part.guid,
+                            yLo,
+                            yHi,
+                            viewportBottomY,
+                            viewportTopY,
+                            inVolume: intersectsElevationVolume(part.bbox),
+                            bbox: part.bbox,
+                        },
+                    })
+                }
+            }
+            drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, 2, true, 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts')
         }
     }
     // ── Top 10 cm structural slab cap (slabAbove) ───────────────────────────
@@ -1089,7 +1830,63 @@ function emitElevationSvg(
         const slabBandBotY = ctx.slabAbove
             ? Math.min(ctx.slabAbove.bbox.min[1], viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS)
             : viewportTopY - STRUCTURAL_SLAB_INTRUSION_METERS
-        drawHorizontalBand(slabBandBotY, viewportTopY, options.colors.elevation.wall, 2, slabAboveExpressId, true)
+        const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
+        const suppressTopCapBand = ctx.slabAboveParts.some((p) => {
+            const g = p.guid ?? null
+            if (!g) return false
+            if (!(NO_FALLBACK_PART_GUIDS.includes(g) || noFallbackNorms.has(g.replace(/\$/g, '_')))) return false
+            if (!intersectsElevationVolume(p.bbox)) return false
+            const yHi = Math.min(p.bbox.max[1], viewportTopY)
+            const yLo = Math.max(p.bbox.min[1], viewportBottomY)
+            return yHi - yLo >= 0.005
+        })
+        if (!suppressTopCapBand) {
+            drawHorizontalBand(slabBandBotY, viewportTopY, options.colors.elevation.wall, 2, slabAboveExpressId, true)
+        } else if (debugEnabled) {
+            // #region agent log H24
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H24',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                message: 'suppressed structural top cap band due to no-fallback part',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    slabBandBotY,
+                    viewportTopY,
+                    noFallbackGuids: NO_FALLBACK_PART_GUIDS,
+                },
+            })
+            // #endregion
+        }
+        if (debugEnabled) {
+            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+            const targetAbove = ctx.slabAboveParts
+                .filter((p) => {
+                    const g = p.guid ?? null
+                    return !!g && (DEBUG_TARGET_ELEMENT_GUIDS.includes(g) || targetNorms.has(g.replace(/\$/g, '_')))
+                })
+                .map((p) => ({
+                    expressId: p.expressId,
+                    guid: p.guid ?? null,
+                    bbox: p.bbox,
+                }))
+            // #region agent log H13
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H13',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                message: 'target slab-above parts available on context',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    slabAbovePartsTotal: ctx.slabAboveParts.length,
+                    targetAboveCount: targetAbove.length,
+                    targetAbove,
+                },
+            })
+            // #endregion
+        }
         // Slab-above parts: render both IFCBUILDINGELEMENTPART and IFCCOVERING
         // fills so suspended ceilings / hinged slabs remain visible in
         // elevation. Keep covering bands stroke-free to avoid adding heavy
@@ -1097,6 +1894,28 @@ function emitElevationSvg(
         const aboveParts = ctx.slabAboveParts
             .filter((p) => {
                 const inVolume = intersectsElevationVolume(p.bbox)
+                if (debugEnabled && p.guid) {
+                    const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                    const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(p.guid) || targetNorms.has(p.guid.replace(/\$/g, '_'))
+                    if (isTarget) {
+                        // #region agent log H12
+                        debugLogRenderer({
+                            runId,
+                            hypothesisId: 'H12',
+                            location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                            message: 'target slab-above part filter gate',
+                            data: {
+                                doorGuid: ctx.guid,
+                                side,
+                                expressId: p.expressId,
+                                guid: p.guid,
+                                inVolume,
+                                bbox: p.bbox,
+                            },
+                        })
+                        // #endregion
+                    }
+                }
                 if (!inVolume) return false
                 const isCovering = (p.meshes[0]?.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING'
                 if (!isCovering) return true
@@ -1114,11 +1933,35 @@ function emitElevationSvg(
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             if (yHi - yLo < 0.005) continue
+            if (debugEnabled && part.guid) {
+                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
+                if (isTarget) {
+                    debugLogRenderer({
+                        runId,
+                        hypothesisId: 'H7',
+                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                        message: 'target slab-above part rendered as horizontal band',
+                        data: {
+                            doorGuid: ctx.guid,
+                            side,
+                            expressId: part.expressId,
+                            guid: part.guid,
+                            yLo,
+                            yHi,
+                            viewportBottomY,
+                            viewportTopY,
+                            inVolume: intersectsElevationVolume(part.bbox),
+                            bbox: part.bbox,
+                        },
+                    })
+                }
+            }
             const isCovering = (part.meshes[0]?.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING'
             const fill = isCovering ? options.colors.elevation.suspendedCeiling : options.colors.elevation.wall
             const addStrokes = isCovering ? true : !isCovering
             const layer = isCovering ? 7 : 2
-            drawHorizontalBand(yLo, yHi, fill, layer, part.expressId, addStrokes)
+            drawPartGeometry(part, yLo, yHi, fill, layer, addStrokes, 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts')
         }
     }
 
@@ -1161,7 +2004,10 @@ function emitElevationSvg(
     }
     for (const { mesh, expressId } of meshes) {
         const cls = classifyMesh(mesh, ctx, true, options.colors)
-        const meshClip = expressId === ctx.door.expressId ? focalDoorClip : elevationClip
+        const isDoorMesh =
+            expressId === ctx.door.expressId
+            || ctx.nearbyDoors.some((d) => d.expressId === expressId)
+        const meshClip = isDoorMesh ? focalDoorClip : elevationClip
         const polys = projectMeshFill(mesh, cam, cls, expressId, meshClip, pixelClip)
         const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, meshClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
         if (polys.length === 0 && segs.length === 0) continue
