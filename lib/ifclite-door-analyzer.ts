@@ -23,6 +23,13 @@
  */
 import type { IfcLiteMesh, IfcLiteModel } from './ifclite-source'
 import { readDoorPlacementYAxis } from './ifclite-placement'
+const DEBUG_GUIDS: ReadonlySet<string> = new Set([
+    '00aWpxa_nMJugVbA_gUV4',
+    '1mRZBdiTM$IuoH2sbb2zBQ',
+    '3AweLhpG7eIeBpUEeWKmNf',
+    '3jw6gOgAfSHxkdx8yO58yl',
+    '08v$5$g4ScGA26DW5Jh6Mz',
+])
 
 export interface AABB {
     min: [number, number, number]
@@ -220,7 +227,10 @@ function queryPlanIndex(
     return out
 }
 
-function buildDoorViewFrame(bbox: AABB): DoorViewFrame {
+function buildDoorViewFrame(
+    bbox: AABB,
+    placementYAxis: [number, number, number] | null = null
+): DoorViewFrame {
     const ext = bboxExtents(bbox)
     const centre = bboxCentre(bbox)
     // Y is up in IFC-Lite output. The two horizontal axes are X and Z.
@@ -240,7 +250,30 @@ function buildDoorViewFrame(bbox: AABB): DoorViewFrame {
         width = ext[2]
         thickness = ext[0]
     }
+    let facingFlippedByPlacement = false
+    if (placementYAxis) {
+        // Map IFC local +Y (XY in IFC world) to renderer XZ and use it to lock
+        // the sign of plan facing so 90° doors do not get canonicalized to the
+        // opposite viewing direction (which mirrors the full plan context).
+        const pyx = placementYAxis[0]
+        const pyz = placementYAxis[1]
+        const pyLen = Math.hypot(pyx, pyz)
+        if (pyLen > 1e-8) {
+            const pnx = pyx / pyLen
+            const pnz = pyz / pyLen
+            const facingDotPlacement = pnx * facing[0] + pnz * facing[2]
+            if (facingDotPlacement < 0) {
+                facing = [-facing[0], 0, -facing[2]]
+                facingFlippedByPlacement = true
+            }
+            // Keep a consistent right-handed local frame when facing flips.
+            widthAxis = [facing[2], 0, -facing[0]]
+        }
+    }
     const height = ext[1]
+    // #region agent log
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H1',location:'lib/ifclite-door-analyzer.ts:buildDoorViewFrame',message:'Axis canonicalization from bbox extents',data:{extX:ext[0],extY:ext[1],extZ:ext[2],branch:ext[0]>=ext[2]?'X-width':'Z-width',placementYAxis,facingFlippedByPlacement,widthAxis,facing,width,thickness},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     // Origin: bottom centre of door bbox in plan, Y at bbox bottom.
     const origin: [number, number, number] = [centre[0], bbox.min[1], centre[2]]
     return {
@@ -555,11 +588,20 @@ export function analyzeDoor(
     const guid = attrs?.globalId ?? `expressId-${doorId}`
     const name = attrs?.name ?? ''
     const storey = model.storeyOf(doorId)
-    const viewFrame = buildDoorViewFrame(bbox)
+    const placementYAxis = readDoorPlacementYAxis(model.parserMod, model.store, doorId)
+    const viewFrame = buildDoorViewFrame(bbox, placementYAxis)
+    if (DEBUG_GUIDS.has(guid)) {
+        const dotPlacementFacing = placementYAxis ? placementYAxis[0] * viewFrame.facing[0] + placementYAxis[1] * viewFrame.facing[2] : null
+        // #region agent log
+        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H2',location:'lib/ifclite-door-analyzer.ts:analyzeDoor',message:'Target door frame vs IFC placement axis',data:{guid,doorId,viewFacing:viewFrame.facing,viewWidthAxis:viewFrame.widthAxis,placementYAxis,dotPlacementFacing,bboxMin:bbox.min,bboxMax:bbox.max},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+    }
 
-    let hostWallId = findHostWallExpressId(model, doorId)
+    const relationHostWallId = findHostWallExpressId(model, doorId)
+    const bboxFallbackHostWallId = findHostWallByBBox(model, bbox, caches.wallIndex, viewFrame)
+    let hostWallId = relationHostWallId
     if (hostWallId == null) {
-        hostWallId = findHostWallByBBox(model, bbox, caches.wallIndex, viewFrame)
+        hostWallId = bboxFallbackHostWallId
     }
     let hostWall: DoorContextLite['hostWall'] = null
     if (hostWallId != null) {
@@ -571,6 +613,23 @@ export function analyzeDoor(
     }
 
     const slabs = findSlabsAroundDoor(model, bbox, caches.slabIndex)
+    if (DEBUG_GUIDS.has(guid)) {
+        const planGap = (a: AABB, b: AABB): number => {
+            const dx = Math.max(0, b.min[0] - a.max[0], a.min[0] - b.max[0])
+            const dz = Math.max(0, b.min[2] - a.max[2], a.min[2] - b.max[2])
+            return Math.hypot(dx, dz)
+        }
+        const relationHostMeshes = relationHostWallId != null ? model.meshesByExpressId.get(relationHostWallId) : null
+        const relationHostBBox = relationHostMeshes && relationHostMeshes.length > 0 ? bboxOfMeshes(relationHostMeshes) : null
+        const fallbackHostMeshes = bboxFallbackHostWallId != null ? model.meshesByExpressId.get(bboxFallbackHostWallId) : null
+        const fallbackHostBBox = fallbackHostMeshes && fallbackHostMeshes.length > 0 ? bboxOfMeshes(fallbackHostMeshes) : null
+        // #region agent log
+        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H10',location:'lib/ifclite-door-analyzer.ts:analyzeDoor',message:'Target host/slab resolution context',data:{guid,doorId,hostWallId:hostWall?.expressId ?? null,hostWallBBox:hostWall?.bbox ?? null,slabBelowId:slabs.below?.expressId ?? null,slabAboveId:slabs.above?.expressId ?? null},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        // #region agent log
+        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H11',location:'lib/ifclite-door-analyzer.ts:analyzeDoor',message:'Host wall source comparison',data:{guid,doorId,relationHostWallId,bboxFallbackHostWallId,chosenHostWallId:hostWallId,relationPlanGap:relationHostBBox?planGap(relationHostBBox,bbox):null,fallbackPlanGap:fallbackHostBBox?planGap(fallbackHostBBox,bbox):null,relationHostBBox,fallbackHostBBox},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+    }
     const centre = bboxCentre(bbox)
 
     const collectParts = (slabId: number | null | undefined): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }> => {
@@ -651,24 +710,52 @@ export function analyzeDoor(
     }
 
     const radius = opts.neighbourPlanRadius
+    const planCutY = viewFrame.origin[1] + PLAN_CUT_HEIGHT_METERS
     const filterY = (cand: { bbox: AABB }) =>
         cand.bbox.max[1] >= bbox.min[1] - opts.neighbourElevationOverlap
         && cand.bbox.min[1] <= bbox.max[1] + opts.neighbourElevationOverlap
+    // Some storeys model architectural wall skins/splits as IFCBUILDINGELEMENTPART
+    // instead of IFCWALL/IFCWALLSTANDARDCASE. Include only "wall-like" parts:
+    // - must cross the plan cut band
+    // - must be vertically tall
+    // - must have one reasonably thin horizontal axis (wall thickness proxy)
+    // This keeps floor/ceiling build-up layers out of nearbyWalls.
+    const isWallLikeBuildingPart = (cand: { bbox: AABB }): boolean => {
+        const cutTol = 0.08
+        if (cand.bbox.max[1] < planCutY - cutTol) return false
+        if (cand.bbox.min[1] > planCutY + cutTol) return false
+        const [sx, sy, sz] = bboxExtents(cand.bbox)
+        const horizMin = Math.min(sx, sz)
+        const horizMax = Math.max(sx, sz)
+        if (sy < 1.0) return false
+        if (horizMin > 0.7) return false
+        if (horizMax < 0.5) return false
+        return true
+    }
     // Device candidate pool must support ALL views:
     //   - plan needs devices from door bottom up to clip plane
     //   - elevation needs context above the plan cut (e.g. BMA/KNX near ceiling)
     // Keep this broad and let each renderer apply its own final clip.
-    const planCutY = viewFrame.origin[1] + PLAN_CUT_HEIGHT_METERS
     const elevationDeviceTopY = bbox.max[1] + 1.0
     const deviceCandidateTopY = Math.max(planCutY, elevationDeviceTopY)
     const filterDeviceCandidateBandY = (cand: { bbox: AABB }) =>
         cand.bbox.max[1] >= bbox.min[1] - 0.1
         && cand.bbox.min[1] <= deviceCandidateTopY
 
-    const nearbyWalls = queryPlanIndex(caches.wallIndex, centre, radius)
+    const nearbyWallsFromWallTypes = queryPlanIndex(caches.wallIndex, centre, radius)
         .filter((c) => c.expressId !== hostWallId)
         .filter(filterY)
         .map((c) => ({ expressId: c.expressId, meshes: c.meshes, bbox: c.bbox }))
+    const nearbyWallsFromWallLikeParts = queryPlanIndex(caches.buildingPartIndex, centre, radius)
+        .filter((c) => c.expressId !== hostWallId)
+        .filter(filterY)
+        .filter(isWallLikeBuildingPart)
+        .map((c) => ({ expressId: c.expressId, meshes: c.meshes, bbox: c.bbox }))
+    const nearbyWalls = [...nearbyWallsFromWallTypes]
+    for (const part of nearbyWallsFromWallLikeParts) {
+        if (nearbyWalls.some((w) => w.expressId === part.expressId)) continue
+        nearbyWalls.push(part)
+    }
 
     const nearbyDoors = queryPlanIndex(caches.doorIndex, centre, radius)
         .filter((c) => c.expressId !== doorId)
@@ -720,6 +807,6 @@ export function analyzeDoor(
         nearbyDevices,
         cset: readCsetData(model, doorId),
         operationType: readOperationType(model, doorId),
-        placementYAxis: readDoorPlacementYAxis(model.parserMod, model.store, doorId),
+        placementYAxis,
     }
 }

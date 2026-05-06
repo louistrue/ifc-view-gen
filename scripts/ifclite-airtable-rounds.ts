@@ -195,6 +195,11 @@ async function renderOne(
 ): Promise<{ pngs: Partial<Record<View, Buffer>>; ctx: DoorContextLite | null; reason?: string }> {
     const expressId = guidToExpressId.get(target.guid)
     if (expressId == null) return { pngs: {}, ctx: null, reason: 'not in IFC' }
+    if (target.guid === '08v$5$g4ScGA26DW5Jh6Mz') {
+        // #region agent log
+        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b464c7'},body:JSON.stringify({sessionId:'b464c7',runId:process.env.DEBUG_RUN_ID ?? 'pre-fix',hypothesisId:'H8',location:'scripts/ifclite-airtable-rounds.ts:renderOne',message:'Ifclite render pipeline path hit for target guid',data:{guid:target.guid,expressId,views},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+    }
     const ctx = analyzeDoor(arch, expressId, caches, elec)
     if (!ctx) return { pngs: {}, ctx: null, reason: 'analyzer returned null' }
     const svgs = renderDoorViewsLite(ctx)
