@@ -47,19 +47,30 @@ import type { AABB, DoorContextLite, DoorViewFrame } from './ifclite-door-analyz
 import type { IfcLiteMesh } from './ifclite-source'
 
 const COLORS = loadRenderColors()
-const DEBUG_TARGET_DOOR_GUID = ''
+const DEBUG_TARGET_DOOR_GUID = process.env.DEBUG_PROBE_DOOR_GUID ?? process.env.DEBUG_TARGET_DOOR_GUID ?? ''
 const DEBUG_TARGET_ELEMENT_GUIDS: readonly string[] = []
 const NO_FALLBACK_PART_GUIDS: readonly string[] = [
     '3HuvnrKbA$kTf3k1qPn15K',
 ]
 
-function debugLogRenderer(_payload: {
+function debugLogRenderer(payload: {
     runId: string
     hypothesisId: string
     location: string
     message: string
     data: Record<string, unknown>
-}) {}
+}) {
+    const line = JSON.stringify({ sessionId: 'a4f827', runId: payload.runId, hypothesisId: payload.hypothesisId, location: payload.location, message: payload.message, data: payload.data, timestamp: Date.now() })
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        require('node:fs').appendFileSync('debug-a4f827.log', `${line}\n`, 'utf8')
+    } catch {
+        /* best effort */
+    }
+    // #region agent log
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a4f827'},body:line}).catch(()=>{});
+    // #endregion
+}
 
 export const FIXED_PX_PER_METER = 285
 // Canvas matches the legacy 1000×1000 SVG.  The PNG rasteriser upscales to
@@ -147,6 +158,7 @@ interface ProjectedSegment {
     layer: number
     width: number
     dashed?: boolean
+    sourceKind?: 'boundary' | 'sharp' | 'both'
 }
 
 interface ProjectedPolygon {
@@ -163,6 +175,18 @@ interface MeshClassification {
     fillOpacity?: number
     layer: number
     role: 'door' | 'host-wall' | 'nearby-wall' | 'slab' | 'window' | 'nearby-door' | 'device' | 'safety' | 'other'
+}
+
+type ElevationRenderMode = 'projected' | 'sectioned' | 'context-band' | 'hidden'
+type NearbyDoorElevationMode = Extract<ElevationRenderMode, 'projected' | 'sectioned'>
+
+interface ElevationRenderDecision {
+    mode: ElevationRenderMode
+    reason: string
+}
+
+function isIfcCoveringPart(part: { meshes: IfcLiteMesh[] }): boolean {
+    return part.meshes.some((m) => (m.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING')
 }
 
 function segmentOrientationStats(segments: ProjectedSegment[]) {
@@ -187,8 +211,104 @@ function segmentOrientationStats(segments: ProjectedSegment[]) {
     return { horizontal, vertical, oblique, maxObliqueLength }
 }
 
+function segmentLengthBuckets(segments: ProjectedSegment[]) {
+    let lt5 = 0
+    let b5to25 = 0
+    let b25to100 = 0
+    let gte100 = 0
+    for (const s of segments) {
+        const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+        if (len < 5) lt5++
+        else if (len < 25) b5to25++
+        else if (len < 100) b25to100++
+        else gte100++
+    }
+    return { lt5, b5to25, b25to100, gte100 }
+}
+
+function segmentAxisDriftStats(segments: ProjectedSegment[]) {
+    let maxDriftDeg = 0
+    let countGt1Deg = 0
+    let countGt3Deg = 0
+    for (const s of segments) {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) continue
+        const deg = Math.atan2(Math.abs(dy), Math.abs(dx)) * (180 / Math.PI)
+        const drift = Math.min(deg, Math.abs(90 - deg))
+        if (drift > maxDriftDeg) maxDriftDeg = drift
+        if (drift > 1) countGt1Deg++
+        if (drift > 3) countGt3Deg++
+    }
+    return { maxDriftDeg, countGt1Deg, countGt3Deg }
+}
+
+function snapNearCardinalSegments(segments: ProjectedSegment[], toleranceDeg = 7): ProjectedSegment[] {
+    const out: ProjectedSegment[] = []
+    const tol = Math.cos((toleranceDeg * Math.PI) / 180)
+    for (const s of segments) {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) {
+            out.push(s)
+            continue
+        }
+        const ax = Math.abs(dx) / len
+        const ay = Math.abs(dy) / len
+        if (ax >= tol) {
+            const y = (s.y1 + s.y2) / 2
+            out.push({ ...s, y1: y, y2: y })
+            continue
+        }
+        if (ay >= tol) {
+            const x = (s.x1 + s.x2) / 2
+            out.push({ ...s, x1: x, x2: x })
+            continue
+        }
+        out.push(s)
+    }
+    return out
+}
+
+function filterTinyObliqueSegments(segments: ProjectedSegment[], minLenPx = 3, minDriftDeg = 3): ProjectedSegment[] {
+    const out: ProjectedSegment[] = []
+    for (const s of segments) {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) {
+            out.push(s)
+            continue
+        }
+        const deg = Math.atan2(Math.abs(dy), Math.abs(dx)) * (180 / Math.PI)
+        const drift = Math.min(deg, Math.abs(90 - deg))
+        if (len < minLenPx && drift > minDriftDeg) continue
+        out.push(s)
+    }
+    return out
+}
+
+function segmentSourceStats(segments: ProjectedSegment[]) {
+    let boundary = 0
+    let sharp = 0
+    let both = 0
+    let unknown = 0
+    for (const s of segments) {
+        if (s.sourceKind === 'boundary') boundary++
+        else if (s.sourceKind === 'sharp') sharp++
+        else if (s.sourceKind === 'both') both++
+        else unknown++
+    }
+    return { boundary, sharp, both, unknown }
+}
+
 function filterWallSeamSegments(segments: ProjectedSegment[]): ProjectedSegment[] {
     const out: ProjectedSegment[] = []
+    const longSeamPx = 0.1 * FIXED_PX_PER_METER
+    const cardinalTolDeg = 3
+    const cardinalTol = Math.cos((cardinalTolDeg * Math.PI) / 180)
     for (const s of segments) {
         const dx = s.x2 - s.x1
         const dy = s.y2 - s.y1
@@ -196,9 +316,9 @@ function filterWallSeamSegments(segments: ProjectedSegment[]): ProjectedSegment[
         if (len < 0.5) continue
         const ax = Math.abs(dx) / len
         const ay = Math.abs(dy) / len
-        const axisAligned = ax > 0.985 || ay > 0.985
-        // Long oblique wall strokes are typically triangulation seams.
-        if (!axisAligned && len > 25) continue
+        const cardinal = ax >= cardinalTol || ay >= cardinalTol
+        // Keep cardinal edges; suppress long non-cardinal seams (> 0.1 m).
+        if (!cardinal && len > longSeamPx) continue
         out.push(s)
     }
     return out
@@ -211,14 +331,17 @@ function resolvePlanNearbyDoorColor(cfcBkp: string | null, colors: RenderColors)
 }
 
 // Layer ordering (higher number = drawn later = visually in front):
-//   1 = wall fill, 2 = slab fill (covers wall at floor/ceiling band),
-//   3 = nearby door fill, 4 = window/glass, 6 = current door, 7 = device,
-//   8 = safety device, +10 = stroke layer of the same role.
+//   1 = wall fill, 2 = background slab/other fill, 3 = nearby door fill,
+//   4 = window/context glass, 5 = focal glass, 6 = current door, 7 = device,
+//   8 = safety device / foreground wall, 9 = sectioned slab/build-up/covering.
+const ELEVATION_SECTIONED_PART_LAYER = 9
+
 function classifyMesh(
     mesh: IfcLiteMesh,
     ctx: DoorContextLite,
     elevationView: boolean,
     colors: RenderColors,
+    nearbyDoorModes?: ReadonlyMap<number, ElevationRenderMode>,
 ): MeshClassification {
     const id = mesh.expressId
     if (id === ctx.door.expressId) {
@@ -243,7 +366,7 @@ function classifyMesh(
         return { fill, layer: 1, role: 'nearby-wall' }
     }
     if ((ctx.slabBelow && ctx.slabBelow.expressId === id) || (ctx.slabAbove && ctx.slabAbove.expressId === id)) {
-        return { fill: colors.elevation.wall, layer: 2, role: 'slab' }
+        return { fill: colors.elevation.wall, layer: ELEVATION_SECTIONED_PART_LAYER, role: 'slab' }
     }
     if (ctx.nearbyWindows.some((w) => w.expressId === id)) {
         // Glass blue is reserved for the FOCAL door's own glazing — adjacent
@@ -253,17 +376,21 @@ function classifyMesh(
     }
     const nearbyDoor = ctx.nearbyDoors.find((d) => d.expressId === id)
     if (nearbyDoor) {
+        const nearbyDoorFill = elevationView
+            ? resolveElevationDoorColor(nearbyDoor.cfcBkp, colors)
+            : resolvePlanNearbyDoorColor(nearbyDoor.cfcBkp, colors)
         if (elevationView && isLikelyGlazingPanelMesh(mesh)) {
-            return { fill: colors.elevation.glass, fillOpacity: 0.32, layer: 5, role: 'nearby-door' }
+            const mode = nearbyDoorModes?.get(id) ?? 'projected'
+            if (mode === 'projected') {
+                return { fill: colors.elevation.glass, fillOpacity: 0.32, layer: 5, role: 'nearby-door' }
+            }
+            return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
         }
         // Adjacent doors color by their OWN BKP in elevation (so a metal
         // door reads metal, a wood door reads wood, regardless of focal
         // door's BKP).  Plan keeps context color by default, but CFC 2731
         // maps to `context` (hellgrau) explicitly.
-        const fill = elevationView
-            ? resolveElevationDoorColor(nearbyDoor.cfcBkp, colors)
-            : resolvePlanNearbyDoorColor(nearbyDoor.cfcBkp, colors)
-        return { fill, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
+        return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
     }
     const dev = ctx.nearbyDevices.find((d) => d.expressId === id)
     if (dev) {
@@ -321,6 +448,19 @@ function projectBoxToElevationRect(
     cam: CameraSetup,
     pixelClip: PixelClipRect,
 ): Pt[] | null {
+    const runId = process.env.DEBUG_RUN_ID ?? 'run-1'
+    // #region agent log H29
+    debugLogRenderer({
+        runId,
+        hypothesisId: 'H29',
+        location: 'lib/ifclite-renderer.ts:projectBoxToElevationRect',
+        message: 'bbox rectangle projection called',
+        data: {
+            bbox,
+            pixelClip,
+        },
+    })
+    // #endregion
     // Project the 8 corners of the AABB and take the screen-space bbox of the
     // result.  The mesh elevation projection of an AABB is always an
     // axis-aligned rectangle (orthographic camera, axis-aligned world box).
@@ -479,6 +619,8 @@ function edgeKey(a: MeshPos, b: MeshPos): string {
 interface ExtractedEdge {
     a: MeshPos
     b: MeshPos
+    boundary: boolean
+    sharp: boolean
 }
 
 // Per-mesh edge extraction is the renderer's hot loop — sharpness check is
@@ -486,6 +628,7 @@ interface ExtractedEdge {
 // the mesh object identity so the second elevation view + plan view all
 // reuse the work from the first.
 const edgeCache = new WeakMap<IfcLiteMesh, ExtractedEdge[]>()
+const edgeStatsCache = new WeakMap<IfcLiteMesh, { returned: number; boundary: number; sharp: number }>()
 
 function extractMeshEdges(mesh: IfcLiteMesh): ExtractedEdge[] {
     const cached = edgeCache.get(mesh)
@@ -493,6 +636,7 @@ function extractMeshEdges(mesh: IfcLiteMesh): ExtractedEdge[] {
     const triCount = meshTriangleCount(mesh)
     if (triCount === 0) {
         edgeCache.set(mesh, [])
+        edgeStatsCache.set(mesh, { returned: 0, boundary: 0, sharp: 0 })
         return []
     }
     // Per-edge accumulator: store FIRST normal in n0, OR test each subsequent
@@ -539,10 +683,15 @@ function extractMeshEdges(mesh: IfcLiteMesh): ExtractedEdge[] {
         }
     }
     const out: ExtractedEdge[] = []
+    let boundaryCount = 0
+    let sharpCount = 0
     for (const acc of edges.values()) {
-        if (acc.boundary || acc.sharp) out.push({ a: acc.a, b: acc.b })
+        if (acc.boundary) boundaryCount++
+        if (acc.sharp) sharpCount++
+        if (acc.boundary || acc.sharp) out.push({ a: acc.a, b: acc.b, boundary: acc.boundary, sharp: acc.sharp })
     }
     edgeCache.set(mesh, out)
+    edgeStatsCache.set(mesh, { returned: out.length, boundary: boundaryCount, sharp: sharpCount })
     return out
 }
 
@@ -1054,7 +1203,7 @@ function projectMeshSegments(
     const out: ProjectedSegment[] = []
     const minY = canvasMinY ?? -4
     const minX = canvasMinX ?? -4
-    for (const { a, b } of edges) {
+    for (const { a, b, boundary, sharp } of edges) {
         if (clip) {
             if (clip.yMin != null && a.y < clip.yMin && b.y < clip.yMin) continue
             if (clip.yMax != null && a.y > clip.yMax && b.y > clip.yMax) continue
@@ -1076,6 +1225,7 @@ function projectMeshSegments(
             x1, y1, x2, y2,
             color, layer, width,
             depth: (pa.depth + pb.depth) / 2,
+            sourceKind: boundary && sharp ? 'both' : boundary ? 'boundary' : sharp ? 'sharp' : undefined,
         })
     }
     return out
@@ -1121,13 +1271,70 @@ function getStructuralSlabFaceDy(ctx: DoorContextLite, which: 'above' | 'below')
     return null
 }
 
+function classifyNearbyDoorElevationMode(
+    door: { bbox: AABB },
+    hostBbox: AABB,
+    facingAxisIdx: 0 | 2,
+    widthAxisIdx: 0 | 2,
+    cameraSign: 1 | -1,
+): NearbyDoorElevationMode {
+    const dMin = door.bbox.min[facingAxisIdx]
+    const dMax = door.bbox.max[facingAxisIdx]
+    const hMin = hostBbox.min[facingAxisIdx]
+    const hMax = hostBbox.max[facingAxisIdx]
+    const hostDepth = Math.max(hMax - hMin, 0.01)
+    const doorDepth = Math.max(dMax - dMin, 0.001)
+    const doorWidth = Math.max(door.bbox.max[widthAxisIdx] - door.bbox.min[widthAxisIdx], 0.001)
+    const doorCenter = (dMin + dMax) / 2
+    const hostCenter = (hMin + hMax) / 2
+
+    // Projected vs. sectioned is primarily an orientation question in the
+    // focal elevation. A same-wall context door is broad across the width axis
+    // and thin in depth, so its glass may be blue. A perpendicular/context-cut
+    // door is edge-on here: thin across the width axis and long in depth, so
+    // its glazing is a section face and must use the normal context fill.
+    const edgeOnToElevation = doorDepth > Math.max(doorWidth * 1.25, 0.35)
+    if (edgeOnToElevation) return 'sectioned'
+
+    const faceOnToElevation = doorWidth > Math.max(doorDepth * 1.25, 0.35)
+    if (faceOnToElevation) return 'projected'
+
+    const cameraSideOffset = (doorCenter - hostCenter) * cameraSign
+    const projectionGap = Math.max(hostDepth * 0.25, 0.04)
+    if (cameraSideOffset > hostDepth / 2 + projectionGap) return 'projected'
+
+    const overlap = Math.min(dMax, hMax) - Math.max(dMin, hMin)
+    const meaningfulOverlap = Math.max(Math.min(hostDepth, doorDepth) * 0.2, 0.01)
+    if (overlap > meaningfulOverlap) return 'sectioned'
+
+    const centerPad = Math.max(hostDepth * 0.25, 0.03)
+    if (doorCenter >= hMin - centerPad && doorCenter <= hMax + centerPad) return 'sectioned'
+
+    return 'projected'
+}
+
 function emitElevationSvg(
     ctx: DoorContextLite,
     side: 'front' | 'back',
     options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs'>>,
 ): string {
-    const debugEnabled = ctx.guid === DEBUG_TARGET_DOOR_GUID
+    const debugEnabled = DEBUG_TARGET_DOOR_GUID === '' || ctx.guid === DEBUG_TARGET_DOOR_GUID
     const runId = process.env.DEBUG_RUN_ID ?? 'run-1'
+    // #region agent log H30
+    debugLogRenderer({
+        runId,
+        hypothesisId: 'H30',
+        location: 'lib/ifclite-renderer.ts:emitElevationSvg:always',
+        message: 'unconditional elevation entry heartbeat',
+        data: {
+            doorGuid: ctx.guid,
+            side,
+            debugEnabled,
+            debugTargetDoorGuid: DEBUG_TARGET_DOOR_GUID || null,
+        },
+    })
+    // #endregion
+    const debugDisableWallSegments = process.env.DEBUG_DISABLE_WALL_SEGMENTS === '1'
     const W = options.width
     const H = options.height
     const doorBottom = ctx.viewFrame.origin[1]
@@ -1203,6 +1410,19 @@ function emitElevationSvg(
             },
         })
         // #endregion
+        // #region agent log H19
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H19',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:config',
+            message: 'wall segment debug mode',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                debugDisableWallSegments,
+            },
+        })
+        // #endregion
     }
 
     if (process.env.DEBUG_VIEWPORT === '1') {
@@ -1240,7 +1460,7 @@ function emitElevationSvg(
         yMin: viewportBottomY - 0.02,
         yMax: viewportTopY + 0.02,
     }
-    const cameraSign = side === 'front' ? 1 : -1
+    const cameraSign: 1 | -1 = side === 'front' ? 1 : -1
     const isXAligned = Math.abs(ctx.viewFrame.widthAxis[0]) > Math.abs(ctx.viewFrame.widthAxis[2])
     // When hostWall is missing (door at corner / fills+bbox both fail), fall
     // back to an inflated door bbox along the facing axis so the depth clip
@@ -1384,20 +1604,92 @@ function emitElevationSvg(
         if (bMin > facingClipMax) return false
         return true
     }
-    if (ctx.hostWall && intersectsElevationVolume(ctx.hostWall.bbox)) {
+    const inYAndWidthVolume = (bbox: AABB): boolean => {
+        if (bbox.max[1] < (elevationClip.yMin ?? -Infinity)) return false
+        if (bbox.min[1] > (elevationClip.yMax ?? +Infinity)) return false
+        if (bbox.max[widthAxisIdx] < (widthClipMin ?? -Infinity)) return false
+        if (bbox.min[widthAxisIdx] > (widthClipMax ?? +Infinity)) return false
+        return true
+    }
+    const decideSectionedRender = (
+        bbox: AABB,
+        visibleReason: string,
+        hiddenReason = 'outside elevation section volume',
+    ): ElevationRenderDecision => {
+        return intersectsElevationVolume(bbox)
+            ? { mode: 'sectioned', reason: visibleReason }
+            : { mode: 'hidden', reason: hiddenReason }
+    }
+    const decideNearbyDoorRender = (door: { bbox: AABB }): ElevationRenderDecision => {
+        const sectionDecision = decideSectionedRender(door.bbox, 'nearby door intersects full elevation volume')
+        if (sectionDecision.mode === 'hidden') {
+            return sectionDecision
+        }
+        const mode = classifyNearbyDoorElevationMode(door, hostBboxForClip, facingAxisIdx, widthAxisIdx, cameraSign)
+        return {
+            mode,
+            reason: mode === 'projected'
+                ? 'nearby door reads face-on in this elevation'
+                : 'nearby door reads edge-on or intersects host depth',
+        }
+    }
+    const nearbyDoorModes = new Map<number, ElevationRenderMode>()
+    const nearbyDoorRenderDecisions = new Map<number, ElevationRenderDecision>()
+    for (const door of ctx.nearbyDoors) {
+        const decision = decideNearbyDoorRender(door)
+        nearbyDoorRenderDecisions.set(door.expressId, decision)
+        if (decision.mode === 'hidden') continue
+        nearbyDoorModes.set(door.expressId, decision.mode)
+    }
+    if (debugEnabled && nearbyDoorModes.size > 0) {
+        const projectedCount = [...nearbyDoorModes.values()].filter((mode) => mode === 'projected').length
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H24',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyDoorModes',
+            message: 'nearby door elevation render modes',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                projectedCount,
+                sectionedCount: nearbyDoorModes.size - projectedCount,
+                modes: ctx.nearbyDoors
+                    .filter((door) => nearbyDoorModes.has(door.expressId))
+                    .map((door) => ({
+                        expressId: door.expressId,
+                        mode: nearbyDoorRenderDecisions.get(door.expressId)?.mode,
+                        reason: nearbyDoorRenderDecisions.get(door.expressId)?.reason,
+                        bbox: door.bbox,
+                    })),
+            },
+        })
+    }
+    const hostWallRenderDecision = ctx.hostWall
+        ? decideSectionedRender(ctx.hostWall.bbox, 'host wall intersects full elevation volume')
+        : null
+    if (ctx.hostWall && hostWallRenderDecision?.mode !== 'hidden') {
         const hostFill = ctx.cset.cfcBkp != null
             ? resolveWallElevationColor(ctx.cset.cfcBkp, options.colors)
             : options.colors.elevation.wall
         let hostPolyCount = 0
         let hostSegCount = 0
+        let hostRawSegCount = 0
+        let hostBoundaryCount = 0
+        let hostSharpCount = 0
         const hostSegsAll: ProjectedSegment[] = []
+        const hostSegsRawAll: ProjectedSegment[] = []
         for (const mesh of ctx.hostWall.meshes) {
             const cls: MeshClassification = { fill: hostFill, layer: 1, role: 'host-wall' }
             const polys = projectMeshFill(mesh, cam, cls, ctx.hostWall.expressId, elevationClip, pixelClip)
             const segsRaw = projectMeshSegments(mesh, cam, options.colors.strokes.outline, 1, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
-            const segs = filterWallSeamSegments(segsRaw)
+            const segs = debugDisableWallSegments ? [] : snapNearCardinalSegments(filterWallSeamSegments(segsRaw))
+            const edgeStats = edgeStatsCache.get(mesh)
+            hostBoundaryCount += edgeStats?.boundary ?? 0
+            hostSharpCount += edgeStats?.sharp ?? 0
             hostPolyCount += polys.length
+            hostRawSegCount += segsRaw.length
             hostSegCount += segs.length
+            hostSegsRawAll.push(...segsRaw)
             hostSegsAll.push(...segs)
             if (polys.length === 0 && segs.length === 0) continue
             groups.push({
@@ -1411,27 +1703,41 @@ function emitElevationSvg(
             const orient = segmentOrientationStats(hostSegsAll)
             debugLogRenderer({
                 runId,
-                hypothesisId: 'H6',
+                hypothesisId: 'H1-H2-H3',
                 location: 'lib/ifclite-renderer.ts:emitElevationSvg:hostWall',
-                message: 'host wall segment orientation stats',
+                message: 'host wall edge composition raw_vs_filtered',
                 data: {
                     doorGuid: ctx.guid,
                     side,
                     expressId: ctx.hostWall.expressId,
+                    renderMode: hostWallRenderDecision?.mode,
+                    renderReason: hostWallRenderDecision?.reason,
                     renderPath: 'meshProjection',
                     polyCount: hostPolyCount,
+                    rawSegCount: hostRawSegCount,
                     segCount: hostSegCount,
+                    boundaryEdgeCount: hostBoundaryCount,
+                    sharpEdgeCount: hostSharpCount,
+                    rawOrientation: segmentOrientationStats(hostSegsRawAll),
                     horizontal: orient.horizontal,
                     vertical: orient.vertical,
                     oblique: orient.oblique,
                     maxObliqueLength: orient.maxObliqueLength,
+                    rawLenBuckets: segmentLengthBuckets(hostSegsRawAll),
+                    filteredLenBuckets: segmentLengthBuckets(hostSegsAll),
+                    rawSource: segmentSourceStats(hostSegsRawAll),
+                    filteredSource: segmentSourceStats(hostSegsAll),
                 },
             })
             // #endregion
         }
     }
+    const nearbySegsRawDebug: ProjectedSegment[] = []
+    const nearbySegsFilteredDebug: ProjectedSegment[] = []
+    let nearbyRenderedWalls = 0
     for (const w of ctx.nearbyWalls) {
-        const inBaseVolume = intersectsElevationVolume(w.bbox)
+        const renderDecision = decideSectionedRender(w.bbox, 'nearby wall intersects full elevation volume')
+        const inBaseVolume = renderDecision.mode !== 'hidden'
         const inVolume = inBaseVolume
         if (debugEnabled) {
             const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
@@ -1453,6 +1759,8 @@ function emitElevationSvg(
                     expressId: w.expressId,
                     guid: w.guid ?? null,
                     inVolume,
+                    renderMode: renderDecision.mode,
+                    renderReason: renderDecision.reason,
                     wallBBox: w.bbox,
                     wallCentreFacing,
                     doorCenterFacing,
@@ -1474,6 +1782,8 @@ function emitElevationSvg(
                         guid: wallGuid,
                         inBaseVolume,
                         inWallVolume: inVolume,
+                        renderMode: renderDecision.mode,
+                        renderReason: renderDecision.reason,
                         wallCentreFacing,
                         facingClipMin,
                         facingClipMax,
@@ -1483,7 +1793,7 @@ function emitElevationSvg(
                 })
             }
         }
-        if (!inVolume) continue
+        if (renderDecision.mode === 'hidden') continue
         // Layer choice: camera-side perpendicular walls (bbox centre on the
         // CAMERA side of door middle by more than half the host wall
         // thickness) sit BETWEEN the camera and the focal door — they should
@@ -1496,19 +1806,32 @@ function emitElevationSvg(
         const wallLayer = isInFrontOfDoor ? 8 : 1
         let polyCount = 0
         let segCount = 0
+        let rawSegCount = 0
+        let boundaryCount = 0
+        let sharpCount = 0
         const polysAll: ProjectedPolygon[] = []
+        const segsRawAll: ProjectedSegment[] = []
         const segsAll: ProjectedSegment[] = []
         for (const mesh of w.meshes) {
             const cls: MeshClassification = { fill: options.colors.elevation.wall, layer: wallLayer, role: 'nearby-wall' }
             const polys = projectMeshFill(mesh, cam, cls, w.expressId, elevationClip, pixelClip)
             const segsRaw = projectMeshSegments(mesh, cam, options.colors.strokes.outline, wallLayer, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
-            const segs = filterWallSeamSegments(segsRaw)
+            const segsSnapped = debugDisableWallSegments ? [] : snapNearCardinalSegments(filterWallSeamSegments(segsRaw))
+            const segs = wallLayer === 8 ? filterTinyObliqueSegments(segsSnapped, 3, 3) : segsSnapped
+            const edgeStats = edgeStatsCache.get(mesh)
+            boundaryCount += edgeStats?.boundary ?? 0
+            sharpCount += edgeStats?.sharp ?? 0
             polyCount += polys.length
+            rawSegCount += segsRaw.length
             segCount += segs.length
             polysAll.push(...polys)
+            segsRawAll.push(...segsRaw)
             segsAll.push(...segs)
         }
         if (polysAll.length === 0 && segsAll.length === 0) continue
+        nearbyRenderedWalls++
+        nearbySegsRawDebug.push(...segsRawAll)
+        nearbySegsFilteredDebug.push(...segsAll)
         if (debugEnabled) {
             const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
             const wallGuid = w.guid ?? null
@@ -1528,11 +1851,19 @@ function emitElevationSvg(
                         side,
                         expressId: w.expressId,
                         guid: wallGuid,
+                        renderMode: renderDecision.mode,
+                        renderReason: renderDecision.reason,
                         renderPath: 'meshProjection',
                         wallLayer,
                         polyCount,
+                        rawSegCount,
                         segCount,
+                        boundaryCount,
+                        sharpCount,
+                        rawOrientation: segmentOrientationStats(segsRawAll),
                         ...segmentOrientationStats(segsAll),
+                        rawLenBuckets: segmentLengthBuckets(segsRawAll),
+                        filteredLenBuckets: segmentLengthBuckets(segsAll),
                     },
                 })
                 // #endregion
@@ -1543,6 +1874,29 @@ function emitElevationSvg(
             polygons: polysAll,
             segments: segsAll,
         })
+    }
+    if (debugEnabled) {
+        // #region agent log H4-H5
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H4-H5',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
+            message: 'nearby wall edge aggregate raw_vs_filtered',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                nearbyRenderedWalls,
+                rawSegCount: nearbySegsRawDebug.length,
+                filteredSegCount: nearbySegsFilteredDebug.length,
+                rawOrientation: segmentOrientationStats(nearbySegsRawDebug),
+                filteredOrientation: segmentOrientationStats(nearbySegsFilteredDebug),
+                rawLenBuckets: segmentLengthBuckets(nearbySegsRawDebug),
+                filteredLenBuckets: segmentLengthBuckets(nearbySegsFilteredDebug),
+                rawSource: segmentSourceStats(nearbySegsRawDebug),
+                filteredSource: segmentSourceStats(nearbySegsFilteredDebug),
+            },
+        })
+        // #endregion
     }
     // Horizontal band rendering: a full-canvas-width strip clipped to the
     // [yMinWorld, yMaxWorld] range, painted with `fill` at the given layer,
@@ -1558,14 +1912,48 @@ function emitElevationSvg(
         layer: number,
         addStrokes: boolean,
         debugLocation: string,
+        clipDepthAxis = true,
     ) {
-        const partClip: WorldClip = {
+        const widthOnlyClip: WorldClip = {
             yMin: yLo,
             yMax: yHi,
-            xMin: elevationClip.xMin,
-            xMax: elevationClip.xMax,
-            zMin: elevationClip.zMin,
-            zMax: elevationClip.zMax,
+            xMin: isXAligned ? elevationClip.xMin : undefined,
+            xMax: isXAligned ? elevationClip.xMax : undefined,
+            zMin: !isXAligned ? elevationClip.zMin : undefined,
+            zMax: !isXAligned ? elevationClip.zMax : undefined,
+        }
+        const partClip: WorldClip = {
+            ...(clipDepthAxis
+                ? {
+                    yMin: yLo,
+                    yMax: yHi,
+                    xMin: elevationClip.xMin,
+                    xMax: elevationClip.xMax,
+                    zMin: elevationClip.zMin,
+                    zMax: elevationClip.zMax,
+                }
+                : widthOnlyClip),
+        }
+        const isAboveParts = debugLocation === 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts'
+        const hasCoveringMesh = part.meshes.some((m) => (m.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING')
+        if (debugEnabled && isAboveParts && hasCoveringMesh) {
+            // #region agent log H27
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H27',
+                location: debugLocation,
+                message: 'covering part clip mode before projection',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    expressId: part.expressId,
+                    guid: part.guid ?? null,
+                    clipDepthAxis,
+                    partClip,
+                    bbox: part.bbox,
+                },
+            })
+            // #endregion
         }
         let polyCount = 0
         let segCount = 0
@@ -1604,13 +1992,37 @@ function emitElevationSvg(
                 accepted: 0,
             }
             const polys = projectMeshFill(mesh, cam, cls, part.expressId, partClip, pixelClip, meshStats)
-            const segs = addStrokes
+            const segsRaw = addStrokes
                 ? projectMeshSegments(mesh, cam, options.colors.strokes.outline, layer, options.lineWidth, partClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
                 : []
+            const segs = snapNearCardinalSegments(segsRaw)
             polyCount += polys.length
             segCount += segs.length
             polysAll.push(...polys)
             segsAll.push(...segs)
+            if (debugEnabled && isAboveParts && hasCoveringMesh) {
+                // #region agent log H25
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H25',
+                    location: `${debugLocation}:mesh`,
+                    message: 'covering mesh projection counts and rejection breakdown',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: part.expressId,
+                        guid: part.guid ?? null,
+                        meshExpressId: mesh.expressId,
+                        meshIfcType: mesh.ifcType ?? null,
+                        yLo,
+                        yHi,
+                        polyCount: polys.length,
+                        segCount: segs.length,
+                        meshStats,
+                    },
+                })
+                // #endregion
+            }
             if (debugEnabled && part.guid) {
                 const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
                 const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
@@ -1662,6 +2074,28 @@ function emitElevationSvg(
             return
         }
         if (polysAll.length === 0 && segsAll.length === 0) {
+            if (debugEnabled && isAboveParts && hasCoveringMesh) {
+                // #region agent log H26
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H26',
+                    location: debugLocation,
+                    message: 'covering part dropped because projected geometry was empty',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: part.expressId,
+                        guid: part.guid ?? null,
+                        yLo,
+                        yHi,
+                        polyCount,
+                        segCount,
+                        clip: partClip,
+                        bbox: part.bbox,
+                    },
+                })
+                // #endregion
+            }
             if (debugEnabled && part.guid) {
                 const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
                 const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
@@ -1773,7 +2207,10 @@ function emitElevationSvg(
 
     // Structural slabs: real mesh only. Do not synthesize full-width cap bands.
     {
-        if (ctx.slabBelow && intersectsElevationVolume(ctx.slabBelow.bbox)) {
+        const slabBelowRenderDecision = ctx.slabBelow
+            ? decideSectionedRender(ctx.slabBelow.bbox, 'structural slab below intersects full elevation volume')
+            : null
+        if (ctx.slabBelow && slabBelowRenderDecision?.mode !== 'hidden') {
             const yLo = Math.max(ctx.slabBelow.bbox.min[1], viewportBottomY)
             const yHi = Math.min(ctx.slabBelow.bbox.max[1], viewportTopY)
             if (yHi - yLo >= 0.005) {
@@ -1782,18 +2219,27 @@ function emitElevationSvg(
                     yLo,
                     yHi,
                     options.colors.elevation.wall,
-                    2,
-                    true,
+                    ELEVATION_SECTIONED_PART_LAYER,
+                    slabBelowRenderDecision?.mode === 'sectioned',
                     'lib/ifclite-renderer.ts:emitElevationSvg:belowStructuralSlab'
                 )
             }
         }
         // Unterlagsboden / build-up parts above the structural slab. Also real
         // geometry only; no synthetic bbox fallback.
+        const belowPartRenderDecisions = new Map<number, ElevationRenderDecision>()
         const belowParts = ctx.slabBelowParts
-            .filter((p) => intersectsElevationVolume(p.bbox))
+            .filter((p) => {
+                const renderDecision = decideSectionedRender(p.bbox, 'slab-below part intersects full elevation volume')
+                belowPartRenderDecisions.set(p.expressId, renderDecision)
+                return renderDecision.mode !== 'hidden'
+            })
             .sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
         for (const part of belowParts) {
+            const renderDecision = belowPartRenderDecisions.get(part.expressId) ?? {
+                mode: 'sectioned',
+                reason: 'fallback after slab-below filtering',
+            }
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
             if (yHi - yLo < 0.005) continue
@@ -1816,16 +2262,21 @@ function emitElevationSvg(
                             viewportBottomY,
                             viewportTopY,
                             inVolume: intersectsElevationVolume(part.bbox),
+                            renderMode: renderDecision.mode,
+                            renderReason: renderDecision.reason,
                             bbox: part.bbox,
                         },
                     })
                 }
             }
-            drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, 2, true, 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts')
+            drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, ELEVATION_SECTIONED_PART_LAYER, renderDecision.mode === 'sectioned', 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts')
         }
     }
     {
-        if (ctx.slabAbove && intersectsElevationVolume(ctx.slabAbove.bbox)) {
+        const slabAboveRenderDecision = ctx.slabAbove
+            ? decideSectionedRender(ctx.slabAbove.bbox, 'structural slab above intersects full elevation volume')
+            : null
+        if (ctx.slabAbove && slabAboveRenderDecision?.mode !== 'hidden') {
             const yLo = Math.max(ctx.slabAbove.bbox.min[1], viewportBottomY)
             const yHi = Math.min(ctx.slabAbove.bbox.max[1], viewportTopY)
             if (yHi - yLo >= 0.005) {
@@ -1834,8 +2285,8 @@ function emitElevationSvg(
                     yLo,
                     yHi,
                     options.colors.elevation.wall,
-                    2,
-                    true,
+                    ELEVATION_SECTIONED_PART_LAYER,
+                    slabAboveRenderDecision?.mode === 'sectioned',
                     'lib/ifclite-renderer.ts:emitElevationSvg:aboveStructuralSlab'
                 )
             }
@@ -1869,12 +2320,23 @@ function emitElevationSvg(
             // #endregion
         }
         // Slab-above parts: render both IFCBUILDINGELEMENTPART and IFCCOVERING
-        // fills so suspended ceilings / hinged slabs remain visible in
-        // elevation. Keep covering bands stroke-free to avoid adding heavy
-        // horizontal bars that can visually sever perpendicular wall strokes.
+        // as sectioned slab/build-up geometry so box-like ceiling elements get
+        // the same contour treatment as other slab parts.
+        let abovePartsTotal = 0
+        let abovePartsInYWidth = 0
+        let abovePartsInFullVolume = 0
+        let abovePartsCovering = 0
+        const abovePartRenderDecisions = new Map<number, ElevationRenderDecision>()
         const aboveParts = ctx.slabAboveParts
             .filter((p) => {
+                abovePartsTotal++
+                const inYWidth = inYAndWidthVolume(p.bbox)
+                if (inYWidth) abovePartsInYWidth++
                 const inVolume = intersectsElevationVolume(p.bbox)
+                if (inVolume) abovePartsInFullVolume++
+                const isCovering = isIfcCoveringPart(p)
+                if (isCovering) abovePartsCovering++
+                let renderDecision: ElevationRenderDecision
                 if (debugEnabled && p.guid) {
                     const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
                     const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(p.guid) || targetNorms.has(p.guid.replace(/\$/g, '_'))
@@ -1891,26 +2353,93 @@ function emitElevationSvg(
                                 expressId: p.expressId,
                                 guid: p.guid,
                                 inVolume,
+                                inYWidth,
                                 bbox: p.bbox,
                             },
                         })
                         // #endregion
                     }
                 }
-                if (!inVolume) return false
-                const isCovering = (p.meshes[0]?.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING'
-                if (!isCovering) return true
-                // Coverings can straddle the host plane; choose a deterministic
-                // side using bbox centre on the facing axis so a single element
-                // doesn't render in both front/back just because it overlaps.
-                const centreFacing = (p.bbox.min[facingAxisIdx] + p.bbox.max[facingAxisIdx]) / 2
-                const sideGatePass = cameraSign > 0
-                    ? centreFacing >= doorCenterFacing
-                    : centreFacing <= doorCenterFacing
-                return sideGatePass
+                renderDecision = inVolume
+                    ? {
+                        mode: 'sectioned',
+                        reason: isCovering
+                            ? 'covering treated like slab/buildingelementpart and intersects full elevation volume'
+                            : 'non-covering slab part intersects full elevation volume',
+                    }
+                    : {
+                        mode: 'hidden',
+                        reason: isCovering
+                            ? 'covering treated like slab/buildingelementpart but outside full elevation volume'
+                            : 'non-covering slab part outside full elevation volume',
+                    }
+                abovePartRenderDecisions.set(p.expressId, renderDecision)
+                if (debugEnabled) {
+                    debugLogRenderer({
+                        runId,
+                        hypothesisId: 'H28',
+                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                        message: 'slab-above part render decision',
+                        data: {
+                            doorGuid: ctx.guid,
+                            side,
+                            expressId: p.expressId,
+                            guid: p.guid ?? null,
+                            isCovering,
+                            inYWidth,
+                            inVolume,
+                            renderMode: renderDecision.mode,
+                            renderReason: renderDecision.reason,
+                        },
+                    })
+                }
+                return renderDecision.mode !== 'hidden'
             })
             .sort((a, b) => b.bbox.max[1] - a.bbox.max[1])
+        if (debugEnabled) {
+            // #region agent log H21
+            const aboveTypeSummary = aboveParts.map((p) => {
+                const firstType = p.meshes[0]?.ifcType?.toUpperCase() ?? null
+                const coveringByFirst = firstType === 'IFCCOVERING'
+                const coveringByAny = isIfcCoveringPart(p)
+                return {
+                    expressId: p.expressId,
+                    guid: p.guid ?? null,
+                    firstType,
+                    coveringByFirst,
+                    coveringByAny,
+                    renderMode: abovePartRenderDecisions.get(p.expressId)?.mode ?? 'hidden',
+                    renderReason: abovePartRenderDecisions.get(p.expressId)?.reason ?? 'not evaluated',
+                    meshCount: p.meshes.length,
+                }
+            })
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H21',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                message: 'above parts covering classification summary',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    abovePartsCount: aboveParts.length,
+                    abovePartsTotal,
+                    abovePartsInYWidth,
+                    abovePartsInFullVolume,
+                    abovePartsCovering,
+                    coveringByFirstCount: aboveTypeSummary.filter((x) => x.coveringByFirst).length,
+                    coveringByAnyCount: aboveTypeSummary.filter((x) => x.coveringByAny).length,
+                    mismatchedCoveringCount: aboveTypeSummary.filter((x) => x.coveringByAny && !x.coveringByFirst).length,
+                    aboveTypeSummary,
+                },
+            })
+            // #endregion
+        }
         for (const part of aboveParts) {
+            const renderDecision = abovePartRenderDecisions.get(part.expressId) ?? {
+                mode: 'sectioned',
+                reason: 'fallback after slab-above filtering',
+            }
+            if (renderDecision.mode === 'hidden') continue
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             if (yHi - yLo < 0.005) continue
@@ -1933,16 +2462,50 @@ function emitElevationSvg(
                             viewportBottomY,
                             viewportTopY,
                             inVolume: intersectsElevationVolume(part.bbox),
+                            renderMode: renderDecision.mode,
+                            renderReason: renderDecision.reason,
                             bbox: part.bbox,
                         },
                     })
                 }
             }
-            const isCovering = (part.meshes[0]?.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING'
+            const isCovering = isIfcCoveringPart(part)
             const fill = isCovering ? options.colors.elevation.suspendedCeiling : options.colors.elevation.wall
-            const addStrokes = isCovering ? true : !isCovering
-            const layer = isCovering ? 7 : 2
-            drawPartGeometry(part, yLo, yHi, fill, layer, addStrokes, 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts')
+            const addStrokes = renderDecision.mode === 'sectioned'
+            const layer = ELEVATION_SECTIONED_PART_LAYER
+            if (debugEnabled) {
+                // #region agent log H22
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H22',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                    message: 'above part render-layer assignment',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: part.expressId,
+                        guid: part.guid ?? null,
+                        isCovering,
+                        renderMode: renderDecision.mode,
+                        renderReason: renderDecision.reason,
+                        layer,
+                        addStrokes,
+                        yLo,
+                        yHi,
+                    },
+                })
+                // #endregion
+            }
+            drawPartGeometry(
+                part,
+                yLo,
+                yHi,
+                fill,
+                layer,
+                addStrokes,
+                'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
+                renderDecision.mode === 'sectioned'
+            )
         }
     }
 
@@ -1952,20 +2515,22 @@ function emitElevationSvg(
     const meshes: Array<{ mesh: IfcLiteMesh; expressId: number }> = []
     for (const m of ctx.door.meshes) meshes.push({ mesh: m, expressId: m.expressId })
     for (const d of ctx.nearbyDoors) {
-        if (!intersectsElevationVolume(d.bbox)) continue
+        if (!nearbyDoorModes.has(d.expressId)) continue
         for (const m of d.meshes) meshes.push({ mesh: m, expressId: m.expressId })
     }
     for (const w of ctx.nearbyWindows) {
-        if (!intersectsElevationVolume(w.bbox)) continue
+        const renderDecision = decideSectionedRender(w.bbox, 'nearby window intersects full elevation volume')
+        if (renderDecision.mode === 'hidden') continue
         for (const m of w.meshes) meshes.push({ mesh: m, expressId: m.expressId })
     }
     for (const d of ctx.nearbyDevices) {
-        if (!intersectsElevationVolume(d.bbox)) continue
+        const renderDecision = decideSectionedRender(d.bbox, 'nearby device intersects full elevation volume')
+        if (renderDecision.mode === 'hidden') continue
         for (const m of d.meshes) meshes.push({ mesh: m, expressId: m.expressId })
     }
     // Focal door is the subject of the elevation — always fully drawn in
-    // BOTH views.  The depth half-space clip exists for CONTEXT (nearby walls,
-    // adjacent doors, slabs, devices) so we don't paint the far room.  Applying
+    // BOTH views.  The depth half-space clip exists for cut/section context
+    // (nearby walls, sectioned nearby doors, slabs, devices) so we don't paint the far room.  Applying
     // it to the focal door's own mesh produces:
     //   • asymmetric glazing — a glass panel offset to one face has all
     //     vertices on one side of doorMid, so one camera keeps it and the
@@ -1973,8 +2538,10 @@ function emitElevationSvg(
     //   • stray slivers over the door — side-faces of the door leaf span
     //     doorMid, partially survive the all-3-outside test, and project
     //     as thin lines on the door area.
-    // Solution: render focal door with depth axis removed from the clip;
-    // keep Y range and width-axis clip for the storey content / canvas crop.
+    // Solution: render focal door and projected nearby doors with depth
+    // axis removed from the clip; keep Y range and width-axis clip for the
+    // storey content / canvas crop. Sectioned nearby doors keep the full
+    // elevation clip and therefore use non-blue context fill.
     const focalDoorClip: WorldClip = {
         yMin: elevationClip.yMin,
         yMax: elevationClip.yMax,
@@ -1983,16 +2550,67 @@ function emitElevationSvg(
         zMin: !isXAligned ? elevationClip.zMin : undefined,
         zMax: !isXAligned ? elevationClip.zMax : undefined,
     }
+    const focalDoorRenderDecision: ElevationRenderDecision = {
+        mode: 'projected',
+        reason: 'focal door subject renders without depth clipping in elevation',
+    }
     for (const { mesh, expressId } of meshes) {
-        const cls = classifyMesh(mesh, ctx, true, options.colors)
-        const isDoorMesh =
-            expressId === ctx.door.expressId
-            || ctx.nearbyDoors.some((d) => d.expressId === expressId)
-        const meshClip = isDoorMesh ? focalDoorClip : elevationClip
+        const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes)
+        const nearbyDoorMode = nearbyDoorModes.get(expressId)
+        const isFocalDoorMesh = expressId === ctx.door.expressId
+        const meshRenderMode = isFocalDoorMesh ? focalDoorRenderDecision.mode : nearbyDoorMode ?? 'sectioned'
+        const meshClip = meshRenderMode === 'projected'
+            ? focalDoorClip
+            : elevationClip
         const polys = projectMeshFill(mesh, cam, cls, expressId, meshClip, pixelClip)
         const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, meshClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
+    }
+    if (debugEnabled) {
+        const layerStats: Array<{
+            layer: number
+            total: number
+            oblique: number
+            maxObliqueLength: number
+            maxDriftDeg: number
+            driftGt1Deg: number
+            driftGt3Deg: number
+        }> = []
+        let totalSegCount = 0
+        let totalOblique = 0
+        for (const g of groups) {
+            const o = segmentOrientationStats(g.segments)
+            const d = segmentAxisDriftStats(g.segments)
+            const total = g.segments.length
+            totalSegCount += total
+            totalOblique += o.oblique
+            layerStats.push({
+                layer: g.layer,
+                total,
+                oblique: o.oblique,
+                maxObliqueLength: o.maxObliqueLength,
+                maxDriftDeg: d.maxDriftDeg,
+                driftGt1Deg: d.countGt1Deg,
+                driftGt3Deg: d.countGt3Deg,
+            })
+        }
+        // #region agent log H20
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H20',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:allGroups',
+            message: 'rendered segment orientation by layer',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                totalSegCount,
+                totalOblique,
+                driftTotals: segmentAxisDriftStats(groups.flatMap((g) => g.segments)),
+                layerStats: layerStats.filter((s) => s.total > 0),
+            },
+        })
+        // #endregion
     }
     groups.sort((a, b) => a.layer - b.layer)
 
@@ -2018,7 +2636,7 @@ function emitElevationSvg(
         const minMarkerY = labelFont + labelGap + triHeight + 4
         const maxMarkerY = H - 6
         const markerY = Math.max(minMarkerY, Math.min(maxMarkerY, refScreenY))
-        const markerX = W - 30
+        const markerX = W / 2
         const labelY = markerY - triHeight - labelGap
         const escaped = escapeSvgText(labelShort)
         const triPts = [
