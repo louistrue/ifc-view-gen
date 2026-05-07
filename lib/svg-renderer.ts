@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import type { DoorContext, DoorViewFrame } from './door-analyzer'
+import type { ElementInfo } from './ifc-types'
 import {
     getDoorMeshes,
     getDoorOperationInfo,
@@ -1143,6 +1144,50 @@ function getStructuralSlabFaceDy(
 
 /** Show 10 cm of the structural slab at the top and bottom of every elevation. */
 const STRUCTURAL_SLAB_INTRUSION_METERS = 0.10
+const OVERHEAD_SLAB_SEARCH_METERS = 0.80
+
+function getOverheadSlabCropDy(context: DoorContext): number | null {
+    const frame = context.viewFrame
+    const originB = frame.origin.dot(frame.upAxis)
+    const doorTop = originB + frame.height / 2
+    const candidates: Array<{
+        expressID: number
+        minB: number
+        maxB: number
+        distanceToDoorHead: number
+    }> = []
+    const addCandidate = (element: ElementInfo) => {
+        if (!element.boundingBox) return
+        const bounds = measureBoundingBoxInAxes(
+            element.boundingBox,
+            frame.widthAxis,
+            frame.upAxis,
+            frame.semanticFacing
+        )
+        const distanceToDoorHead = Math.max(
+            bounds.minB - doorTop,
+            doorTop - bounds.maxB,
+            0,
+        )
+        if (!Number.isFinite(distanceToDoorHead) || distanceToDoorHead > OVERHEAD_SLAB_SEARCH_METERS) return
+        candidates.push({
+            expressID: element.expressID,
+            minB: bounds.minB,
+            maxB: bounds.maxB,
+            distanceToDoorHead,
+        })
+    }
+    for (const slab of context.hostSlabsAbove) addCandidate(slab)
+    for (const ceiling of context.hostCeilings) addCandidate(ceiling)
+    if (candidates.length === 0) return null
+    const selected = candidates.reduce((best, cur) => {
+        if (cur.distanceToDoorHead !== best.distanceToDoorHead) {
+            return cur.distanceToDoorHead < best.distanceToDoorHead ? cur : best
+        }
+        return cur.minB < best.minB ? cur : best
+    }, candidates[0])
+    return Math.min(selected.minB + STRUCTURAL_SLAB_INTRUSION_METERS, selected.maxB) - originB
+}
 
 function getElevationTopContextGapMeters(context: DoorContext): number {
     const gaps: number[] = []
@@ -4117,7 +4162,6 @@ function getElevationHostClipBounds(
     // reference is the real concrete slab, not the finish layer. Falls back
     // to a 10 cm reveal below the door threshold when no structural slab is
     // detected for this door's storey.
-    const structAboveDy = getStructuralSlabFaceDy(context, 'above')
     const structBelowDy = getStructuralSlabFaceDy(context, 'below')
     const bottomDy = structBelowDy != null
         ? structBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
@@ -4127,8 +4171,9 @@ function getElevationHostClipBounds(
     // than 3.5 m — still produce a consistent canvas fill.
     const STOREY_CONTENT_HEIGHT_METERS = 3.5
     const topCapDy = bottomDy + STOREY_CONTENT_HEIGHT_METERS
-    let topDy = structAboveDy != null
-        ? Math.min(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDy)
+    const overheadCropDy = getOverheadSlabCropDy(context)
+    const topDy = overheadCropDy != null
+        ? Math.min(overheadCropDy, topCapDy)
         : topCapDy
 
     const topPoint = frame.origin.clone().add(frame.upAxis.clone().multiplyScalar(topDy))
@@ -4423,14 +4468,14 @@ function collectFrontElevationFitGeometry(
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } | null {
     const frame = context.viewFrame
     const margin = Math.max(opts.margin, 0.25)
-    const structAboveDy = getStructuralSlabFaceDy(context, 'above')
     const structBelowDy = getStructuralSlabFaceDy(context, 'below')
     const bottomDy = structBelowDy != null
         ? structBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
         : -frame.height / 2 - STRUCTURAL_SLAB_INTRUSION_METERS
     const topCapDy = bottomDy + 3.5
-    const topDy = structAboveDy != null
-        ? Math.min(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDy)
+    const overheadCropDy = getOverheadSlabCropDy(context)
+    const topDy = overheadCropDy != null
+        ? Math.min(overheadCropDy, topCapDy)
         : topCapDy
     const topExt = Math.max(topDy - frame.height / 2, 0)
     const botExt = Math.max(-bottomDy - frame.height / 2, 0)
@@ -5698,14 +5743,14 @@ function renderElevationFromMeshes(
     // Camera frustum must enclose the same content window as the clip bounds:
     // 10 cm into the structural slab below (top face minus 10 cm) and 10 cm
     // into the structural slab above (underside plus 10 cm), capped at 3.5 m.
-    const structAboveDyForCamera = getStructuralSlabFaceDy(context, 'above')
     const structBelowDyForCamera = getStructuralSlabFaceDy(context, 'below')
     const bottomDyForCamera = structBelowDyForCamera != null
         ? structBelowDyForCamera - STRUCTURAL_SLAB_INTRUSION_METERS
         : -frame.height / 2 - STRUCTURAL_SLAB_INTRUSION_METERS
     const topCapDyForCamera = bottomDyForCamera + 3.5
-    const topDyForCamera = structAboveDyForCamera != null
-        ? Math.min(structAboveDyForCamera + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDyForCamera)
+    const overheadCropDyForCamera = getOverheadSlabCropDy(context)
+    const topDyForCamera = overheadCropDyForCamera != null
+        ? Math.min(overheadCropDyForCamera, topCapDyForCamera)
         : topCapDyForCamera
     const topExtFromSlab = Math.max(topDyForCamera - frame.height / 2, 0)
     const botExtFromSlab = Math.max(-bottomDyForCamera - frame.height / 2, 0)

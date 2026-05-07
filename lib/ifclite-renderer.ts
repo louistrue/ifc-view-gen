@@ -83,6 +83,7 @@ export const CANVAS_HEIGHT_PX = 1000
 // Legacy renderer constants — kept identical so visual parity holds.
 const STRUCTURAL_SLAB_INTRUSION_METERS = 0.10  // 10 cm into slab top/bottom face
 const STOREY_CONTENT_HEIGHT_METERS = 3.5       // hard cap on visible vertical span
+const OVERHEAD_SLAB_SEARCH_METERS = 0.80       // search band above/around the door head
 // Lateral context size on each side of the door, matched to legacy
 // `getEffectiveLateralHalfMeters`: clamp(doorWidth*0.5, 0.5m, 1.5m). Beyond
 // this the canvas paints the page background — the architectural border that
@@ -1339,16 +1340,16 @@ function emitElevationSvg(
     const H = options.height
     const doorBottom = ctx.viewFrame.origin[1]
 
-    // Storey vertical viewport (legacy parity, see svg-renderer.ts):
+    // Storey vertical viewport:
     //   bottomDy = slab-below.top - 10 cm intrusion (drop into slab below)
-    //   topDy    = min(slab-above.bottom + 10 cm, bottomDy + 3.5 m cap)
-    // Falls back to door-bottom ± 10 cm when slabs are missing.
+    //   topDy    = nearest overhead slab/part face + 10 cm intrusion,
+    //              when that candidate is within 0.8 m of the door head.
+    // Falls back to a 3.5 m storey cap when no overhead candidate is found.
     //
     // When findSlabsAroundDoor doesn't return a structural IFCSLAB (Flu21
     // basement: slab too far from door centre, only Bodenplatte tiles model
     // the floor), use the lowest IFCBUILDINGELEMENTPART build-up bottom as a
     // proxy for the structural-slab top so the 10 cm cap still reads.
-    const structAboveDy = getStructuralSlabFaceDy(ctx, 'above')
     const structBelowDy = getStructuralSlabFaceDy(ctx, 'below')
     let buildupFloorDy: number | null = null
     if (structBelowDy == null && ctx.slabBelowParts.length > 0) {
@@ -1363,17 +1364,62 @@ function emitElevationSvg(
         ? effectiveBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
         : -STRUCTURAL_SLAB_INTRUSION_METERS
     const topCapDy = bottomDy + STOREY_CONTENT_HEIGHT_METERS
-    const idealTopDy = structAboveDy != null
-        ? Math.min(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDy)
+    const doorHeadY = ctx.door.bbox.max[1]
+    // #region agent log H4
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H4',location:'lib/ifclite-renderer.ts:emitElevationSvg:doorExtents',message:'door/frame vertical anchors used by crop logic',data:{doorGuid:ctx.guid,side,doorBottom,doorHeadY,doorBBoxMinY:ctx.door.bbox.min[1],doorBBoxMaxY:ctx.door.bbox.max[1],viewFrameOriginY:ctx.viewFrame.origin[1]},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    const overheadCandidates: Array<{
+        expressId: number
+        bbox: AABB
+        source: 'structural-slab-above' | 'slab-above-part'
+        distanceToDoorHead: number
+    }> = []
+    const addOverheadCandidate = (
+        candidate: { expressId: number; bbox: AABB } | null,
+        source: 'structural-slab-above' | 'slab-above-part',
+    ) => {
+        if (!candidate) return
+        const distanceToDoorHead = Math.max(
+            candidate.bbox.min[1] - doorHeadY,
+            doorHeadY - candidate.bbox.max[1],
+            0,
+        )
+        if (distanceToDoorHead > OVERHEAD_SLAB_SEARCH_METERS) return
+        overheadCandidates.push({ expressId: candidate.expressId, bbox: candidate.bbox, source, distanceToDoorHead })
+    }
+    addOverheadCandidate(ctx.slabAbove, 'structural-slab-above')
+    for (const part of ctx.slabAboveParts) addOverheadCandidate(part, 'slab-above-part')
+    // #region agent log H1
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H1',location:'lib/ifclite-renderer.ts:emitElevationSvg:overheadCandidates',message:'overhead crop candidates within search band',data:{doorGuid:ctx.guid,side,overheadSearchMeters:OVERHEAD_SLAB_SEARCH_METERS,candidateCount:overheadCandidates.length,candidates:overheadCandidates.map((c)=>({expressId:c.expressId,source:c.source,minY:c.bbox.min[1],maxY:c.bbox.max[1],distanceToDoorHead:c.distanceToDoorHead}))},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    const overheadCrop = overheadCandidates.length > 0
+        ? overheadCandidates.reduce((best, cur) => {
+            // Within the allowed search band, crop against the UPPERMOST layer
+            // above the door (highest lower face / minY).
+            if (cur.bbox.min[1] !== best.bbox.min[1]) {
+                return cur.bbox.min[1] > best.bbox.min[1] ? cur : best
+            }
+            // Stable tie-break: if the lower faces coincide, prefer the thicker/
+            // higher-reaching layer and then the lower expressId.
+            if (cur.bbox.max[1] !== best.bbox.max[1]) {
+                return cur.bbox.max[1] > best.bbox.max[1] ? cur : best
+            }
+            return cur.expressId < best.expressId ? cur : best
+        }, overheadCandidates[0])
+        : null
+    const overheadCropDy = overheadCrop
+        ? Math.min(overheadCrop.bbox.min[1] + STRUCTURAL_SLAB_INTRUSION_METERS, overheadCrop.bbox.max[1]) - doorBottom
+        : null
+    // Top crop is driven by the selected overhead layer, not door bbox headroom.
+    const topDy = overheadCropDy != null
+        ? Math.min(overheadCropDy, topCapDy)
         : topCapDy
-    // Always reserve 10 cm of headroom above the door bbox top so the slab
-    // cap band (drawn at viewportTopY) renders ABOVE the door rather than
-    // inside its vertical extent.  Some doors include a transom/frame in
-    // their bbox that reaches into the wall lintel — without this floor,
-    // slabAbove.bbox.min[1] sits at or below door head, viewportTopY = door
-    // head, and the door (layer 6) paints over the slab cap (layer 2).
-    const doorHeadDy = ctx.door.bbox.max[1] - doorBottom
-    const topDy = Math.max(idealTopDy, doorHeadDy + STRUCTURAL_SLAB_INTRUSION_METERS)
+    // #region agent log H2
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H2',location:'lib/ifclite-renderer.ts:emitElevationSvg:overheadSelection',message:'selected overhead element used for top crop',data:{doorGuid:ctx.guid,side,selected:overheadCrop?{expressId:overheadCrop.expressId,source:overheadCrop.source,minY:overheadCrop.bbox.min[1],maxY:overheadCrop.bbox.max[1],distanceToDoorHead:overheadCrop.distanceToDoorHead}:null,selectionRule:'highest-minY-within-search-band'},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    // #region agent log H3
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H3',location:'lib/ifclite-renderer.ts:emitElevationSvg:topClamp',message:'top crop clamp against storey cap',data:{doorGuid:ctx.guid,side,bottomDy,topCapDy,overheadCropDy,topDy,structuralSlabIntrusionMeters:STRUCTURAL_SLAB_INTRUSION_METERS,storeyContentHeightMeters:STOREY_CONTENT_HEIGHT_METERS,isClampedByTopCap:overheadCropDy!=null&&topDy===topCapDy&&overheadCropDy>topCapDy},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     const viewportBottomY = doorBottom + bottomDy
     const viewportTopY = doorBottom + topDy
 
@@ -1401,6 +1447,19 @@ function emitElevationSvg(
             data: {
                 doorGuid: ctx.guid,
                 side,
+                viewportBottomY,
+                viewportTopY,
+                topDy,
+                topCapDy,
+                overheadSearchMeters: OVERHEAD_SLAB_SEARCH_METERS,
+                overheadCrop: overheadCrop
+                    ? {
+                        expressId: overheadCrop.expressId,
+                        source: overheadCrop.source,
+                        distanceToDoorHead: overheadCrop.distanceToDoorHead,
+                        bbox: overheadCrop.bbox,
+                    }
+                    : null,
                 slabAbovePartCount: ctx.slabAboveParts.length,
                 slabBelowPartCount: ctx.slabBelowParts.length,
                 nearbyWallCount: ctx.nearbyWalls.length,
@@ -1426,7 +1485,7 @@ function emitElevationSvg(
     }
 
     if (process.env.DEBUG_VIEWPORT === '1') {
-        console.log(`[viewport ${side}] door=${ctx.guid} doorBottom=${doorBottom.toFixed(3)} structAboveDy=${structAboveDy} structBelowDy=${structBelowDy} bottomDy=${bottomDy.toFixed(3)} topDy=${topDy.toFixed(3)} viewport=[${viewportBottomY.toFixed(3)}, ${viewportTopY.toFixed(3)}]`)
+        console.log(`[viewport ${side}] door=${ctx.guid} doorBottom=${doorBottom.toFixed(3)} overheadCropDy=${overheadCropDy} structBelowDy=${structBelowDy} bottomDy=${bottomDy.toFixed(3)} topDy=${topDy.toFixed(3)} viewport=[${viewportBottomY.toFixed(3)}, ${viewportTopY.toFixed(3)}]`)
     }
 
     // World-coords clip: full canvas width centered on the door anchor + Y
