@@ -47,8 +47,20 @@ import type { AABB, DoorContextLite, DoorViewFrame } from './ifclite-door-analyz
 import type { IfcLiteMesh } from './ifclite-source'
 
 const COLORS = loadRenderColors()
-const DEBUG_TARGET_DOOR_GUID = process.env.DEBUG_PROBE_DOOR_GUID ?? process.env.DEBUG_TARGET_DOOR_GUID ?? ''
-const DEBUG_TARGET_ELEMENT_GUIDS: readonly string[] = []
+const DEBUG_TARGET_DOOR_GUID = process.env.DEBUG_PROBE_DOOR_GUID ?? process.env.DEBUG_TARGET_DOOR_GUID ?? '1zXqD3S6hGHA3_XsodcG2W'
+const DEBUG_TARGET_ELEMENT_GUIDS: readonly string[] = (() => {
+    const raw = process.env.DEBUG_TARGET_ELEMENT_GUIDS ?? ''
+    const fromEnv = raw
+        .split(/[,\s]+/)
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0)
+    return [...new Set([
+        ...fromEnv,
+        '2c3tVIi62SGvevyFQqC4JV',
+        '1dnZtXgzhmGhIfhHRBWSof',
+        '32derTOiTLHBcFrjYZthYc',
+    ])]
+})()
 const NO_FALLBACK_PART_GUIDS: readonly string[] = [
     '3HuvnrKbA$kTf3k1qPn15K',
 ]
@@ -60,15 +72,15 @@ function debugLogRenderer(payload: {
     message: string
     data: Record<string, unknown>
 }) {
-    const line = JSON.stringify({ sessionId: 'a4f827', runId: payload.runId, hypothesisId: payload.hypothesisId, location: payload.location, message: payload.message, data: payload.data, timestamp: Date.now() })
+    const line = JSON.stringify({ sessionId: '8a3fee', runId: payload.runId, hypothesisId: payload.hypothesisId, location: payload.location, message: payload.message, data: payload.data, timestamp: Date.now() })
     try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        require('node:fs').appendFileSync('debug-a4f827.log', `${line}\n`, 'utf8')
+        require('node:fs').appendFileSync('debug-8a3fee.log', `${line}\n`, 'utf8')
     } catch {
         /* best effort */
     }
     // #region agent log
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a4f827'},body:line}).catch(()=>{});
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'8a3fee'},body:line}).catch(()=>{});
     // #endregion
 }
 
@@ -169,6 +181,11 @@ interface ProjectedPolygon {
     depth: number
     layer: number
     expressId?: number
+}
+
+interface PendingOverlaySegment {
+    layer: number
+    segment: ProjectedSegment
 }
 
 interface MeshClassification {
@@ -395,7 +412,7 @@ function classifyMesh(
     }
     const dev = ctx.nearbyDevices.find((d) => d.expressId === id)
     if (dev) {
-        const safety = isSafetyDevice(dev.name, null, colors)
+        const safety = isSafetyDevice(dev.name, dev.layers, colors)
         return safety
             ? { fill: colors.elevation.safety, layer: 8, role: 'safety' }
             : { fill: colors.elevation.electrical, layer: 7, role: 'device' }
@@ -1365,9 +1382,6 @@ function emitElevationSvg(
         : -STRUCTURAL_SLAB_INTRUSION_METERS
     const topCapDy = bottomDy + STOREY_CONTENT_HEIGHT_METERS
     const doorHeadY = ctx.door.bbox.max[1]
-    // #region agent log H4
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H4',location:'lib/ifclite-renderer.ts:emitElevationSvg:doorExtents',message:'door/frame vertical anchors used by crop logic',data:{doorGuid:ctx.guid,side,doorBottom,doorHeadY,doorBBoxMinY:ctx.door.bbox.min[1],doorBBoxMaxY:ctx.door.bbox.max[1],viewFrameOriginY:ctx.viewFrame.origin[1]},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     const overheadCandidates: Array<{
         expressId: number
         bbox: AABB
@@ -1389,9 +1403,6 @@ function emitElevationSvg(
     }
     addOverheadCandidate(ctx.slabAbove, 'structural-slab-above')
     for (const part of ctx.slabAboveParts) addOverheadCandidate(part, 'slab-above-part')
-    // #region agent log H1
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H1',location:'lib/ifclite-renderer.ts:emitElevationSvg:overheadCandidates',message:'overhead crop candidates within search band',data:{doorGuid:ctx.guid,side,overheadSearchMeters:OVERHEAD_SLAB_SEARCH_METERS,candidateCount:overheadCandidates.length,candidates:overheadCandidates.map((c)=>({expressId:c.expressId,source:c.source,minY:c.bbox.min[1],maxY:c.bbox.max[1],distanceToDoorHead:c.distanceToDoorHead}))},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     const overheadCrop = overheadCandidates.length > 0
         ? overheadCandidates.reduce((best, cur) => {
             // Within the allowed search band, crop against the UPPERMOST layer
@@ -1414,12 +1425,6 @@ function emitElevationSvg(
     const topDy = overheadCropDy != null
         ? Math.min(overheadCropDy, topCapDy)
         : topCapDy
-    // #region agent log H2
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H2',location:'lib/ifclite-renderer.ts:emitElevationSvg:overheadSelection',message:'selected overhead element used for top crop',data:{doorGuid:ctx.guid,side,selected:overheadCrop?{expressId:overheadCrop.expressId,source:overheadCrop.source,minY:overheadCrop.bbox.min[1],maxY:overheadCrop.bbox.max[1],distanceToDoorHead:overheadCrop.distanceToDoorHead}:null,selectionRule:'highest-minY-within-search-band'},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-    // #region agent log H3
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'10f543'},body:JSON.stringify({sessionId:'10f543',runId,hypothesisId:'H3',location:'lib/ifclite-renderer.ts:emitElevationSvg:topClamp',message:'top crop clamp against storey cap',data:{doorGuid:ctx.guid,side,bottomDy,topCapDy,overheadCropDy,topDy,structuralSlabIntrusionMeters:STRUCTURAL_SLAB_INTRUSION_METERS,storeyContentHeightMeters:STOREY_CONTENT_HEIGHT_METERS,isClampedByTopCap:overheadCropDy!=null&&topDy===topCapDy&&overheadCropDy>topCapDy},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     const viewportBottomY = doorBottom + bottomDy
     const viewportTopY = doorBottom + topDy
 
@@ -1793,6 +1798,7 @@ function emitElevationSvg(
     }
     const nearbySegsRawDebug: ProjectedSegment[] = []
     const nearbySegsFilteredDebug: ProjectedSegment[] = []
+    const pendingOverlaySegments: PendingOverlaySegment[] = []
     let nearbyRenderedWalls = 0
     for (const w of ctx.nearbyWalls) {
         const renderDecision = decideSectionedRender(w.bbox, 'nearby wall intersects full elevation volume')
@@ -1888,6 +1894,30 @@ function emitElevationSvg(
             segsAll.push(...segs)
         }
         if (polysAll.length === 0 && segsAll.length === 0) continue
+        const wallTopWorldY = w.bbox.max[1]
+        const wallTopScreenY = yScreenAt(wallTopWorldY)
+        const wallTopGapToViewportTopMeters = viewportTopY - wallTopWorldY
+        let topEdgeRedrawCount = 0
+        if (wallLayer === 8) {
+            for (const s of segsAll) {
+                const vertical = Math.abs(s.x2 - s.x1) < 0.75
+                if (!vertical) continue
+                const touchesWallTop =
+                    Math.abs(s.y1 - wallTopScreenY) < 0.75
+                    || Math.abs(s.y2 - wallTopScreenY) < 0.75
+                if (!touchesWallTop) continue
+                pendingOverlaySegments.push({
+                    layer: ELEVATION_SECTIONED_PART_LAYER + 1,
+                    segment: {
+                        ...s,
+                        y1: Math.max(s.y1, wallTopScreenY),
+                        y2: Math.max(s.y2, wallTopScreenY),
+                        layer: ELEVATION_SECTIONED_PART_LAYER + 1,
+                    },
+                })
+                topEdgeRedrawCount++
+            }
+        }
         nearbyRenderedWalls++
         nearbySegsRawDebug.push(...segsRawAll)
         nearbySegsFilteredDebug.push(...segsAll)
@@ -1899,10 +1929,21 @@ function emitElevationSvg(
                 || targetNorms.has(wallGuid.replace(/\$/g, '_'))
             )
             if (isTargetWall) {
+                const rawYVals = segsRawAll.flatMap((s) => [s.y1, s.y2])
+                const filteredYVals = segsAll.flatMap((s) => [s.y1, s.y2])
+                const rawYMin = rawYVals.length > 0 ? Math.min(...rawYVals) : null
+                const rawYMax = rawYVals.length > 0 ? Math.max(...rawYVals) : null
+                const filteredYMin = filteredYVals.length > 0 ? Math.min(...filteredYVals) : null
+                const filteredYMax = filteredYVals.length > 0 ? Math.max(...filteredYVals) : null
+                const wallTopScreenY = yScreenAt(w.bbox.max[1])
+                const touchTop = (s: ProjectedSegment) =>
+                    Math.abs(s.y1 - screenTopWorld) < 0.75 || Math.abs(s.y2 - screenTopWorld) < 0.75
+                const touchWallTop = (s: ProjectedSegment) =>
+                    Math.abs(s.y1 - wallTopScreenY) < 0.75 || Math.abs(s.y2 - wallTopScreenY) < 0.75
                 // #region agent log H10
                 debugLogRenderer({
                     runId,
-                    hypothesisId: 'H6',
+                    hypothesisId: 'H41',
                     location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
                     message: 'target wall render path',
                     data: {
@@ -1923,6 +1964,41 @@ function emitElevationSvg(
                         ...segmentOrientationStats(segsAll),
                         rawLenBuckets: segmentLengthBuckets(segsRawAll),
                         filteredLenBuckets: segmentLengthBuckets(segsAll),
+                        viewportTopY,
+                        wallTopWorldY: w.bbox.max[1],
+                        wallTopGapToViewportTopMeters: viewportTopY - w.bbox.max[1],
+                        screenTopWorld,
+                        wallTopScreenY,
+                        rawYMin,
+                        rawYMax,
+                        filteredYMin,
+                        filteredYMax,
+                        rawTouchScreenTopCount: segsRawAll.filter(touchTop).length,
+                        filteredTouchScreenTopCount: segsAll.filter(touchTop).length,
+                        rawTouchWallTopCount: segsRawAll.filter(touchWallTop).length,
+                        filteredTouchWallTopCount: segsAll.filter(touchWallTop).length,
+                        topEdgeRedrawCount,
+                    },
+                })
+                // #endregion
+                // #region agent log H42
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H42',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
+                    message: 'target wall top-edge redraw overlay',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: w.expressId,
+                        guid: wallGuid,
+                        wallLayer,
+                        wallTopWorldY,
+                        viewportTopY,
+                        wallTopScreenY,
+                        screenTopWorld,
+                        wallTopGapToViewportTopMeters,
+                        topEdgeRedrawCount,
                     },
                 })
                 // #endregion
@@ -1933,6 +2009,21 @@ function emitElevationSvg(
             polygons: polysAll,
             segments: segsAll,
         })
+    }
+    if (pendingOverlaySegments.length > 0) {
+        const byLayer = new Map<number, ProjectedSegment[]>()
+        for (const entry of pendingOverlaySegments) {
+            const list = byLayer.get(entry.layer) ?? []
+            list.push(entry.segment)
+            byLayer.set(entry.layer, list)
+        }
+        for (const [layer, segments] of byLayer.entries()) {
+            groups.push({
+                layer,
+                polygons: [],
+                segments,
+            })
+        }
     }
     if (debugEnabled) {
         // #region agent log H4-H5
@@ -2106,6 +2197,37 @@ function emitElevationSvg(
                 }
             }
         }
+        const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+        const isTargetPart = !!part.guid && (
+            DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid)
+            || targetNorms.has(part.guid.replace(/\$/g, '_'))
+        )
+        if (debugEnabled && isTargetPart) {
+            const horizontalSegs = segsAll.filter((s) => Math.abs(s.y2 - s.y1) < 0.75)
+            const nearBottomCropSegs = horizontalSegs.filter((s) =>
+                Math.abs(s.y1 - screenBottomWorld) < 0.75 && Math.abs(s.y2 - screenBottomWorld) < 0.75
+            )
+            // #region agent log H32
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H32',
+                location: debugLocation,
+                message: 'target slab part segment profile near bottom crop edge',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    expressId: part.expressId,
+                    guid: part.guid,
+                    yLo,
+                    yHi,
+                    screenBottomWorld,
+                    segCount: segsAll.length,
+                    horizontalSegCount: horizontalSegs.length,
+                    nearBottomCropSegCount: nearBottomCropSegs.length,
+                },
+            })
+            // #endregion
+        }
         const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
         const noFallbackForPart = !!part.guid
             && (NO_FALLBACK_PART_GUIDS.includes(part.guid) || noFallbackNorms.has(part.guid.replace(/\$/g, '_')))
@@ -2133,6 +2255,116 @@ function emitElevationSvg(
             return
         }
         if (polysAll.length === 0 && segsAll.length === 0) {
+            const fallbackWorldBox: AABB = {
+                min: [
+                    Math.max(
+                        part.bbox.min[0],
+                        partClip.xMin ?? -Infinity,
+                    ),
+                    yLo,
+                    Math.max(
+                        part.bbox.min[2],
+                        partClip.zMin ?? -Infinity,
+                    ),
+                ],
+                max: [
+                    Math.min(
+                        part.bbox.max[0],
+                        partClip.xMax ?? +Infinity,
+                    ),
+                    yHi,
+                    Math.min(
+                        part.bbox.max[2],
+                        partClip.zMax ?? +Infinity,
+                    ),
+                ],
+            }
+            const canFallback =
+                fallbackWorldBox.max[0] - fallbackWorldBox.min[0] >= 0.005
+                && fallbackWorldBox.max[1] - fallbackWorldBox.min[1] >= 0.005
+                && fallbackWorldBox.max[2] - fallbackWorldBox.min[2] >= 0.005
+            if (canFallback) {
+                const fallbackRect = projectBoxToElevationRect(fallbackWorldBox, cam, pixelClip)
+                if (fallbackRect && fallbackRect.length >= 3) {
+                    const fallbackPolys: ProjectedPolygon[] = [{
+                        points: fallbackRect,
+                        fill,
+                        depth: 0,
+                        layer,
+                        expressId: part.expressId,
+                    }]
+                    const minY = Math.min(...fallbackRect.map((p) => p.y))
+                    const maxY = Math.max(...fallbackRect.map((p) => p.y))
+                    const minX = Math.min(...fallbackRect.map((p) => p.x))
+                    const maxX = Math.max(...fallbackRect.map((p) => p.x))
+                    const fallbackSegs: ProjectedSegment[] = []
+                    const prefersAboveFaceOnly = debugLocation.includes('above')
+                    const prefersBelowFaceOnly = debugLocation.includes('below')
+                    if (addStrokes && maxX - minX >= 0.5) {
+                        // "above*" bands should only expose the underside edge
+                        // (lower Y in world = larger Y in screen), while
+                        // "below*" bands should only expose the top floor edge.
+                        const allowMin = !prefersBelowFaceOnly
+                        const allowMax = !prefersAboveFaceOnly
+                        if (allowMin && !onCropEdge(minY)) {
+                            fallbackSegs.push({
+                                x1: minX,
+                                y1: minY,
+                                x2: maxX,
+                                y2: minY,
+                                color: options.colors.strokes.outline,
+                                depth: 0,
+                                layer,
+                                width: options.lineWidth,
+                            })
+                        }
+                        if (allowMax && !onCropEdge(maxY)) {
+                            fallbackSegs.push({
+                                x1: minX,
+                                y1: maxY,
+                                x2: maxX,
+                                y2: maxY,
+                                color: options.colors.strokes.outline,
+                                depth: 0,
+                                layer,
+                                width: options.lineWidth,
+                            })
+                        }
+                    }
+                    groups.push({
+                        layer,
+                        polygons: fallbackPolys,
+                        segments: fallbackSegs,
+                    })
+                    if (debugEnabled) {
+                        // #region agent log H34
+                        debugLogRenderer({
+                            runId,
+                            hypothesisId: 'H34',
+                            location: debugLocation,
+                            message: 'slab fallback rectangle emitted after empty geometry projection',
+                            data: {
+                                doorGuid: ctx.guid,
+                                side,
+                                expressId: part.expressId,
+                                guid: part.guid ?? null,
+                                yLo,
+                                yHi,
+                                fallbackWorldBox,
+                                fallbackPolyCount: fallbackPolys.length,
+                                fallbackSegCount: fallbackSegs.length,
+                                fallbackStrokeMode: prefersAboveFaceOnly
+                                    ? 'above-only'
+                                    : prefersBelowFaceOnly
+                                        ? 'below-only'
+                                        : 'both',
+                            },
+                        })
+                        // #endregion
+                    }
+                    return
+                }
+            }
             if (debugEnabled && isAboveParts && hasCoveringMesh) {
                 // #region agent log H26
                 debugLogRenderer({
@@ -2289,8 +2521,41 @@ function emitElevationSvg(
         const belowPartRenderDecisions = new Map<number, ElevationRenderDecision>()
         const belowParts = ctx.slabBelowParts
             .filter((p) => {
-                const renderDecision = decideSectionedRender(p.bbox, 'slab-below part intersects full elevation volume')
+                const inVolume = intersectsElevationVolume(p.bbox)
+                const renderDecision = inVolume
+                    ? {
+                        mode: 'sectioned' as const,
+                        reason: 'slab-below part intersects full elevation volume',
+                    }
+                    : {
+                        mode: 'hidden' as const,
+                        reason: 'slab-below part outside full elevation volume',
+                    }
                 belowPartRenderDecisions.set(p.expressId, renderDecision)
+                if (debugEnabled && p.guid) {
+                    const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                    const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(p.guid) || targetNorms.has(p.guid.replace(/\$/g, '_'))
+                    if (isTarget) {
+                        // #region agent log H31
+                        debugLogRenderer({
+                            runId,
+                            hypothesisId: 'H31',
+                            location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts',
+                            message: 'target slab-below part filter gate',
+                            data: {
+                                doorGuid: ctx.guid,
+                                side,
+                                expressId: p.expressId,
+                                guid: p.guid,
+                                inVolume,
+                                renderMode: renderDecision.mode,
+                                renderReason: renderDecision.reason,
+                                bbox: p.bbox,
+                            },
+                        })
+                        // #endregion
+                    }
+                }
                 return renderDecision.mode !== 'hidden'
             })
             .sort((a, b) => a.bbox.min[1] - b.bbox.min[1])
@@ -2301,7 +2566,35 @@ function emitElevationSvg(
             }
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
-            if (yHi - yLo < 0.005) continue
+            if (yHi - yLo < 0.005) {
+                if (debugEnabled && part.guid) {
+                    const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
+                    const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
+                    if (isTarget) {
+                        // #region agent log H33
+                        debugLogRenderer({
+                            runId,
+                            hypothesisId: 'H33',
+                            location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts',
+                            message: 'target slab-below part skipped due tiny Y span after viewport clip',
+                            data: {
+                                doorGuid: ctx.guid,
+                                side,
+                                expressId: part.expressId,
+                                guid: part.guid,
+                                yLo,
+                                yHi,
+                                span: yHi - yLo,
+                                viewportBottomY,
+                                viewportTopY,
+                                bbox: part.bbox,
+                            },
+                        })
+                        // #endregion
+                    }
+                }
+                continue
+            }
             if (debugEnabled && part.guid) {
                 const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
                 const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
@@ -3278,7 +3571,7 @@ function emitPlanSvg(
         if (!inFootprint) continue
         if (!aboveBottom) continue
         if (!belowCut) continue
-        const safety = isSafetyDevice(dev.name, null, colors)
+        const safety = isSafetyDevice(dev.name, dev.layers, colors)
         const fill = safety ? colors.plan.safety : colors.plan.electrical
         const dbb = dev.bbox
         const rectPts: Pt[] = [

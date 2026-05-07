@@ -70,6 +70,8 @@ export interface DoorContextLite {
         bbox: AABB
         ifcType: string
         name: string
+        /** IfcSystem / IfcGroup labels used for safety colouring. */
+        layers: readonly string[]
         modelTag: 'arch' | 'elec'
     }>
 
@@ -524,6 +526,33 @@ function readCsetData(model: IfcLiteModel, doorId: number): DoorContextLite['cse
     return out
 }
 
+/**
+ * Read layer-like labels for an electrical device from ifc-lite relationships.
+ *
+ * In the lite parser this surfaces via group assignments (IfcSystem / IfcGroup
+ * naming) rather than explicit presentation-layer entities.
+ */
+function readDeviceLayers(model: IfcLiteModel, expressId: number): readonly string[] {
+    const rels = model.relationships(expressId)
+    if (!rels.groups || rels.groups.length === 0) return []
+    const out: string[] = []
+    const seen = new Set<string>()
+    const push = (value: string | null | undefined) => {
+        if (!value) return
+        const trimmed = value.trim()
+        if (!trimmed) return
+        const key = trimmed.toLowerCase()
+        if (seen.has(key)) return
+        seen.add(key)
+        out.push(trimmed)
+    }
+    for (const group of rels.groups) {
+        push(group.name ?? null)
+        push(model.attrs(group.id)?.name ?? null)
+    }
+    return out
+}
+
 export interface DoorAnalyzerCaches {
     wallIndex: ReturnType<typeof buildPlanIndex>
     slabIndex: ReturnType<typeof buildPlanIndex>
@@ -676,16 +705,23 @@ export function analyzeDoor(
         ...collectBuildupParts(caches.buildingPartIndex, aboveYLo, aboveYHi, 1.6),
         ...collectBuildupParts(caches.coveringIndex, aboveYLo, aboveYHi, 1.6),
     ]
-    const slabBelowParts = [
+    const attachPartGuid = (
+        parts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
+    ): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }> =>
+        parts.map((part) => ({
+            ...part,
+            guid: model.attrs(part.expressId)?.globalId ?? null,
+        }))
+    const slabBelowParts = attachPartGuid([
         ...aggParts(slabs.below?.expressId),
         ...slabs.belowExtras,
         ...belowBuildup,
-    ]
-    const slabAboveParts = [
+    ])
+    const slabAboveParts = attachPartGuid([
         ...aggParts(slabs.above?.expressId),
         ...slabs.aboveExtras,
         ...aboveBuildup,
-    ]
+    ])
     if (process.env.DEBUG_PARTS === '1') {
         console.log(`[parts] door=${doorId} slabBelow=${slabs.below?.expressId ?? 'none'} top=${slabs.below?.bbox.max[1].toFixed(3) ?? 'none'} doorBottom=${bbox.min[1].toFixed(3)} belowParts=${slabBelowParts.length} (extras=${slabs.belowExtras.length} buildup=${belowBuildup.length}) slabAbove=${slabs.above?.expressId ?? 'none'} aboveBot=${slabs.above?.bbox.min[1].toFixed(3) ?? 'none'} doorTop=${bbox.max[1].toFixed(3)} aboveParts=${slabAboveParts.length}`)
         for (const p of belowBuildup) {
@@ -777,6 +813,7 @@ export function analyzeDoor(
                     bbox: item.bbox,
                     ifcType: t.replace('IFC', 'Ifc'),
                     name: a?.name ?? '',
+                    layers: readDeviceLayers(elec, item.expressId),
                     modelTag: 'elec',
                 })
             }

@@ -357,16 +357,18 @@ export function isSafetyDeviceByLayer(
 }
 
 /**
- * Combined safety classifier: prefer layer assignment (reliable in models
- * that author it) and fall back to the name-keyword heuristic (Flu21 today).
+ * Safety classifier: layer-only.
+ *
+ * Reviewer requirement: elements are safety-coloured only when their
+ * presentation/system layer includes a configured safety keyword
+ * (`E_Sicherheit`, `Sicherheit`, ...).
  */
 export function isSafetyDevice(
-    name: string | null | undefined,
+    _name: string | null | undefined,
     layers: readonly string[] | null | undefined,
     colors: RenderColors = loadRenderColors()
 ): boolean {
-    if (isSafetyDeviceByLayer(layers, colors)) return true
-    return isSafetyDeviceName(name)
+    return isSafetyDeviceByLayer(layers, colors)
 }
 
 /**
