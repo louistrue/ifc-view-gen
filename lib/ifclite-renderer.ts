@@ -47,20 +47,8 @@ import type { AABB, DoorContextLite, DoorViewFrame } from './ifclite-door-analyz
 import type { IfcLiteMesh } from './ifclite-source'
 
 const COLORS = loadRenderColors()
-const DEBUG_TARGET_DOOR_GUID = process.env.DEBUG_PROBE_DOOR_GUID ?? process.env.DEBUG_TARGET_DOOR_GUID ?? '1zXqD3S6hGHA3_XsodcG2W'
-const DEBUG_TARGET_ELEMENT_GUIDS: readonly string[] = (() => {
-    const raw = process.env.DEBUG_TARGET_ELEMENT_GUIDS ?? ''
-    const fromEnv = raw
-        .split(/[,\s]+/)
-        .map((v) => v.trim())
-        .filter((v) => v.length > 0)
-    return [...new Set([
-        ...fromEnv,
-        '2c3tVIi62SGvevyFQqC4JV',
-        '1dnZtXgzhmGhIfhHRBWSof',
-        '32derTOiTLHBcFrjYZthYc',
-    ])]
-})()
+const DEBUG_TARGET_DOOR_GUID = (process.env.DEBUG_PROBE_DOOR_GUID ?? process.env.DEBUG_TARGET_DOOR_GUID ?? '').trim()
+const DEBUG_PROBE_ELEMENT_GUID = (process.env.DEBUG_PROBE_ELEMENT_GUID ?? '39SX7mT0Z3pOIBuYgl0rwP').trim()
 const NO_FALLBACK_PART_GUIDS: readonly string[] = [
     '3HuvnrKbA$kTf3k1qPn15K',
 ]
@@ -72,16 +60,39 @@ function debugLogRenderer(payload: {
     message: string
     data: Record<string, unknown>
 }) {
-    const line = JSON.stringify({ sessionId: '8a3fee', runId: payload.runId, hypothesisId: payload.hypothesisId, location: payload.location, message: payload.message, data: payload.data, timestamp: Date.now() })
+    if (process.env.DEBUG_RENDERER !== '1') return
+    const line = JSON.stringify({ runId: payload.runId, hypothesisId: payload.hypothesisId, location: payload.location, message: payload.message, data: payload.data, timestamp: Date.now() })
     try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        require('node:fs').appendFileSync('debug-8a3fee.log', `${line}\n`, 'utf8')
+        require('node:fs').appendFileSync(process.env.DEBUG_RENDERER_LOG_PATH ?? 'debug-renderer.log', `${line}\n`, 'utf8')
     } catch {
         /* best effort */
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'8a3fee'},body:line}).catch(()=>{});
-    // #endregion
+}
+
+function debugLogSessionProbe(payload: {
+    runId: string
+    hypothesisId: string
+    location: string
+    message: string
+    data: Record<string, unknown>
+}) {
+    const body = {
+        sessionId: 'b4e1a8',
+        runId: payload.runId,
+        hypothesisId: payload.hypothesisId,
+        location: payload.location,
+        message: payload.message,
+        data: payload.data,
+        timestamp: Date.now(),
+    }
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b4e1a8'},body:JSON.stringify(body)}).catch(()=>{})
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        require('node:fs').appendFileSync('debug-b4e1a8.log', `${JSON.stringify(body)}\n`, 'utf8')
+    } catch {
+        /* best effort */
+    }
 }
 
 export const FIXED_PX_PER_METER = 285
@@ -149,9 +160,15 @@ export interface RenderOptions {
     doorFootAnchor?: number
     /** Optional debug: emit each filled polygon's expressId as data attribute. */
     emitDebugAttrs?: boolean
+    /** Prefer overhead candidates flagged with LoadBearing=true when available in range. */
+    preferLoadBearingOverheadCrop?: boolean
+    /** Prefer bottom-slab candidates flagged with LoadBearing=true when available in range. */
+    preferLoadBearingBottomCrop?: boolean
+    /** @deprecated use preferLoadBearingOverheadCrop */
+    preferConcreteOverheadCrop?: boolean
 }
 
-const DEFAULT_OPTS: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs'>> = {
+const DEFAULT_OPTS: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop'>> = {
     width: CANVAS_PX,
     height: CANVAS_HEIGHT_PX,
     lineWidth: 1.5,
@@ -162,6 +179,9 @@ const DEFAULT_OPTS: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth
     // slab-below fill at the very bottom — readable, mirrors the legacy.
     doorFootAnchor: 1.0,
     emitDebugAttrs: false,
+    preferLoadBearingOverheadCrop: true,
+    preferLoadBearingBottomCrop: true,
+    preferConcreteOverheadCrop: false,
 }
 
 interface ProjectedSegment {
@@ -1334,10 +1354,14 @@ function classifyNearbyDoorElevationMode(
 function emitElevationSvg(
     ctx: DoorContextLite,
     side: 'front' | 'back',
-    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs'>>,
+    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop'>>,
 ): string {
-    const debugEnabled = DEBUG_TARGET_DOOR_GUID === '' || ctx.guid === DEBUG_TARGET_DOOR_GUID
+    const debugEnabled = process.env.DEBUG_RENDERER === '1'
+        && (DEBUG_TARGET_DOOR_GUID === '' || ctx.guid === DEBUG_TARGET_DOOR_GUID)
     const runId = process.env.DEBUG_RUN_ID ?? 'run-1'
+    // #region agent log H71
+    fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b4e1a8'},body:JSON.stringify({sessionId:'b4e1a8',runId,hypothesisId:'H71',location:'lib/ifclite-renderer.ts:emitElevationSvg:version',message:'probe instrumentation revision marker',data:{doorGuid:ctx.guid,side,probeGuid:DEBUG_PROBE_ELEMENT_GUID,instrumentationRevision:'probe-geometry-v2'},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     // #region agent log H30
     debugLogRenderer({
         runId,
@@ -1367,7 +1391,57 @@ function emitElevationSvg(
     // basement: slab too far from door centre, only Bodenplatte tiles model
     // the floor), use the lowest IFCBUILDINGELEMENTPART build-up bottom as a
     // proxy for the structural-slab top so the 10 cm cap still reads.
+    const preferLoadBearingOverheadCrop = options.preferLoadBearingOverheadCrop || options.preferConcreteOverheadCrop
+    const preferLoadBearingBottomCrop = options.preferLoadBearingBottomCrop || preferLoadBearingOverheadCrop
     const structBelowDy = getStructuralSlabFaceDy(ctx, 'below')
+    const floorCandidates: Array<{
+        expressId: number
+        bbox: AABB
+        isLoadBearing: boolean | null
+        source: 'structural-slab-below' | 'slab-below-part'
+    }> = []
+    const addFloorCandidate = (
+        candidate: { expressId: number; bbox: AABB; isLoadBearing?: boolean | null } | null,
+        source: 'structural-slab-below' | 'slab-below-part',
+    ) => {
+        if (!candidate) return
+        floorCandidates.push({
+            expressId: candidate.expressId,
+            bbox: candidate.bbox,
+            isLoadBearing: candidate.isLoadBearing ?? null,
+            source,
+        })
+    }
+    addFloorCandidate(ctx.slabBelow, 'structural-slab-below')
+    for (const part of ctx.slabBelowParts) addFloorCandidate(part, 'slab-below-part')
+    const loadBearingFloorCandidates = floorCandidates.filter((c) => c.isLoadBearing === true)
+    const floorCropPool = preferLoadBearingBottomCrop && loadBearingFloorCandidates.length > 0
+        ? loadBearingFloorCandidates
+        : floorCandidates
+    const floorCrop = floorCropPool.length > 0
+        ? floorCropPool.reduce((best, cur) => {
+            // Bottom crop should hug the door foot: choose the nearest
+            // load-bearing top face at/below the door bottom.
+            const curDy = cur.bbox.max[1] - doorBottom
+            const bestDy = best.bbox.max[1] - doorBottom
+            const curBelow = curDy <= 0.005
+            const bestBelow = bestDy <= 0.005
+            if (curBelow !== bestBelow) {
+                return curBelow ? cur : best
+            }
+            if (curBelow && cur.bbox.max[1] !== best.bbox.max[1]) {
+                return cur.bbox.max[1] > best.bbox.max[1] ? cur : best
+            }
+            if (!curBelow && cur.bbox.max[1] !== best.bbox.max[1]) {
+                return cur.bbox.max[1] < best.bbox.max[1] ? cur : best
+            }
+            if (cur.bbox.min[1] !== best.bbox.min[1]) {
+                return cur.bbox.min[1] < best.bbox.min[1] ? cur : best
+            }
+            return cur.expressId < best.expressId ? cur : best
+        }, floorCropPool[0])
+        : null
+    const floorCropDy = floorCrop ? floorCrop.bbox.max[1] - doorBottom : null
     let buildupFloorDy: number | null = null
     if (structBelowDy == null && ctx.slabBelowParts.length > 0) {
         let minBottom = +Infinity
@@ -1376,7 +1450,8 @@ function emitElevationSvg(
         }
         if (minBottom < doorBottom - 0.005) buildupFloorDy = minBottom - doorBottom
     }
-    const effectiveBelowDy = structBelowDy ?? buildupFloorDy
+    const legacyBelowDy = structBelowDy ?? buildupFloorDy
+    const effectiveBelowDy = floorCropDy ?? legacyBelowDy
     const bottomDy = effectiveBelowDy != null
         ? effectiveBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
         : -STRUCTURAL_SLAB_INTRUSION_METERS
@@ -1385,11 +1460,12 @@ function emitElevationSvg(
     const overheadCandidates: Array<{
         expressId: number
         bbox: AABB
+        isLoadBearing: boolean | null
         source: 'structural-slab-above' | 'slab-above-part'
         distanceToDoorHead: number
     }> = []
     const addOverheadCandidate = (
-        candidate: { expressId: number; bbox: AABB } | null,
+        candidate: { expressId: number; bbox: AABB; isLoadBearing?: boolean | null } | null,
         source: 'structural-slab-above' | 'slab-above-part',
     ) => {
         if (!candidate) return
@@ -1399,12 +1475,22 @@ function emitElevationSvg(
             0,
         )
         if (distanceToDoorHead > OVERHEAD_SLAB_SEARCH_METERS) return
-        overheadCandidates.push({ expressId: candidate.expressId, bbox: candidate.bbox, source, distanceToDoorHead })
+        overheadCandidates.push({
+            expressId: candidate.expressId,
+            bbox: candidate.bbox,
+            isLoadBearing: candidate.isLoadBearing ?? null,
+            source,
+            distanceToDoorHead,
+        })
     }
     addOverheadCandidate(ctx.slabAbove, 'structural-slab-above')
     for (const part of ctx.slabAboveParts) addOverheadCandidate(part, 'slab-above-part')
-    const overheadCrop = overheadCandidates.length > 0
-        ? overheadCandidates.reduce((best, cur) => {
+    const loadBearingOverheadCandidates = overheadCandidates.filter((c) => c.isLoadBearing === true)
+    const overheadCropPool = preferLoadBearingOverheadCrop && loadBearingOverheadCandidates.length > 0
+        ? loadBearingOverheadCandidates
+        : overheadCandidates
+    const overheadCrop = overheadCropPool.length > 0
+        ? overheadCropPool.reduce((best, cur) => {
             // Within the allowed search band, crop against the UPPERMOST layer
             // above the door (highest lower face / minY).
             if (cur.bbox.min[1] !== best.bbox.min[1]) {
@@ -1416,7 +1502,7 @@ function emitElevationSvg(
                 return cur.bbox.max[1] > best.bbox.max[1] ? cur : best
             }
             return cur.expressId < best.expressId ? cur : best
-        }, overheadCandidates[0])
+        }, overheadCropPool[0])
         : null
     const overheadCropDy = overheadCrop
         ? Math.min(overheadCrop.bbox.min[1] + STRUCTURAL_SLAB_INTRUSION_METERS, overheadCrop.bbox.max[1]) - doorBottom
@@ -1430,19 +1516,6 @@ function emitElevationSvg(
 
     const cam = buildElevationCamera(ctx.viewFrame, side, viewportBottomY, W, H, options.doorFootAnchor)
     if (debugEnabled) {
-        const norm = (g: string) => g.replace(/\$/g, '_')
-        const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map(norm))
-        const summarizeGuids = (parts: Array<{ guid?: string | null; expressId: number }>) => {
-            const matched: Array<{ guid: string; expressId: number }> = []
-            for (const p of parts) {
-                const guid = p.guid ?? ''
-                if (!guid) continue
-                if (DEBUG_TARGET_ELEMENT_GUIDS.includes(guid) || targetNorms.has(norm(guid))) {
-                    matched.push({ guid, expressId: p.expressId })
-                }
-            }
-            return matched
-        }
         // #region agent log H18
         debugLogRenderer({
             runId,
@@ -1456,11 +1529,14 @@ function emitElevationSvg(
                 viewportTopY,
                 topDy,
                 topCapDy,
+                preferLoadBearingOverheadCrop,
+                preferConcreteOverheadCrop: options.preferConcreteOverheadCrop,
                 overheadSearchMeters: OVERHEAD_SLAB_SEARCH_METERS,
                 overheadCrop: overheadCrop
                     ? {
                         expressId: overheadCrop.expressId,
                         source: overheadCrop.source,
+                        isLoadBearing: overheadCrop.isLoadBearing,
                         distanceToDoorHead: overheadCrop.distanceToDoorHead,
                         bbox: overheadCrop.bbox,
                     }
@@ -1468,9 +1544,6 @@ function emitElevationSvg(
                 slabAbovePartCount: ctx.slabAboveParts.length,
                 slabBelowPartCount: ctx.slabBelowParts.length,
                 nearbyWallCount: ctx.nearbyWalls.length,
-                matchedAboveParts: summarizeGuids(ctx.slabAboveParts),
-                matchedBelowParts: summarizeGuids(ctx.slabBelowParts),
-                matchedNearbyWalls: summarizeGuids(ctx.nearbyWalls),
             },
         })
         // #endregion
@@ -1542,7 +1615,7 @@ function emitElevationSvg(
     // Camera-side depth: 35 cm (0.35 m) measured from the camera-side DOOR
     // FACE on the facing axis. This follows the requested "door bbox +0.35 m"
     // mental model for front/back device visibility.
-    const DEPTH_FAR = 0.35
+    const DEPTH_FAR = 0.29
     if (isXAligned) {
         // Width axis = X, facing axis = Z. Width clip stays symmetric.
         elevationClip.xMin = ctx.viewFrame.origin[0] - halfCanvasMeters - 0.1
@@ -1684,18 +1757,123 @@ function emitElevationSvg(
             ? { mode: 'sectioned', reason: visibleReason }
             : { mode: 'hidden', reason: hiddenReason }
     }
-    const decideNearbyDoorRender = (door: { bbox: AABB }): ElevationRenderDecision => {
+    const probeGuid = DEBUG_PROBE_ELEMENT_GUID
+    const probeNearbyWalls = probeGuid ? ctx.nearbyWalls.filter((w) => w.guid === probeGuid) : []
+    const probeSlabBelow = probeGuid && ctx.slabBelow?.guid === probeGuid ? ctx.slabBelow : null
+    const probeSlabAbove = probeGuid && ctx.slabAbove?.guid === probeGuid ? ctx.slabAbove : null
+    const probeBelowParts = probeGuid ? ctx.slabBelowParts.filter((p) => p.guid === probeGuid) : []
+    const probeAboveParts = probeGuid ? ctx.slabAboveParts.filter((p) => p.guid === probeGuid) : []
+    const probeFound = probeNearbyWalls.length > 0 || !!probeSlabBelow || !!probeSlabAbove || probeBelowParts.length > 0 || probeAboveParts.length > 0
+    // #region agent log H61
+    debugLogSessionProbe({ runId, hypothesisId: 'H61', location: 'lib/ifclite-renderer.ts:emitElevationSvg:probeSummary', message: 'probe element presence across elevation candidate sets', data: { doorGuid: ctx.guid, side, probeGuid, probeFound, nearbyWallMatches: probeNearbyWalls.map((x) => ({ expressId: x.expressId, guid: x.guid ?? null, bbox: x.bbox })), slabBelowMatch: probeSlabBelow ? { expressId: probeSlabBelow.expressId, guid: probeSlabBelow.guid ?? null, bbox: probeSlabBelow.bbox } : null, slabAboveMatch: probeSlabAbove ? { expressId: probeSlabAbove.expressId, guid: probeSlabAbove.guid ?? null, bbox: probeSlabAbove.bbox } : null, slabBelowPartMatches: probeBelowParts.map((x) => ({ expressId: x.expressId, guid: x.guid ?? null, bbox: x.bbox })), slabAbovePartMatches: probeAboveParts.map((x) => ({ expressId: x.expressId, guid: x.guid ?? null, bbox: x.bbox })), clip: { yMin: elevationClip.yMin ?? null, yMax: elevationClip.yMax ?? null, widthClipMin: widthClipMin ?? null, widthClipMax: widthClipMax ?? null, facingClipMin, facingClipMax } } })
+    // #endregion
+    if (debugEnabled && ctx.hostWall) {
+        const hMin = ctx.hostWall.bbox.min[facingAxisIdx]
+        const hMax = ctx.hostWall.bbox.max[facingAxisIdx]
+        // #region agent log H53
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H53',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:clipContext',
+            message: 'host wall depth reference and clip bounds',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                hostWallExpressId: ctx.hostWall.expressId,
+                hostFacingMin: hMin,
+                hostFacingMax: hMax,
+                hostFacingCenter: (hMin + hMax) / 2,
+                facingClipMin,
+                facingClipMax,
+                doorFacingMin: ctx.door.bbox.min[facingAxisIdx],
+                doorFacingMax: ctx.door.bbox.max[facingAxisIdx],
+                doorFacingCenter: doorCenterFacing,
+            },
+        })
+        // #endregion
+    }
+    const decideNearbyDoorRender = (door: { expressId: number; bbox: AABB; guid?: string | null }): ElevationRenderDecision => {
+        const bMin = door.bbox.min[facingAxisIdx]
+        const bMax = door.bbox.max[facingAxisIdx]
+        const facingOverlap = Math.min(bMax, facingClipMax) - Math.max(bMin, facingClipMin)
         const sectionDecision = decideSectionedRender(door.bbox, 'nearby door intersects full elevation volume')
+        const dMin = door.bbox.min[facingAxisIdx]
+        const dMax = door.bbox.max[facingAxisIdx]
+        const hMin = hostBboxForClip.min[facingAxisIdx]
+        const hMax = hostBboxForClip.max[facingAxisIdx]
+        const hostDepth = Math.max(hMax - hMin, 0.01)
+        const doorDepth = Math.max(dMax - dMin, 0.001)
+        const doorWidth = Math.max(door.bbox.max[widthAxisIdx] - door.bbox.min[widthAxisIdx], 0.001)
+        const doorCenter = (dMin + dMax) / 2
+        const hostCenter = (hMin + hMax) / 2
+        const cameraSideOffset = (doorCenter - hostCenter) * cameraSign
         if (sectionDecision.mode === 'hidden') {
+            if (debugEnabled) {
+                // #region agent log H51
+                debugLogRenderer({
+                    runId,
+                    hypothesisId: 'H51',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyDoors',
+                    message: 'nearby door depth gate rejected before mode classification',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        nearbyDoorExpressId: door.expressId,
+                        nearbyDoorGuid: door.guid ?? null,
+                        bMin,
+                        bMax,
+                        facingClipMin,
+                        facingClipMax,
+                        facingOverlap,
+                        hostDepth,
+                        doorDepth,
+                        doorWidth,
+                        cameraSideOffset,
+                        sectionMode: sectionDecision.mode,
+                        sectionReason: sectionDecision.reason,
+                    },
+                })
+                // #endregion
+            }
             return sectionDecision
         }
         const mode = classifyNearbyDoorElevationMode(door, hostBboxForClip, facingAxisIdx, widthAxisIdx, cameraSign)
-        return {
+        const decision: ElevationRenderDecision = {
             mode,
             reason: mode === 'projected'
                 ? 'nearby door reads face-on in this elevation'
                 : 'nearby door reads edge-on or intersects host depth',
         }
+        if (debugEnabled) {
+            // #region agent log H51
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H51',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyDoors',
+                message: 'nearby door depth/mode classification',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    nearbyDoorExpressId: door.expressId,
+                    nearbyDoorGuid: door.guid ?? null,
+                    bMin,
+                    bMax,
+                    facingClipMin,
+                    facingClipMax,
+                    facingOverlap,
+                    hostDepth,
+                    doorDepth,
+                    doorWidth,
+                    cameraSideOffset,
+                    sectionMode: sectionDecision.mode,
+                    sectionReason: sectionDecision.reason,
+                    mode: decision.mode,
+                    reason: decision.reason,
+                },
+            })
+            // #endregion
+        }
+        return decision
     }
     const nearbyDoorModes = new Map<number, ElevationRenderMode>()
     const nearbyDoorRenderDecisions = new Map<number, ElevationRenderDecision>()
@@ -1762,6 +1940,132 @@ function emitElevationSvg(
                 segments: segs,
             })
         }
+        if (hostPolyCount === 0 && hostSegCount === 0) {
+            const hostFallbackWorldBoxRaw: AABB = {
+                min: [
+                    Math.max(ctx.hostWall.bbox.min[0], elevationClip.xMin ?? -Infinity),
+                    Math.max(ctx.hostWall.bbox.min[1], elevationClip.yMin ?? -Infinity),
+                    Math.max(ctx.hostWall.bbox.min[2], elevationClip.zMin ?? -Infinity),
+                ],
+                max: [
+                    Math.min(ctx.hostWall.bbox.max[0], elevationClip.xMax ?? +Infinity),
+                    Math.min(ctx.hostWall.bbox.max[1], elevationClip.yMax ?? +Infinity),
+                    Math.min(ctx.hostWall.bbox.max[2], elevationClip.zMax ?? +Infinity),
+                ],
+            }
+            const inflateFlatAxis = (
+                min: number,
+                max: number,
+                clipMin: number | undefined,
+                clipMax: number | undefined,
+            ): [number, number] => {
+                if (max - min >= 0.005) return [min, max]
+                const center = (min + max) / 2
+                const half = 0.01
+                const lo = Math.max(clipMin ?? -Infinity, center - half)
+                const hi = Math.min(clipMax ?? +Infinity, center + half)
+                return hi - lo >= 0.005 ? [lo, hi] : [min, max]
+            }
+            const [xMinAdj, xMaxAdj] = inflateFlatAxis(
+                hostFallbackWorldBoxRaw.min[0],
+                hostFallbackWorldBoxRaw.max[0],
+                elevationClip.xMin,
+                elevationClip.xMax,
+            )
+            const [yMinAdj, yMaxAdj] = inflateFlatAxis(
+                hostFallbackWorldBoxRaw.min[1],
+                hostFallbackWorldBoxRaw.max[1],
+                elevationClip.yMin,
+                elevationClip.yMax,
+            )
+            const [zMinAdj, zMaxAdj] = inflateFlatAxis(
+                hostFallbackWorldBoxRaw.min[2],
+                hostFallbackWorldBoxRaw.max[2],
+                elevationClip.zMin,
+                elevationClip.zMax,
+            )
+            const hostFallbackWorldBox: AABB = {
+                min: [xMinAdj, yMinAdj, zMinAdj],
+                max: [xMaxAdj, yMaxAdj, zMaxAdj],
+            }
+            const canHostFallback =
+                hostFallbackWorldBox.max[0] - hostFallbackWorldBox.min[0] >= 0.005
+                && hostFallbackWorldBox.max[1] - hostFallbackWorldBox.min[1] >= 0.005
+                && hostFallbackWorldBox.max[2] - hostFallbackWorldBox.min[2] >= 0.005
+            // #region agent log H78
+            debugLogSessionProbe({
+                runId,
+                hypothesisId: 'H78',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:hostWallFallback',
+                message: 'host wall fallback eligibility before projection',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    hostWallExpressId: ctx.hostWall.expressId,
+                    canHostFallback,
+                    hostFallbackWorldBoxRaw,
+                    hostFallbackWorldBox,
+                },
+            })
+            // #endregion
+            if (canHostFallback) {
+                const hostRect = projectBoxToElevationRect(hostFallbackWorldBox, cam, pixelClip)
+                if (hostRect && hostRect.length >= 3) {
+                    const minY = Math.min(...hostRect.map((p) => p.y))
+                    const maxY = Math.max(...hostRect.map((p) => p.y))
+                    const minX = Math.min(...hostRect.map((p) => p.x))
+                    const maxX = Math.max(...hostRect.map((p) => p.x))
+                    const hostFallbackSegs: ProjectedSegment[] = []
+                    if (maxX - minX >= 0.5) {
+                        if (!onCropEdge(minY)) {
+                            hostFallbackSegs.push({ x1: minX, y1: minY, x2: maxX, y2: minY, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+                        }
+                        if (!onCropEdge(maxY)) {
+                            hostFallbackSegs.push({ x1: minX, y1: maxY, x2: maxX, y2: maxY, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
+                        }
+                    }
+                    groups.push({
+                        layer: 1,
+                        polygons: [{ points: hostRect, fill: hostFill, depth: 0, layer: 1, expressId: ctx.hostWall.expressId }],
+                        segments: hostFallbackSegs,
+                    })
+                    // #region agent log H77
+                    debugLogSessionProbe({
+                        runId,
+                        hypothesisId: 'H77',
+                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:hostWallFallback',
+                        message: 'host wall fallback fill emitted after empty mesh projection',
+                        data: {
+                            doorGuid: ctx.guid,
+                            side,
+                            hostWallExpressId: ctx.hostWall.expressId,
+                            hostRectPoints: hostRect.length,
+                            hostFallbackSegCount: hostFallbackSegs.length,
+                            hostFallbackFill: hostFill,
+                            hostRectBounds: { minX, minY, maxX, maxY },
+                            hostFallbackWorldBox,
+                        },
+                    })
+                    // #endregion
+                }
+                else {
+                    // #region agent log H78
+                    debugLogSessionProbe({
+                        runId,
+                        hypothesisId: 'H78',
+                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:hostWallFallback',
+                        message: 'host wall fallback projection returned empty rect',
+                        data: {
+                            doorGuid: ctx.guid,
+                            side,
+                            hostWallExpressId: ctx.hostWall.expressId,
+                            hostFallbackWorldBox,
+                        },
+                    })
+                    // #endregion
+                }
+            }
+        }
         if (debugEnabled) {
             // #region agent log H10
             const orient = segmentOrientationStats(hostSegsAll)
@@ -1795,24 +2099,70 @@ function emitElevationSvg(
             })
             // #endregion
         }
+        // #region agent log H75
+        const hostDecision = hostWallRenderDecision
+        debugLogSessionProbe({
+            runId,
+            hypothesisId: 'H75',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:hostWall',
+            message: 'host wall render counts for fill/contour visibility',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                hostWallExpressId: ctx.hostWall.expressId,
+                hostWallGuid: null,
+                renderMode: hostDecision?.mode ?? null,
+                renderReason: hostDecision?.reason ?? null,
+                polyCount: hostPolyCount,
+                segCount: hostSegCount,
+                rawSegCount: hostRawSegCount,
+            },
+        })
+        // #endregion
     }
     const nearbySegsRawDebug: ProjectedSegment[] = []
     const nearbySegsFilteredDebug: ProjectedSegment[] = []
     const pendingOverlaySegments: PendingOverlaySegment[] = []
+    const renderedNearbyWallMeta: Array<{ expressId: number; guid: string | null; layer: number; bbox: AABB }> = []
     let nearbyRenderedWalls = 0
     for (const w of ctx.nearbyWalls) {
         const renderDecision = decideSectionedRender(w.bbox, 'nearby wall intersects full elevation volume')
         const inBaseVolume = renderDecision.mode !== 'hidden'
         const inVolume = inBaseVolume
+        if (probeGuid && w.guid === probeGuid) {
+            // #region agent log H62
+            debugLogSessionProbe({ runId, hypothesisId: 'H62', location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls', message: 'probe element nearby-wall render decision', data: { doorGuid: ctx.guid, side, probeGuid, expressId: w.expressId, guid: w.guid ?? null, inYAndWidth: inYAndWidthVolume(w.bbox), intersectsElevationVolume: intersectsElevationVolume(w.bbox), renderMode: renderDecision.mode, renderReason: renderDecision.reason, bbox: w.bbox } })
+            // #endregion
+        }
+        if (debugEnabled) {
+            const bMin = w.bbox.min[facingAxisIdx]
+            const bMax = w.bbox.max[facingAxisIdx]
+            const facingOverlap = Math.min(bMax, facingClipMax) - Math.max(bMin, facingClipMin)
+            // #region agent log H52
+            debugLogRenderer({
+                runId,
+                hypothesisId: 'H52',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
+                message: 'nearby wall depth overlap classification',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    nearbyWallExpressId: w.expressId,
+                    nearbyWallGuid: w.guid ?? null,
+                    bMin,
+                    bMax,
+                    facingClipMin,
+                    facingClipMax,
+                    facingOverlap,
+                    renderMode: renderDecision.mode,
+                    renderReason: renderDecision.reason,
+                },
+            })
+            // #endregion
+        }
         if (debugEnabled) {
             const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
             const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSign
-            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-            const wallGuid = w.guid ?? null
-            const isTargetWall = !!wallGuid && (
-                DEBUG_TARGET_ELEMENT_GUIDS.includes(wallGuid)
-                || targetNorms.has(wallGuid.replace(/\$/g, '_'))
-            )
             debugLogRenderer({
                 runId,
                 hypothesisId: 'H3',
@@ -1834,29 +2184,6 @@ function emitElevationSvg(
                     facingClipMax,
                 },
             })
-            if (isTargetWall) {
-                debugLogRenderer({
-                    runId,
-                    hypothesisId: 'H8',
-                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:targetWall',
-                    message: 'target wall pass/fail detail',
-                    data: {
-                        doorGuid: ctx.guid,
-                        side,
-                        expressId: w.expressId,
-                        guid: wallGuid,
-                        inBaseVolume,
-                        inWallVolume: inVolume,
-                        renderMode: renderDecision.mode,
-                        renderReason: renderDecision.reason,
-                        wallCentreFacing,
-                        facingClipMin,
-                        facingClipMax,
-                        cameraSideOffset,
-                        wallBBox: w.bbox,
-                    },
-                })
-            }
         }
         if (renderDecision.mode === 'hidden') continue
         // Layer choice: camera-side perpendicular walls (bbox centre on the
@@ -1894,10 +2221,7 @@ function emitElevationSvg(
             segsAll.push(...segs)
         }
         if (polysAll.length === 0 && segsAll.length === 0) continue
-        const wallTopWorldY = w.bbox.max[1]
-        const wallTopScreenY = yScreenAt(wallTopWorldY)
-        const wallTopGapToViewportTopMeters = viewportTopY - wallTopWorldY
-        let topEdgeRedrawCount = 0
+        const wallTopScreenY = yScreenAt(w.bbox.max[1])
         if (wallLayer === 8) {
             for (const s of segsAll) {
                 const vertical = Math.abs(s.x2 - s.x1) < 0.75
@@ -1915,99 +2239,21 @@ function emitElevationSvg(
                         layer: ELEVATION_SECTIONED_PART_LAYER + 1,
                     },
                 })
-                topEdgeRedrawCount++
             }
         }
         nearbyRenderedWalls++
         nearbySegsRawDebug.push(...segsRawAll)
         nearbySegsFilteredDebug.push(...segsAll)
-        if (debugEnabled) {
-            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-            const wallGuid = w.guid ?? null
-            const isTargetWall = !!wallGuid && (
-                DEBUG_TARGET_ELEMENT_GUIDS.includes(wallGuid)
-                || targetNorms.has(wallGuid.replace(/\$/g, '_'))
-            )
-            if (isTargetWall) {
-                const rawYVals = segsRawAll.flatMap((s) => [s.y1, s.y2])
-                const filteredYVals = segsAll.flatMap((s) => [s.y1, s.y2])
-                const rawYMin = rawYVals.length > 0 ? Math.min(...rawYVals) : null
-                const rawYMax = rawYVals.length > 0 ? Math.max(...rawYVals) : null
-                const filteredYMin = filteredYVals.length > 0 ? Math.min(...filteredYVals) : null
-                const filteredYMax = filteredYVals.length > 0 ? Math.max(...filteredYVals) : null
-                const wallTopScreenY = yScreenAt(w.bbox.max[1])
-                const touchTop = (s: ProjectedSegment) =>
-                    Math.abs(s.y1 - screenTopWorld) < 0.75 || Math.abs(s.y2 - screenTopWorld) < 0.75
-                const touchWallTop = (s: ProjectedSegment) =>
-                    Math.abs(s.y1 - wallTopScreenY) < 0.75 || Math.abs(s.y2 - wallTopScreenY) < 0.75
-                // #region agent log H10
-                debugLogRenderer({
-                    runId,
-                    hypothesisId: 'H41',
-                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
-                    message: 'target wall render path',
-                    data: {
-                        doorGuid: ctx.guid,
-                        side,
-                        expressId: w.expressId,
-                        guid: wallGuid,
-                        renderMode: renderDecision.mode,
-                        renderReason: renderDecision.reason,
-                        renderPath: 'meshProjection',
-                        wallLayer,
-                        polyCount,
-                        rawSegCount,
-                        segCount,
-                        boundaryCount,
-                        sharpCount,
-                        rawOrientation: segmentOrientationStats(segsRawAll),
-                        ...segmentOrientationStats(segsAll),
-                        rawLenBuckets: segmentLengthBuckets(segsRawAll),
-                        filteredLenBuckets: segmentLengthBuckets(segsAll),
-                        viewportTopY,
-                        wallTopWorldY: w.bbox.max[1],
-                        wallTopGapToViewportTopMeters: viewportTopY - w.bbox.max[1],
-                        screenTopWorld,
-                        wallTopScreenY,
-                        rawYMin,
-                        rawYMax,
-                        filteredYMin,
-                        filteredYMax,
-                        rawTouchScreenTopCount: segsRawAll.filter(touchTop).length,
-                        filteredTouchScreenTopCount: segsAll.filter(touchTop).length,
-                        rawTouchWallTopCount: segsRawAll.filter(touchWallTop).length,
-                        filteredTouchWallTopCount: segsAll.filter(touchWallTop).length,
-                        topEdgeRedrawCount,
-                    },
-                })
-                // #endregion
-                // #region agent log H42
-                debugLogRenderer({
-                    runId,
-                    hypothesisId: 'H42',
-                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWalls',
-                    message: 'target wall top-edge redraw overlay',
-                    data: {
-                        doorGuid: ctx.guid,
-                        side,
-                        expressId: w.expressId,
-                        guid: wallGuid,
-                        wallLayer,
-                        wallTopWorldY,
-                        viewportTopY,
-                        wallTopScreenY,
-                        screenTopWorld,
-                        wallTopGapToViewportTopMeters,
-                        topEdgeRedrawCount,
-                    },
-                })
-                // #endregion
-            }
-        }
         groups.push({
             layer: wallLayer,
             polygons: polysAll,
             segments: segsAll,
+        })
+        renderedNearbyWallMeta.push({
+            expressId: w.expressId,
+            guid: w.guid ?? null,
+            layer: wallLayer,
+            bbox: w.bbox,
         })
     }
     if (pendingOverlaySegments.length > 0) {
@@ -2064,6 +2310,24 @@ function emitElevationSvg(
         debugLocation: string,
         clipDepthAxis = true,
     ) {
+        const shouldOverlayPartSegments = addStrokes
+            && (debugLocation.includes('belowStructuralSlab') || debugLocation.includes('belowParts'))
+        const queuePartOverlaySegments = (segments: ProjectedSegment[]) => {
+            if (!shouldOverlayPartSegments) return
+            for (const s of segments) {
+                const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+                if (len <= 0.5) continue
+                pendingOverlaySegments.push({
+                    layer: ELEVATION_SECTIONED_PART_LAYER + 1,
+                    segment: {
+                        ...s,
+                        layer: ELEVATION_SECTIONED_PART_LAYER + 1,
+                    },
+                })
+            }
+        }
+        const isProbePart = !!DEBUG_PROBE_ELEMENT_GUID && part.guid === DEBUG_PROBE_ELEMENT_GUID
+        const isTrackedStructuralBelow = !!ctx.slabBelow && part.expressId === ctx.slabBelow.expressId
         const widthOnlyClip: WorldClip = {
             yMin: yLo,
             yMax: yHi,
@@ -2109,6 +2373,45 @@ function emitElevationSvg(
         let segCount = 0
         const polysAll: ProjectedPolygon[] = []
         const segsAll: ProjectedSegment[] = []
+        const polygonVisibilityMetrics = (polys: ProjectedPolygon[]) => {
+            let totalAreaPx2 = 0
+            let thinPolyCount = 0
+            let minX = Infinity
+            let minY = Infinity
+            let maxX = -Infinity
+            let maxY = -Infinity
+            for (const poly of polys) {
+                let area2 = 0
+                let pMinX = Infinity
+                let pMinY = Infinity
+                let pMaxX = -Infinity
+                let pMaxY = -Infinity
+                for (let i = 0; i < poly.points.length; i++) {
+                    const a = poly.points[i]
+                    const b = poly.points[(i + 1) % poly.points.length]
+                    area2 += a.x * b.y - b.x * a.y
+                    if (a.x < pMinX) pMinX = a.x
+                    if (a.y < pMinY) pMinY = a.y
+                    if (a.x > pMaxX) pMaxX = a.x
+                    if (a.y > pMaxY) pMaxY = a.y
+                }
+                totalAreaPx2 += Math.abs(area2) * 0.5
+                if (Number.isFinite(pMinX) && Number.isFinite(pMaxX) && Number.isFinite(pMinY) && Number.isFinite(pMaxY)) {
+                    if (pMaxY - pMinY < 1 || pMaxX - pMinX < 1) thinPolyCount++
+                    if (pMinX < minX) minX = pMinX
+                    if (pMinY < minY) minY = pMinY
+                    if (pMaxX > maxX) maxX = pMaxX
+                    if (pMaxY > maxY) maxY = pMaxY
+                }
+            }
+            return {
+                totalAreaPx2,
+                thinPolyCount,
+                bounds: Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)
+                    ? { minX, minY, maxX, maxY }
+                    : null,
+            }
+        }
         for (const mesh of part.meshes) {
             const cls: MeshClassification = { fill, layer, role: 'slab' }
             const meshStats = {
@@ -2173,59 +2476,27 @@ function emitElevationSvg(
                 })
                 // #endregion
             }
-            if (debugEnabled && part.guid) {
-                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
-                if (isTarget) {
-                    // #region agent log H19
-                    debugLogRenderer({
-                        runId,
-                        hypothesisId: 'H19',
-                        location: debugLocation,
-                        message: 'projectMeshFill rejection breakdown',
-                        data: {
-                            doorGuid: ctx.guid,
-                            side,
-                            expressId: part.expressId,
-                            guid: part.guid,
-                            yLo,
-                            yHi,
-                            meshStats,
-                        },
-                    })
-                    // #endregion
-                }
-            }
         }
-        const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-        const isTargetPart = !!part.guid && (
-            DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid)
-            || targetNorms.has(part.guid.replace(/\$/g, '_'))
-        )
-        if (debugEnabled && isTargetPart) {
-            const horizontalSegs = segsAll.filter((s) => Math.abs(s.y2 - s.y1) < 0.75)
-            const nearBottomCropSegs = horizontalSegs.filter((s) =>
-                Math.abs(s.y1 - screenBottomWorld) < 0.75 && Math.abs(s.y2 - screenBottomWorld) < 0.75
-            )
-            // #region agent log H32
-            debugLogRenderer({
-                runId,
-                hypothesisId: 'H32',
-                location: debugLocation,
-                message: 'target slab part segment profile near bottom crop edge',
-                data: {
-                    doorGuid: ctx.guid,
-                    side,
-                    expressId: part.expressId,
-                    guid: part.guid,
-                    yLo,
-                    yHi,
-                    screenBottomWorld,
-                    segCount: segsAll.length,
-                    horizontalSegCount: horizontalSegs.length,
-                    nearBottomCropSegCount: nearBottomCropSegs.length,
-                },
-            })
+        if (isProbePart) {
+            // #region agent log H67
+            const segLengths = segsAll.map((s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1))
+            const segCountGtPointFive = segLengths.filter((v) => v > 0.5).length
+            const probePolyMetrics = polygonVisibilityMetrics(polysAll)
+            const segBounds = segsAll.length > 0
+                ? {
+                    minX: Math.min(...segsAll.map((s) => Math.min(s.x1, s.x2))),
+                    maxX: Math.max(...segsAll.map((s) => Math.max(s.x1, s.x2))),
+                    minY: Math.min(...segsAll.map((s) => Math.min(s.y1, s.y2))),
+                    maxY: Math.max(...segsAll.map((s) => Math.max(s.y1, s.y2))),
+                }
+                : null
+            debugLogSessionProbe({ runId, hypothesisId: 'H67', location: `${debugLocation}:projection`, message: 'probe part projected geometry counts before fallback', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, clipDepthAxis, meshCount: part.meshes.length, polyCount, segCount, polysAllCount: polysAll.length, segsAllCount: segsAll.length, polyTotalAreaPx2: probePolyMetrics.totalAreaPx2, thinPolyCount: probePolyMetrics.thinPolyCount, polyBounds: probePolyMetrics.bounds, segLengthBuckets: segmentLengthBuckets(segsAll), segCountGtPointFive, segMinLength: segLengths.length ? Math.min(...segLengths) : null, segMaxLength: segLengths.length ? Math.max(...segLengths) : null, segBounds } })
+            // #endregion
+        }
+        if (isTrackedStructuralBelow) {
+            // #region agent log H76
+            const slabPolyMetrics = polygonVisibilityMetrics(polysAll)
+            debugLogSessionProbe({ runId, hypothesisId: 'H76', location: `${debugLocation}:projection`, message: 'structural slab-below projected geometry counts', data: { doorGuid: ctx.guid, side, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, clipDepthAxis, meshCount: part.meshes.length, polyCount, segCount, polysAllCount: polysAll.length, segsAllCount: segsAll.length, polyTotalAreaPx2: slabPolyMetrics.totalAreaPx2, thinPolyCount: slabPolyMetrics.thinPolyCount, polyBounds: slabPolyMetrics.bounds, segLengthBuckets: segmentLengthBuckets(segsAll) } })
             // #endregion
         }
         const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
@@ -2254,7 +2525,7 @@ function emitElevationSvg(
             }
             return
         }
-        if (polysAll.length === 0 && segsAll.length === 0) {
+        if (polysAll.length === 0) {
             const fallbackWorldBox: AABB = {
                 min: [
                     Math.max(
@@ -2334,36 +2605,34 @@ function emitElevationSvg(
                     groups.push({
                         layer,
                         polygons: fallbackPolys,
-                        segments: fallbackSegs,
+                        // Keep real projected outlines when present; otherwise
+                        // use synthetic band edges from fallback rect.
+                        segments: segsAll.length > 0 ? segsAll : fallbackSegs,
                     })
-                    if (debugEnabled) {
-                        // #region agent log H34
-                        debugLogRenderer({
-                            runId,
-                            hypothesisId: 'H34',
-                            location: debugLocation,
-                            message: 'slab fallback rectangle emitted after empty geometry projection',
-                            data: {
-                                doorGuid: ctx.guid,
-                                side,
-                                expressId: part.expressId,
-                                guid: part.guid ?? null,
-                                yLo,
-                                yHi,
-                                fallbackWorldBox,
-                                fallbackPolyCount: fallbackPolys.length,
-                                fallbackSegCount: fallbackSegs.length,
-                                fallbackStrokeMode: prefersAboveFaceOnly
-                                    ? 'above-only'
-                                    : prefersBelowFaceOnly
-                                        ? 'below-only'
-                                        : 'both',
-                            },
-                        })
+                    queuePartOverlaySegments(segsAll.length > 0 ? segsAll : fallbackSegs)
+                    if (isProbePart) {
+                        // #region agent log H68
+                        debugLogSessionProbe({ runId, hypothesisId: 'H68', location: `${debugLocation}:fallback`, message: 'probe part rendered via fallback rectangle', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, fallbackRectPoints: fallbackRect.length, fallbackSegCount: fallbackSegs.length, fallbackWorldBox } })
                         // #endregion
                     }
                     return
                 }
+            }
+            // If we could not synthesize a fallback fill but still have real
+            // projected segments, emit those to avoid dropping visible edges.
+            if (segsAll.length > 0) {
+                if (isProbePart) {
+                    // #region agent log H69
+                    debugLogSessionProbe({ runId, hypothesisId: 'H69', location: `${debugLocation}:fallback`, message: 'probe part fallback fill unavailable; emitting projected segments only', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, bbox: part.bbox, partClip } })
+                    // #endregion
+                }
+                groups.push({
+                    layer,
+                    polygons: [],
+                    segments: segsAll,
+                })
+                queuePartOverlaySegments(segsAll)
+                return
             }
             if (debugEnabled && isAboveParts && hasCoveringMesh) {
                 // #region agent log H26
@@ -2387,91 +2656,24 @@ function emitElevationSvg(
                 })
                 // #endregion
             }
-            if (debugEnabled && part.guid) {
-                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
-                if (isTarget) {
-                    // #region agent log H12
-                    debugLogRenderer({
-                        runId,
-                        hypothesisId: 'H12',
-                        location: debugLocation,
-                        message: 'target slab part geometry fully clipped',
-                        data: {
-                            doorGuid: ctx.guid,
-                            side,
-                            expressId: part.expressId,
-                            guid: part.guid,
-                            yLo,
-                            yHi,
-                            polyCount,
-                            segCount,
-                            clip: partClip,
-                            bbox: part.bbox,
-                        },
-                    })
-                    // #endregion
-                }
-            }
-            return
-        }
-        if (polysAll.length === 0 && segsAll.length > 0 && debugEnabled && part.guid) {
-            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-            const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
-            if (isTarget) {
-                const closureDiag = segmentClosureDiagnostics(segsAll)
-                // #region agent log H15
-                debugLogRenderer({
-                    runId,
-                    hypothesisId: 'H15',
-                    location: debugLocation,
-                    message: 'segment topology with zero polys',
-                    data: {
-                        doorGuid: ctx.guid,
-                        side,
-                        expressId: part.expressId,
-                        guid: part.guid,
-                        yLo,
-                        yHi,
-                        segCount,
-                        endpointCount: segsAll.length * 2,
-                        uniquePointCount: closureDiag.uniquePointCount,
-                        hullPointCount: closureDiag.hullPointCount,
-                        hullArea2: closureDiag.hullArea2,
-                        endpointBBox: closureDiag.bbox,
-                        sampleSegments: closureDiag.sampleSegments,
-                    },
-                })
+            if (isProbePart) {
+                // #region agent log H69
+                debugLogSessionProbe({ runId, hypothesisId: 'H69', location: `${debugLocation}:fallback`, message: 'probe part dropped after empty projection and no fallback', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, bbox: part.bbox, partClip } })
                 // #endregion
             }
+            return
         }
         groups.push({
             layer,
             polygons: polysAll,
             segments: segsAll,
         })
-        if (debugEnabled && part.guid) {
-            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-            const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
-            if (isTarget) {
-                debugLogRenderer({
-                    runId,
-                    hypothesisId: 'H9',
-                    location: debugLocation,
-                    message: 'target slab part rendered as real geometry',
-                    data: {
-                        doorGuid: ctx.guid,
-                        side,
-                        expressId: part.expressId,
-                        guid: part.guid,
-                        yLo,
-                        yHi,
-                        polyCount,
-                        segCount,
-                        bbox: part.bbox,
-                    },
-                })
-            }
+        queuePartOverlaySegments(segsAll)
+        if (isProbePart) {
+            // #region agent log H70
+            const probePolyMetrics = polygonVisibilityMetrics(polysAll)
+            debugLogSessionProbe({ runId, hypothesisId: 'H70', location: `${debugLocation}:emit`, message: 'probe part emitted projected geometry group', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, polyCount: polysAll.length, segCount: segsAll.length, polyTotalAreaPx2: probePolyMetrics.totalAreaPx2, thinPolyCount: probePolyMetrics.thinPolyCount, polyBounds: probePolyMetrics.bounds } })
+            // #endregion
         }
         if (debugEnabled && debugLocation === 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts') {
             // #region agent log H14
@@ -2498,12 +2700,67 @@ function emitElevationSvg(
 
     // Structural slabs: real mesh only. Do not synthesize full-width cap bands.
     {
+        const slabBelowInYWidth = ctx.slabBelow ? inYAndWidthVolume(ctx.slabBelow.bbox) : false
+        const slabBelowInFullVolume = ctx.slabBelow ? intersectsElevationVolume(ctx.slabBelow.bbox) : false
         const slabBelowRenderDecision = ctx.slabBelow
-            ? decideSectionedRender(ctx.slabBelow.bbox, 'structural slab below intersects full elevation volume')
+            ? slabBelowInYWidth
+                ? {
+                    mode: 'sectioned' as const,
+                    reason: 'structural slab below intersects elevation y+width window',
+                }
+                : {
+                    mode: 'hidden' as const,
+                    reason: 'structural slab below outside elevation y+width window',
+                }
             : null
+        // #region agent log H79
+        debugLogSessionProbe({
+            runId,
+            hypothesisId: 'H79',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowStructuralSlab',
+            message: 'structural slab-below presence and render decision',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                hasSlabBelow: !!ctx.slabBelow,
+                expressId: ctx.slabBelow?.expressId ?? null,
+                guid: ctx.slabBelow?.guid ?? null,
+                inYAndWidth: slabBelowInYWidth,
+                intersectsElevationVolume: slabBelowInFullVolume,
+                renderMode: slabBelowRenderDecision?.mode ?? null,
+                renderReason: slabBelowRenderDecision?.reason ?? null,
+            },
+        })
+        // #endregion
+        if (probeGuid && ctx.slabBelow?.guid === probeGuid && slabBelowRenderDecision) {
+            // #region agent log H63
+            debugLogSessionProbe({ runId, hypothesisId: 'H63', location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowStructuralSlab', message: 'probe element structural slab-below render decision', data: { doorGuid: ctx.guid, side, probeGuid, expressId: ctx.slabBelow.expressId, guid: ctx.slabBelow.guid ?? null, inYAndWidth: inYAndWidthVolume(ctx.slabBelow.bbox), intersectsElevationVolume: intersectsElevationVolume(ctx.slabBelow.bbox), renderMode: slabBelowRenderDecision.mode, renderReason: slabBelowRenderDecision.reason, bbox: ctx.slabBelow.bbox } })
+            // #endregion
+        }
         if (ctx.slabBelow && slabBelowRenderDecision?.mode !== 'hidden') {
             const yLo = Math.max(ctx.slabBelow.bbox.min[1], viewportBottomY)
             const yHi = Math.min(ctx.slabBelow.bbox.max[1], viewportTopY)
+            // #region agent log H79
+            debugLogSessionProbe({
+                runId,
+                hypothesisId: 'H79',
+                location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowStructuralSlab',
+                message: 'structural slab-below y-band before draw',
+                data: {
+                    doorGuid: ctx.guid,
+                    side,
+                    expressId: ctx.slabBelow.expressId,
+                    guid: ctx.slabBelow.guid ?? null,
+                    yLo,
+                    yHi,
+                    bandHeight: yHi - yLo,
+                    viewportBottomY,
+                    viewportTopY,
+                    renderMode: slabBelowRenderDecision?.mode ?? null,
+                    renderReason: slabBelowRenderDecision?.reason ?? null,
+                },
+            })
+            // #endregion
             if (yHi - yLo >= 0.005) {
                 drawPartGeometry(
                     { expressId: ctx.slabBelow.expressId, meshes: ctx.slabBelow.meshes, bbox: ctx.slabBelow.bbox, guid: null },
@@ -2512,7 +2769,8 @@ function emitElevationSvg(
                     options.colors.elevation.wall,
                     ELEVATION_SECTIONED_PART_LAYER,
                     slabBelowRenderDecision?.mode === 'sectioned',
-                    'lib/ifclite-renderer.ts:emitElevationSvg:belowStructuralSlab'
+                    'lib/ifclite-renderer.ts:emitElevationSvg:belowStructuralSlab',
+                    false
                 )
             }
         }
@@ -2521,40 +2779,22 @@ function emitElevationSvg(
         const belowPartRenderDecisions = new Map<number, ElevationRenderDecision>()
         const belowParts = ctx.slabBelowParts
             .filter((p) => {
+                const inYWidth = inYAndWidthVolume(p.bbox)
                 const inVolume = intersectsElevationVolume(p.bbox)
-                const renderDecision = inVolume
+                const renderDecision = inYWidth
                     ? {
                         mode: 'sectioned' as const,
-                        reason: 'slab-below part intersects full elevation volume',
+                        reason: 'slab-below part intersects elevation y+width window',
                     }
                     : {
                         mode: 'hidden' as const,
-                        reason: 'slab-below part outside full elevation volume',
+                        reason: 'slab-below part outside elevation y+width window',
                     }
                 belowPartRenderDecisions.set(p.expressId, renderDecision)
-                if (debugEnabled && p.guid) {
-                    const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-                    const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(p.guid) || targetNorms.has(p.guid.replace(/\$/g, '_'))
-                    if (isTarget) {
-                        // #region agent log H31
-                        debugLogRenderer({
-                            runId,
-                            hypothesisId: 'H31',
-                            location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts',
-                            message: 'target slab-below part filter gate',
-                            data: {
-                                doorGuid: ctx.guid,
-                                side,
-                                expressId: p.expressId,
-                                guid: p.guid,
-                                inVolume,
-                                renderMode: renderDecision.mode,
-                                renderReason: renderDecision.reason,
-                                bbox: p.bbox,
-                            },
-                        })
-                        // #endregion
-                    }
+                if (probeGuid && p.guid === probeGuid) {
+                    // #region agent log H64
+                    debugLogSessionProbe({ runId, hypothesisId: 'H64', location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts', message: 'probe element slab-below-part render decision', data: { instrumentationRevision: 'probe-v3', doorGuid: ctx.guid, side, probeGuid, expressId: p.expressId, guid: p.guid ?? null, meshCount: p.meshes.length, meshIfcTypes: [...new Set(p.meshes.map((m) => (m.ifcType ?? '').toUpperCase()))], inYAndWidth: inYWidth, intersectsElevationVolume: inVolume, renderMode: renderDecision.mode, renderReason: renderDecision.reason, bbox: p.bbox } })
+                    // #endregion
                 }
                 return renderDecision.mode !== 'hidden'
             })
@@ -2566,68 +2806,26 @@ function emitElevationSvg(
             }
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
+            if (part.guid === DEBUG_PROBE_ELEMENT_GUID) {
+                // #region agent log H72
+                debugLogSessionProbe({ runId, hypothesisId: 'H72', location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowPartsLoop', message: 'probe part reached drawPartGeometry callsite', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, renderMode: renderDecision.mode, renderReason: renderDecision.reason } })
+                // #endregion
+            }
             if (yHi - yLo < 0.005) {
-                if (debugEnabled && part.guid) {
-                    const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-                    const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
-                    if (isTarget) {
-                        // #region agent log H33
-                        debugLogRenderer({
-                            runId,
-                            hypothesisId: 'H33',
-                            location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts',
-                            message: 'target slab-below part skipped due tiny Y span after viewport clip',
-                            data: {
-                                doorGuid: ctx.guid,
-                                side,
-                                expressId: part.expressId,
-                                guid: part.guid,
-                                yLo,
-                                yHi,
-                                span: yHi - yLo,
-                                viewportBottomY,
-                                viewportTopY,
-                                bbox: part.bbox,
-                            },
-                        })
-                        // #endregion
-                    }
-                }
                 continue
             }
-            if (debugEnabled && part.guid) {
-                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
-                if (isTarget) {
-                    debugLogRenderer({
-                        runId,
-                        hypothesisId: 'H7',
-                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts',
-                        message: 'target slab-below part rendered as horizontal band',
-                        data: {
-                            doorGuid: ctx.guid,
-                            side,
-                            expressId: part.expressId,
-                            guid: part.guid,
-                            yLo,
-                            yHi,
-                            viewportBottomY,
-                            viewportTopY,
-                            inVolume: intersectsElevationVolume(part.bbox),
-                            renderMode: renderDecision.mode,
-                            renderReason: renderDecision.reason,
-                            bbox: part.bbox,
-                        },
-                    })
-                }
-            }
-            drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, ELEVATION_SECTIONED_PART_LAYER, renderDecision.mode === 'sectioned', 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts')
+            drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, ELEVATION_SECTIONED_PART_LAYER, renderDecision.mode === 'sectioned', 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts', false)
         }
     }
     {
         const slabAboveRenderDecision = ctx.slabAbove
             ? decideSectionedRender(ctx.slabAbove.bbox, 'structural slab above intersects full elevation volume')
             : null
+        if (probeGuid && ctx.slabAbove?.guid === probeGuid && slabAboveRenderDecision) {
+            // #region agent log H65
+            debugLogSessionProbe({ runId, hypothesisId: 'H65', location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveStructuralSlab', message: 'probe element structural slab-above render decision', data: { doorGuid: ctx.guid, side, probeGuid, expressId: ctx.slabAbove.expressId, guid: ctx.slabAbove.guid ?? null, inYAndWidth: inYAndWidthVolume(ctx.slabAbove.bbox), intersectsElevationVolume: intersectsElevationVolume(ctx.slabAbove.bbox), renderMode: slabAboveRenderDecision.mode, renderReason: slabAboveRenderDecision.reason, bbox: ctx.slabAbove.bbox } })
+            // #endregion
+        }
         if (ctx.slabAbove && slabAboveRenderDecision?.mode !== 'hidden') {
             const yLo = Math.max(ctx.slabAbove.bbox.min[1], viewportBottomY)
             const yHi = Math.min(ctx.slabAbove.bbox.max[1], viewportTopY)
@@ -2642,34 +2840,6 @@ function emitElevationSvg(
                     'lib/ifclite-renderer.ts:emitElevationSvg:aboveStructuralSlab'
                 )
             }
-        }
-        if (debugEnabled) {
-            const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-            const targetAbove = ctx.slabAboveParts
-                .filter((p) => {
-                    const g = p.guid ?? null
-                    return !!g && (DEBUG_TARGET_ELEMENT_GUIDS.includes(g) || targetNorms.has(g.replace(/\$/g, '_')))
-                })
-                .map((p) => ({
-                    expressId: p.expressId,
-                    guid: p.guid ?? null,
-                    bbox: p.bbox,
-                }))
-            // #region agent log H13
-            debugLogRenderer({
-                runId,
-                hypothesisId: 'H13',
-                location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
-                message: 'target slab-above parts available on context',
-                data: {
-                    doorGuid: ctx.guid,
-                    side,
-                    slabAbovePartsTotal: ctx.slabAboveParts.length,
-                    targetAboveCount: targetAbove.length,
-                    targetAbove,
-                },
-            })
-            // #endregion
         }
         // Slab-above parts: render both IFCBUILDINGELEMENTPART and IFCCOVERING
         // as sectioned slab/build-up geometry so box-like ceiling elements get
@@ -2689,29 +2859,6 @@ function emitElevationSvg(
                 const isCovering = isIfcCoveringPart(p)
                 if (isCovering) abovePartsCovering++
                 let renderDecision: ElevationRenderDecision
-                if (debugEnabled && p.guid) {
-                    const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-                    const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(p.guid) || targetNorms.has(p.guid.replace(/\$/g, '_'))
-                    if (isTarget) {
-                        // #region agent log H12
-                        debugLogRenderer({
-                            runId,
-                            hypothesisId: 'H12',
-                            location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
-                            message: 'target slab-above part filter gate',
-                            data: {
-                                doorGuid: ctx.guid,
-                                side,
-                                expressId: p.expressId,
-                                guid: p.guid,
-                                inVolume,
-                                inYWidth,
-                                bbox: p.bbox,
-                            },
-                        })
-                        // #endregion
-                    }
-                }
                 renderDecision = inVolume
                     ? {
                         mode: 'sectioned',
@@ -2726,6 +2873,11 @@ function emitElevationSvg(
                             : 'non-covering slab part outside full elevation volume',
                     }
                 abovePartRenderDecisions.set(p.expressId, renderDecision)
+                if (probeGuid && p.guid === probeGuid) {
+                    // #region agent log H66
+                    debugLogSessionProbe({ runId, hypothesisId: 'H66', location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts', message: 'probe element slab-above-part render decision', data: { doorGuid: ctx.guid, side, probeGuid, expressId: p.expressId, guid: p.guid ?? null, inYAndWidth: inYWidth, intersectsElevationVolume: inVolume, renderMode: renderDecision.mode, renderReason: renderDecision.reason, bbox: p.bbox } })
+                    // #endregion
+                }
                 if (debugEnabled) {
                     debugLogRenderer({
                         runId,
@@ -2795,32 +2947,6 @@ function emitElevationSvg(
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             if (yHi - yLo < 0.005) continue
-            if (debugEnabled && part.guid) {
-                const targetNorms = new Set(DEBUG_TARGET_ELEMENT_GUIDS.map((g) => g.replace(/\$/g, '_')))
-                const isTarget = DEBUG_TARGET_ELEMENT_GUIDS.includes(part.guid) || targetNorms.has(part.guid.replace(/\$/g, '_'))
-                if (isTarget) {
-                    debugLogRenderer({
-                        runId,
-                        hypothesisId: 'H7',
-                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
-                        message: 'target slab-above part rendered as horizontal band',
-                        data: {
-                            doorGuid: ctx.guid,
-                            side,
-                            expressId: part.expressId,
-                            guid: part.guid,
-                            yLo,
-                            yHi,
-                            viewportBottomY,
-                            viewportTopY,
-                            inVolume: intersectsElevationVolume(part.bbox),
-                            renderMode: renderDecision.mode,
-                            renderReason: renderDecision.reason,
-                            bbox: part.bbox,
-                        },
-                    })
-                }
-            }
             const isCovering = isIfcCoveringPart(part)
             const fill = isCovering ? options.colors.elevation.suspendedCeiling : options.colors.elevation.wall
             const addStrokes = renderDecision.mode === 'sectioned'
@@ -2906,6 +3032,39 @@ function emitElevationSvg(
         mode: 'projected',
         reason: 'focal door subject renders without depth clipping in elevation',
     }
+    const nearbyDoorRenderStats = new Map<number, {
+        expressId: number
+        guid: string | null
+        bbox: AABB
+        mode: ElevationRenderMode
+        reason: string
+        meshCount: number
+        renderedMeshCount: number
+        emptyMeshCount: number
+        polyCount: number
+        segCount: number
+        layers: number[]
+        clipModeCounts: { projected: number; sectioned: number }
+    }>()
+    for (const door of ctx.nearbyDoors) {
+        const mode = nearbyDoorModes.get(door.expressId)
+        if (!mode) continue
+        const decision = nearbyDoorRenderDecisions.get(door.expressId)
+        nearbyDoorRenderStats.set(door.expressId, {
+            expressId: door.expressId,
+            guid: door.guid ?? null,
+            bbox: door.bbox,
+            mode,
+            reason: decision?.reason ?? 'missing decision',
+            meshCount: 0,
+            renderedMeshCount: 0,
+            emptyMeshCount: 0,
+            polyCount: 0,
+            segCount: 0,
+            layers: [],
+            clipModeCounts: { projected: 0, sectioned: 0 },
+        })
+    }
     for (const { mesh, expressId } of meshes) {
         const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes)
         const nearbyDoorMode = nearbyDoorModes.get(expressId)
@@ -2916,8 +3075,55 @@ function emitElevationSvg(
             : elevationClip
         const polys = projectMeshFill(mesh, cam, cls, expressId, meshClip, pixelClip)
         const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, meshClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+        const doorStats = nearbyDoorRenderStats.get(expressId)
+        if (doorStats) {
+            doorStats.meshCount++
+            doorStats.polyCount += polys.length
+            doorStats.segCount += segs.length
+            if (!doorStats.layers.includes(cls.layer)) doorStats.layers.push(cls.layer)
+            if (meshRenderMode === 'projected') doorStats.clipModeCounts.projected++
+            else doorStats.clipModeCounts.sectioned++
+            if (polys.length === 0 && segs.length === 0) doorStats.emptyMeshCount++
+            else doorStats.renderedMeshCount++
+        }
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
+    }
+    if (debugEnabled && nearbyDoorRenderStats.size > 0) {
+        const overlap1D = (aMin: number, aMax: number, bMin: number, bMax: number) =>
+            Math.min(aMax, bMax) - Math.max(aMin, bMin)
+        const diagnostics = [...nearbyDoorRenderStats.values()].map((s) => {
+            const occludingWalls = renderedNearbyWallMeta
+                .filter((w) => w.layer >= 8)
+                .filter((w) =>
+                    overlap1D(w.bbox.min[widthAxisIdx], w.bbox.max[widthAxisIdx], s.bbox.min[widthAxisIdx], s.bbox.max[widthAxisIdx]) > 0
+                    && overlap1D(w.bbox.min[1], w.bbox.max[1], s.bbox.min[1], s.bbox.max[1]) > 0
+                )
+                .map((w) => ({
+                    expressId: w.expressId,
+                    guid: w.guid,
+                    layer: w.layer,
+                    bbox: w.bbox,
+                }))
+            return {
+                ...s,
+                occludingForegroundWalls: occludingWalls,
+            }
+        })
+        // #region agent log H56
+        debugLogRenderer({
+            runId,
+            hypothesisId: 'H56',
+            location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyDoorMeshProjection',
+            message: 'nearby door mesh projection and potential foreground occlusion',
+            data: {
+                doorGuid: ctx.guid,
+                side,
+                diagnostics,
+                nearbyWallForegroundCount: renderedNearbyWallMeta.filter((w) => w.layer >= 8).length,
+            },
+        })
+        // #endregion
     }
     if (debugEnabled) {
         const layerStats: Array<{
@@ -2964,6 +3170,71 @@ function emitElevationSvg(
         })
         // #endregion
     }
+    // #region agent log H80
+    debugLogSessionProbe({
+        runId,
+        hypothesisId: 'H80',
+        location: 'lib/ifclite-renderer.ts:emitElevationSvg:allGroups',
+        message: 'layer occupancy before final svg serialization',
+        data: {
+            doorGuid: ctx.guid,
+            side,
+            layerSummary: groups.map((g) => ({
+                layer: g.layer,
+                polyCount: g.polygons.length,
+                segCount: g.segments.length,
+            })),
+        },
+    })
+    // #endregion
+    // #region agent log H81
+    const layer0Polys = groups
+        .filter((g) => g.layer === 0)
+        .flatMap((g) => g.polygons)
+    const sectionPolys = groups
+        .filter((g) => g.layer === ELEVATION_SECTIONED_PART_LAYER)
+        .flatMap((g) => g.polygons)
+    const sectionFillStats = new Map<string, { count: number; totalAreaPx2: number; thinCount: number }>()
+    for (const p of sectionPolys) {
+        let area2 = 0
+        let minX = Infinity
+        let minY = Infinity
+        let maxX = -Infinity
+        let maxY = -Infinity
+        for (let i = 0; i < p.points.length; i++) {
+            const a = p.points[i]
+            const b = p.points[(i + 1) % p.points.length]
+            area2 += a.x * b.y - b.x * a.y
+            if (a.x < minX) minX = a.x
+            if (a.y < minY) minY = a.y
+            if (a.x > maxX) maxX = a.x
+            if (a.y > maxY) maxY = a.y
+        }
+        const rec = sectionFillStats.get(p.fill) ?? { count: 0, totalAreaPx2: 0, thinCount: 0 }
+        rec.count += 1
+        rec.totalAreaPx2 += Math.abs(area2) * 0.5
+        if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY) && (maxY - minY < 1 || maxX - minX < 1)) rec.thinCount += 1
+        sectionFillStats.set(p.fill, rec)
+    }
+    debugLogSessionProbe({
+        runId,
+        hypothesisId: 'H81',
+        location: 'lib/ifclite-renderer.ts:emitElevationSvg:fillVisibility',
+        message: 'section fill visibility and color-compositing diagnostics',
+        data: {
+            doorGuid: ctx.guid,
+            side,
+            backgroundFill: options.colors.elevation.wall,
+            layer0PolyCount: layer0Polys.length,
+            layer0Fills: [...new Set(layer0Polys.map((p) => p.fill))],
+            sectionLayer: ELEVATION_SECTIONED_PART_LAYER,
+            sectionPolyCount: sectionPolys.length,
+            sectionFillStats: [...sectionFillStats.entries()].map(([fill, stats]) => ({ fill, ...stats })),
+            overlayLayer: ELEVATION_SECTIONED_PART_LAYER + 1,
+            overlaySegCount: pendingOverlaySegments.length,
+        },
+    })
+    // #endregion
     groups.sort((a, b) => a.layer - b.layer)
 
     // Storey marker (▼ + label) at the storey-elevation reference Y, in the
@@ -3278,7 +3549,7 @@ function buildPlanCameraNew(
 
 function emitPlanSvg(
     ctx: DoorContextLite,
-    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs'>>,
+    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop'>>,
 ): string {
     const W = options.width
     const H = options.height

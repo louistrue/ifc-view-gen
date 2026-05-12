@@ -52,17 +52,17 @@ export interface DoorContextLite {
     viewFrame: DoorViewFrame
 
     hostWall: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB } | null
-    slabBelow: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB } | null
-    slabAbove: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB } | null
+    slabBelow: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null; isLoadBearing?: boolean | null } | null
+    slabAbove: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null; isLoadBearing?: boolean | null } | null
     /** IfcBuildingElementPart children of slabBelow (Unterlagsboden / floor
      *  build-up).  Rendered as separate bands on top of the structural slab
      *  in elevation views. */
-    slabBelowParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
+    slabBelowParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null; isLoadBearing?: boolean | null }>
     /** Same for slabAbove (suspended ceiling / build-up under the slab). */
-    slabAboveParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
+    slabAboveParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null; isLoadBearing?: boolean | null }>
 
     nearbyWalls: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
-    nearbyDoors: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; cfcBkp: string | null }>
+    nearbyDoors: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; cfcBkp: string | null; guid?: string | null }>
     nearbyWindows: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
     nearbyDevices: Array<{
         expressId: number
@@ -436,6 +436,47 @@ function findSlabsAroundDoor(
     }
 }
 
+function parseIfcBool(value: unknown): boolean | null {
+    if (typeof value === 'boolean') return value
+    if (value == null) return null
+    const raw = String(value).trim()
+    if (!raw || raw === '$') return null
+    const norm = raw.replace(/^\.|\.$/g, '').toUpperCase()
+    if (norm === 'T' || norm === 'TRUE' || norm === 'YES' || norm === 'Y' || norm === '1') return true
+    if (norm === 'F' || norm === 'FALSE' || norm === 'NO' || norm === 'N' || norm === '0') return false
+    return null
+}
+
+function readLoadBearing(model: IfcLiteModel, expressId: number): boolean | null {
+    const normKey = (k: string) => k.toLowerCase().replace(/[\s_/-]/g, '')
+    const readNamed = (id: number | null): boolean | null => {
+        if (id == null) return null
+        for (const attr of model.namedAttrs(id)) {
+            if (normKey(attr.name) !== 'loadbearing') continue
+            const parsed = parseIfcBool(attr.value)
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+    const readPsets = (id: number): boolean | null => {
+        for (const p of [...model.psets(id), ...model.typePsets(id)]) {
+            for (const [key, value] of Object.entries(p.properties)) {
+                if (normKey(key) !== 'loadbearing') continue
+                const parsed = parseIfcBool(value)
+                if (parsed != null) return parsed
+            }
+        }
+        return null
+    }
+    const instAttr = readNamed(expressId)
+    if (instAttr != null) return instAttr
+    const instPset = readPsets(expressId)
+    if (instPset != null) return instPset
+    const typeAttr = readNamed(model.typeOfInstance(expressId))
+    if (typeAttr != null) return typeAttr
+    return null
+}
+
 /** IfcDoor / IfcDoorType OperationType: only the actual swing-direction enum
  *  (SINGLE_SWING_LEFT, DOUBLE_DOOR_*, …), never PredefinedType.  Many models
  *  leave OperationType $ on the instance and set it on the linked IfcDoorType
@@ -705,23 +746,38 @@ export function analyzeDoor(
         ...collectBuildupParts(caches.buildingPartIndex, aboveYLo, aboveYHi, 1.6),
         ...collectBuildupParts(caches.coveringIndex, aboveYLo, aboveYHi, 1.6),
     ]
-    const attachPartGuid = (
-        parts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
-    ): Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }> =>
-        parts.map((part) => ({
-            ...part,
-            guid: model.attrs(part.expressId)?.globalId ?? null,
-        }))
-    const slabBelowParts = attachPartGuid([
+    const slabBelowPartsRaw = [
         ...aggParts(slabs.below?.expressId),
         ...slabs.belowExtras,
         ...belowBuildup,
-    ])
-    const slabAboveParts = attachPartGuid([
+    ]
+    const slabAbovePartsRaw = [
         ...aggParts(slabs.above?.expressId),
         ...slabs.aboveExtras,
         ...aboveBuildup,
-    ])
+    ]
+    const withMetadata = <T extends { expressId: number }>(items: T[]) =>
+        items.map((item) => ({
+            ...item,
+            guid: model.attrs(item.expressId)?.globalId ?? null,
+            isLoadBearing: readLoadBearing(model, item.expressId),
+        }))
+    const slabBelow = slabs.below
+        ? {
+            ...slabs.below,
+            guid: model.attrs(slabs.below.expressId)?.globalId ?? null,
+            isLoadBearing: readLoadBearing(model, slabs.below.expressId),
+        }
+        : null
+    const slabAbove = slabs.above
+        ? {
+            ...slabs.above,
+            guid: model.attrs(slabs.above.expressId)?.globalId ?? null,
+            isLoadBearing: readLoadBearing(model, slabs.above.expressId),
+        }
+        : null
+    const slabBelowParts = withMetadata(slabBelowPartsRaw)
+    const slabAboveParts = withMetadata(slabAbovePartsRaw)
     if (process.env.DEBUG_PARTS === '1') {
         console.log(`[parts] door=${doorId} slabBelow=${slabs.below?.expressId ?? 'none'} top=${slabs.below?.bbox.max[1].toFixed(3) ?? 'none'} doorBottom=${bbox.min[1].toFixed(3)} belowParts=${slabBelowParts.length} (extras=${slabs.belowExtras.length} buildup=${belowBuildup.length}) slabAbove=${slabs.above?.expressId ?? 'none'} aboveBot=${slabs.above?.bbox.min[1].toFixed(3) ?? 'none'} doorTop=${bbox.max[1].toFixed(3)} aboveParts=${slabAboveParts.length}`)
         for (const p of belowBuildup) {
@@ -794,6 +850,7 @@ export function analyzeDoor(
             meshes: c.meshes,
             bbox: c.bbox,
             cfcBkp: readDoorBkp(model, c.expressId),
+            guid: model.attrs(c.expressId)?.globalId ?? null,
         }))
 
     const nearbyWindows = queryPlanIndex(caches.windowIndex, centre, radius)
@@ -828,8 +885,8 @@ export function analyzeDoor(
         storeyElevation: storey?.elevation ?? null,
         viewFrame,
         hostWall,
-        slabBelow: slabs.below,
-        slabAbove: slabs.above,
+        slabBelow,
+        slabAbove,
         slabBelowParts,
         slabAboveParts,
         nearbyWalls,
