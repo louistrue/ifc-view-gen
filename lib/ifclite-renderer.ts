@@ -2133,38 +2133,6 @@ function emitElevationSvg(
     // landing on layer 1 (host-plane) instead of layer 10 (clipped-wall top).
     const cameraSideAxisSign = Math.sign(ctx.viewFrame.facing[facingAxisIdx] * cameraSign) || cameraSign
     /** Perpendicular clipped walls tessellate many horizontals at the storey head → stacked lines under slab/ceiling overlap. Coarse dedupe uses `storeyHeadHzDedupeKeys`. */
-    const logDiagClippedWallHz = (
-        wl: number,
-        wid: number,
-        segs: readonly ProjectedSegment[],
-        wallTy: number,
-    ): void => {
-        // #region agent log
-        if (wl !== ELEVATION_CLIPPED_WALL_TOP_LAYER) return
-        const normDg = (g: string | null | undefined) => (g ?? '').replace(/\$/g, '_').toUpperCase()
-        if (normDg(ctx.guid) !== normDg('03LXkdE7pzIwdRUvkXbZKu')) return
-        let hzCt = 0
-        let nearCropTopCt = 0
-        const bandPx = 90
-        for (const s of segs) {
-            if (Math.abs(s.y2 - s.y1) > 1) continue
-            hzCt++
-            const ym = (s.y1 + s.y2) / 2
-            if (ym <= pixelClip.minY + bandPx) nearCropTopCt++
-        }
-        const dbgPayload = { sessionId: 'cfa0e2', runId: 'multi-hz-above-wall-post', hypothesisId: 'HZWALL', location: 'ifclite-renderer.ts:emitElevationSvg:nearbyWalls', message: 'clipped_wall_top_hz', data: { side, wallExpressId: wid, hzCt, nearCropTopCt, pixelClipMinY: pixelClip.minY, wallTopScreenY: wallTy, segsLen: segs.length } }
-        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' }, body: JSON.stringify({ ...dbgPayload, timestamp: Date.now() }) }).catch(() => {})
-        try {
-            if (typeof process !== 'undefined' && process?.versions?.node !== undefined && typeof require === 'function') {
-                const fs = require('fs') as typeof import('fs')
-                const pathMod = require('path') as typeof import('path')
-                fs.appendFileSync(pathMod.join(process.cwd(), 'debug-cfa0e2.log'), `${JSON.stringify({ ...dbgPayload, timestamp: Date.now() })}\n`, 'utf8')
-            }
-        } catch {
-            //
-        }
-        // #endregion
-    }
     for (const w of ctx.nearbyWalls) {
         const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
         const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSideAxisSign
@@ -2244,7 +2212,6 @@ function emitElevationSvg(
             /** Same tessellation zebra as overhead slab bands — wall tops sit at storey head beside slab underside. */
             if (segsAll.length >= 3) segsAll = collapseNearbyHorizontalSlabBandSegments(segsAll)
             segsAll = dedupeAcrossStoreyHeadHorizontals(segsAll, storeyHeadHzDedupeKeys)
-            logDiagClippedWallHz(wallLayer, w.expressId, segsAll, wallTopScreenY)
         }
         if (polysAll.length === 0 && segsAll.length === 0) continue
         if (wallLayer === 8) {
@@ -2408,35 +2375,6 @@ function emitElevationSvg(
                 : []
             polysAll.push(...polys)
             segsAll.push(...segs)
-        }
-        const logDiagSlabAboveHz = (diagStage: string, segsDiag: readonly ProjectedSegment[]): void => {
-            // #region agent log
-            if (!partSourceTag.includes('above')) return
-            const normDg = (g: string | null | undefined) => (g ?? '').replace(/\$/g, '_').toUpperCase()
-            if (normDg(ctx.guid) !== normDg('03LXkdE7pzIwdRUvkXbZKu')) return
-            const byY = new Map<string, number>()
-            let hzCt = 0
-            for (const s of segsDiag) {
-                if (Math.abs(s.y2 - s.y1) > 1) continue
-                hzCt++
-                const ym = (s.y1 + s.y2) / 2
-                const k = (Math.round(ym * 4) / 4).toFixed(2)
-                byY.set(k, (byY.get(k) ?? 0) + 1)
-            }
-            const topYs = [...byY.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)
-            const sab = ctx.slabAbove?.bbox.min[1]
-            const dbgPayload = { sessionId: 'cfa0e2', runId: 'multi-hz-above-post-fix', hypothesisId: 'HZABOVE', location: 'ifclite-renderer.ts:drawPartGeometry', message: 'slab_above_hz_bucket', data: { side, diagStage, partSourceTag, expressId: part.expressId, partGuid: part.guid ?? null, polysLen: polysAll.length, segsEmitLen: segsDiag.length, hzDominantCt: hzCt, topYs, worldYBand: [yLo, yHi], slabAboveBotWorld: sab ?? null, partMinYWorldGap: sab != null ? Number((part.bbox.min[1] - sab).toFixed(5)) : null } }
-            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' }, body: JSON.stringify({ ...dbgPayload, timestamp: Date.now() }) }).catch(() => {})
-            try {
-                if (typeof process !== 'undefined' && process?.versions?.node !== undefined && typeof require === 'function') {
-                    const fs = require('fs') as typeof import('fs')
-                    const pathMod = require('path') as typeof import('path')
-                    fs.appendFileSync(pathMod.join(process.cwd(), 'debug-cfa0e2.log'), `${JSON.stringify({ ...dbgPayload, timestamp: Date.now() })}\n`, 'utf8')
-                }
-            } catch {
-                //
-            }
-            // #endregion
         }
         const slabBandInteriorVertCull =
             addStrokes
@@ -2776,7 +2714,6 @@ function emitElevationSvg(
                             emittedSegs = collapseNearbyHorizontalSlabBandSegments(emittedSegs)
                         emittedSegs = dedupeAcrossElevationAboveHorizontals(emittedSegs, slabAboveHzOutlineKeys)
                     }
-                    logDiagSlabAboveHz('fallbackRect', emittedSegs)
                     groups.push({
                         layer,
                         polygons: fallbackPolys,
@@ -2808,7 +2745,6 @@ function emitElevationSvg(
             // If we could not synthesize a fallback fill but still have real
             // projected segments, emit those to avoid dropping visible edges.
             if (segsAll.length > 0) {
-                logDiagSlabAboveHz('polysEmptySegsOnly', segsAll)
                 groups.push({
                     layer,
                     polygons: [],
@@ -2819,7 +2755,6 @@ function emitElevationSvg(
             }
             return
         }
-        logDiagSlabAboveHz('meshPolysMain', segsAll)
         groups.push({
             layer,
             polygons: polysAll,
@@ -3118,43 +3053,12 @@ function emitElevationSvg(
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
     }
-    /** Single ghost stroke under structural slab underside (wall tess), after all groups assembled. See `HZSHADOW` log for counts on debug doors. */
+    /** Drop one wide phantom horizontal just under structural slab underside (wall tessellation), after groups are assembled. */
     const slabUndersideScreenY = ctx.slabAbove != null ? yScreenAt(ctx.slabAbove.bbox.min[1]) : null
     if (slabUndersideScreenY != null && Number.isFinite(slabUndersideScreenY)) {
-        let shadowDropped = 0
-        let shadowBefore = 0
         for (const g of groups) {
-            shadowBefore += g.segments.length
-            const next = filterWidePhantomHorizontalsBelowSlabUnderside(g.segments, slabUndersideScreenY)
-            shadowDropped += g.segments.length - next.length
-            g.segments = next
+            g.segments = filterWidePhantomHorizontalsBelowSlabUnderside(g.segments, slabUndersideScreenY)
         }
-        // #region agent log
-        {
-            const normDgSz = (g: string | null | undefined) => (g ?? '').replace(/\$/g, '_').toUpperCase()
-            if (normDgSz(ctx.guid) === normDgSz('03LXkdE7pzIwdRUvkXbZKu')) {
-                const payload = {
-                    sessionId: 'cfa0e2',
-                    runId: 'slab-shadow-cull',
-                    hypothesisId: 'HZSHADOW',
-                    location: 'ifclite-renderer.ts:emitElevationSvg',
-                    message: 'phantom_hz_below_slab_face',
-                    data: { side, slabUndersideScreenY, segsBefore: shadowBefore, dropped: shadowDropped },
-                    timestamp: Date.now(),
-                }
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' }, body: JSON.stringify(payload) }).catch(() => {})
-                try {
-                    if (typeof process !== 'undefined' && process?.versions?.node !== undefined && typeof require === 'function') {
-                        const fs = require('fs') as typeof import('fs')
-                        const pathMod = require('path') as typeof import('path')
-                        fs.appendFileSync(pathMod.join(process.cwd(), 'debug-cfa0e2.log'), `${JSON.stringify(payload)}\n`, 'utf8')
-                    }
-                } catch {
-                    //
-                }
-            }
-        }
-        // #endregion
     }
 
     groups.sort((a, b) => a.layer - b.layer)
