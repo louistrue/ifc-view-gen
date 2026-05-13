@@ -326,12 +326,16 @@ function resolvePlanNearbyDoorColor(cfcBkp: string | null, colors: RenderColors)
 }
 
 // Layer ordering (higher number = drawn later = visually in front):
-//   1 = wall fill, 2 = background slab/other fill, 3 = nearby door fill,
-//   4 = window/context glass, 5 = focal glass, 6 = current door, 7 = device,
-//   8 = safety device / foreground wall, 9 = sectioned slab/build-up/covering.
+//   1 = wall fill, 2 = background slab/other fill, 3 = nearby door fill (sectioned, host-plane),
+//   4 = window/context glass, 5 = focal glass, 6 = current door,
+//   8 = safety device / foreground wall, 8.5 = projected nearby door (translucent),
+//   8.55 = electrical device (must sit above 8.5 context doors), 9 = sectioned slab/build-up/covering,
+//   11 = clipped perpendicular wall + camera-side sectioned context doors (above slab fills).
 const ELEVATION_SECTIONED_PART_LAYER = 9
 const ELEVATION_PROJECTED_WALL_LAYER = 8
 const ELEVATION_PROJECTED_NEARBY_DOOR_LAYER = 8.5
+/** Outlets/switches on the host wall must not disappear behind semi-transparent projected neighbour doors. */
+const ELEVATION_DEVICE_FOREGROUND_LAYER = ELEVATION_PROJECTED_NEARBY_DOOR_LAYER + 0.05
 const ELEVATION_CLIPPED_WALL_TOP_LAYER = ELEVATION_SECTIONED_PART_LAYER + 2
 
 function classifyMesh(
@@ -340,6 +344,8 @@ function classifyMesh(
     elevationView: boolean,
     colors: RenderColors,
     nearbyDoorModes?: ReadonlyMap<number, ElevationRenderMode>,
+    /** Camera-side sectioned nearby doors: same paint order as clipped perpendicular walls. */
+    nearbyDoorClippedWallTop?: ReadonlySet<number>,
 ): MeshClassification {
     const id = mesh.expressId
     if (id === ctx.door.expressId) {
@@ -378,11 +384,17 @@ function classifyMesh(
         const nearbyDoorFill = elevationView
             ? resolveElevationDoorColor(nearbyDoor.cfcBkp, colors)
             : resolvePlanNearbyDoorColor(nearbyDoor.cfcBkp, colors)
+        const sectionedFillLayer =
+            elevationView
+            && mode === 'sectioned'
+            && nearbyDoorClippedWallTop?.has(id)
+                ? ELEVATION_CLIPPED_WALL_TOP_LAYER
+                : 3
         if (elevationView && isLikelyGlazingPanelMesh(mesh)) {
             if (mode === 'projected') {
                 return { fill: colors.elevation.glass, fillOpacity: 0.32, layer: ELEVATION_PROJECTED_NEARBY_DOOR_LAYER, role: 'nearby-door' }
             }
-            return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
+            return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: sectionedFillLayer, role: 'nearby-door' }
         }
         // Adjacent doors color by their OWN BKP in elevation (so a metal
         // door reads metal, a wood door reads wood, regardless of focal
@@ -391,14 +403,14 @@ function classifyMesh(
         if (elevationView && mode === 'projected') {
             return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: ELEVATION_PROJECTED_NEARBY_DOOR_LAYER, role: 'nearby-door' }
         }
-        return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: 3, role: 'nearby-door' }
+        return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: sectionedFillLayer, role: 'nearby-door' }
     }
     const dev = ctx.nearbyDevices.find((d) => d.expressId === id)
     if (dev) {
         const safety = isSafetyDevice(dev.name, dev.layers, colors)
         return safety
             ? { fill: colors.elevation.safety, layer: 8, role: 'safety' }
-            : { fill: colors.elevation.electrical, layer: 7, role: 'device' }
+            : { fill: colors.elevation.electrical, layer: ELEVATION_DEVICE_FOREGROUND_LAYER, role: 'device' }
     }
     return { fill: '#cccccc', layer: 2, role: 'other' }
 }
@@ -1787,7 +1799,7 @@ function emitElevationSvg(
         // Layer choice: camera-side perpendicular walls (bbox centre on the
         // CAMERA side of door middle by more than half the host wall
         // thickness) sit BETWEEN the camera and the focal door — they should
-        // occlude it.  Layer 7 paints over the door's layer 6.  Walls
+        // occlude it.  Foreground layers (8+ / clipped-wall-top) paint over the focal door's layer 6.
         // straddling doorMid (host wall, walls in/around the host plane)
         // stay at layer 1 so the door reads through the host wall opening.
         const isInFrontOfDoor = cameraSideOffset > 0.05
@@ -1797,34 +1809,6 @@ function emitElevationSvg(
                 ? ELEVATION_PROJECTED_WALL_LAYER
                 : 1
         const wallTopScreenY = yScreenAt(w.bbox.max[1])
-        // #region agent log
-        if (ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt' && renderDecision.mode === 'sectioned') {
-            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
-                body: JSON.stringify({
-                    sessionId: 'cfa0e2',
-                    runId: 'post-fix-symmetric-slab-pad',
-                    hypothesisId: 'H3,H5',
-                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWallSectioned',
-                    message: 'nearby wall depth-sliced (edge-on classification)',
-                    data: {
-                        side,
-                        nearbyWallExpressId: w.expressId,
-                        wallGuid: w.guid ?? null,
-                        wallRunWidth,
-                        wallRunDepth,
-                        wallEdgeOnToElevation,
-                        isInFrontOfDoor,
-                        cameraSideOffset,
-                        wallLayer,
-                        reason: renderDecision.reason,
-                    },
-                    timestamp: Date.now(),
-                }),
-            }).catch(() => { })
-        }
-        // #endregion
         const polysAll: ProjectedPolygon[] = []
         const segsAll: ProjectedSegment[] = []
         const wallClip: WorldClip = renderDecision.mode === 'projected'
@@ -1874,35 +1858,6 @@ function emitElevationSvg(
                 })
             }
         }
-        // #region agent log
-        if (ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt' && wallLayer === ELEVATION_PROJECTED_WALL_LAYER) {
-            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
-                body: JSON.stringify({
-                    sessionId: 'cfa0e2',
-                    hypothesisId: 'H4,H6',
-                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:projectedWallLayer8',
-                    message: 'layer-8 projected wall segments (possible bleed into slabs)',
-                    data: {
-                        side,
-                        nearbyWallExpressId: w.expressId,
-                        wallGuid: w.guid ?? null,
-                        wallTopScreenY,
-                        projectedSegPushCount: segsAll.filter((s0) => {
-                            const vertical = Math.abs(s0.x2 - s0.x1) < 0.75
-                            const touchesWallTopSeg =
-                                Math.abs(s0.y1 - wallTopScreenY) < 0.75
-                                || Math.abs(s0.y2 - wallTopScreenY) < 0.75
-                            return vertical && touchesWallTopSeg
-                        }).length,
-                        segsAllCount: segsAll.length,
-                    },
-                    timestamp: Date.now(),
-                }),
-            }).catch(() => { })
-        }
-        // #endregion
         groups.push({
             layer: wallLayer,
             polygons: polysAll,
@@ -2001,8 +1956,8 @@ function emitElevationSvg(
             yMin: yLo,
             yMax: yHi,
             // Width axis: same window as the elevation (no extra span along the
-            // wall run). Facing: camera-side extended + small pad past the elevation's
-            // opposite boundary so sill / build-up survives back-view depth cuts.
+            // wall run). Facing: symmetric pad on both sides of the thin elevation
+            // depth slice (see slabBandDepthClip) so slab/build-up survives front and back.
             xMin: isXAligned ? elevationClip.xMin : slabBandDepthClip.xMin,
             xMax: isXAligned ? elevationClip.xMax : slabBandDepthClip.xMax,
             zMin: isXAligned ? slabBandDepthClip.zMin : elevationClip.zMin,
@@ -2032,56 +1987,6 @@ function emitElevationSvg(
             polysAll.push(...polys)
             segsAll.push(...segs)
         }
-        // #region agent log
-        if (
-            ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt'
-            && !clipDepthAxis
-            && partSourceTag.includes('below')
-        ) {
-            const partFMin = part.bbox.min[facingAxisIdx]
-            const partFMax = part.bbox.max[facingAxisIdx]
-            const overlapsFacingClip = !(partFMax < facingClipMin || partFMin > facingClipMax)
-            let diagSegs = 0, horizSegs = 0, vertSegs = 0
-            for (const s of segsAll) {
-                const dx = Math.abs(s.x2 - s.x1)
-                const dy = Math.abs(s.y2 - s.y1)
-                if (dx < 0.75) vertSegs++
-                else if (dy < 0.75) horizSegs++
-                else diagSegs++
-            }
-            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
-                body: JSON.stringify({
-                    sessionId: 'cfa0e2',
-                    runId: 'post-fix-symmetric-slab-pad',
-                    hypothesisId: 'H1,H2,H3,H5',
-                    location: 'lib/ifclite-renderer.ts:drawPartGeometry:belowBandNoDepthClip',
-                    message: 'slab/part band: y slice + width elevation + symmetric facing depth pad',
-                    data: {
-                        side,
-                        slabBandDepthClip,
-                        slabBandSymmetricPadM: FLOOR_BAND_CAMERA_DEPTH_PAD_M,
-                        expressId: part.expressId,
-                        partGuid: part.guid ?? null,
-                        partSourceTag,
-                        yLo,
-                        yHi,
-                        clipDepthAxis,
-                        facingAxisIdx,
-                        facingClipMin,
-                        facingClipMax,
-                        partFacingSpan: [partFMin, partFMax],
-                        overlapsFacingClip,
-                        asymmetricFacingPadM: FLOOR_BAND_CAMERA_DEPTH_PAD_M,
-                        polyCount: polysAll.length,
-                        segCounts: { total: segsAll.length, horiz: horizSegs, vert: vertSegs, oblique: diagSegs },
-                    },
-                    timestamp: Date.now(),
-                }),
-            }).catch(() => { })
-        }
-        // #endregion
         const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
         const noFallbackForPart = !!part.guid
             && (NO_FALLBACK_PART_GUIDS.includes(part.guid) || noFallbackNorms.has(part.guid.replace(/\$/g, '_')))
@@ -2133,12 +2038,20 @@ function emitElevationSvg(
                     const prefersAboveFaceOnly = partSourceTag.includes('above')
                     const prefersBelowFaceOnly = partSourceTag.includes('below')
                     if (addStrokes && maxX - minX >= 0.5) {
-                        // "above*" bands should only expose the underside edge
-                        // (lower Y in world = larger Y in screen), while
-                        // "below*" bands should only expose the top floor edge.
-                        const allowMin = !prefersBelowFaceOnly
-                        const allowMax = !prefersAboveFaceOnly
-                        if (allowMin && !onCropEdge(minY)) {
+                        // Overhead (*above*): the visible cut is the ceiling underside — in screen
+                        // space that is the *lower* horizontal of the band rectangle (maxY), above the
+                        // door opening.  Stroking minY matched viewport top / crop and hid the real
+                        // slab-bottom line.
+                        // Below (*below*): stroke maxY at the viewport-bottom slab face (with nudge).
+                        // Tags with neither (e.g. floorCropDriver): both horizontals when not on crop edge.
+                        let allowMin = !prefersBelowFaceOnly
+                        let allowMax = !prefersAboveFaceOnly
+                        if (prefersAboveFaceOnly) {
+                            allowMin = false
+                            allowMax = true
+                        }
+                        const emitMinStroke = allowMin && !onCropEdge(minY)
+                        if (emitMinStroke) {
                             fallbackSegs.push({
                                 x1: minX,
                                 y1: minY,
@@ -2150,12 +2063,20 @@ function emitElevationSvg(
                                 width: options.lineWidth,
                             })
                         }
-                        if (allowMax && !onCropEdge(maxY)) {
+                        const emitMaxStroke =
+                            allowMax
+                            && (!onCropEdge(maxY) || prefersBelowFaceOnly || prefersAboveFaceOnly)
+                        if (emitMaxStroke) {
+                            // Fallback rect bottom often lands exactly on pixelClip.maxY (canvas bottom).
+                            // A stroke on that boundary is half outside the viewBox / visually lost.
+                            const maxStrokeY = prefersBelowFaceOnly
+                                ? Math.min(maxY, pixelClip.maxY - 0.75)
+                                : maxY
                             fallbackSegs.push({
                                 x1: minX,
-                                y1: maxY,
+                                y1: maxStrokeY,
                                 x2: maxX,
-                                y2: maxY,
+                                y2: maxStrokeY,
                                 color: options.colors.strokes.outline,
                                 depth: 0,
                                 layer,
@@ -2279,32 +2200,6 @@ function emitElevationSvg(
             if (yHi - yLo < 0.005) {
                 continue
             }
-            // #region agent log
-            if (ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt') {
-                const fullVol = intersectsElevationVolume(part.bbox)
-                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
-                    body: JSON.stringify({
-                        sessionId: 'cfa0e2',
-                        hypothesisId: 'H1,H4',
-                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowPartLoop',
-                        message: 'slabBelowPart elevation volume vs full-section',
-                        data: {
-                            side,
-                            expressId: part.expressId,
-                            partGuid: part.guid ?? null,
-                            yLo,
-                            yHi,
-                            bboxMin: part.bbox.min,
-                            bboxMax: part.bbox.max,
-                            intersectsFullElevationVolume: fullVol,
-                        },
-                        timestamp: Date.now(),
-                    }),
-                }).catch(() => { })
-            }
-            // #endregion
             drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, ELEVATION_SECTIONED_PART_LAYER, renderDecision.mode === 'sectioned', 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts', false)
         }
     }
@@ -2401,18 +2296,13 @@ function emitElevationSvg(
     }
     // Focal door is the subject of the elevation — always fully drawn in
     // BOTH views.  The depth half-space clip exists for cut/section context
-    // (nearby walls, sectioned nearby doors, slabs, devices) so we don't paint the far room.  Applying
-    // it to the focal door's own mesh produces:
-    //   • asymmetric glazing — a glass panel offset to one face has all
-    //     vertices on one side of doorMid, so one camera keeps it and the
-    //     other culls it (front shows blue glass, back doesn't).
-    //   • stray slivers over the door — side-faces of the door leaf span
-    //     doorMid, partially survive the all-3-outside test, and project
-    //     as thin lines on the door area.
-    // Solution: render focal door and projected nearby doors with depth
-    // axis removed from the clip; keep Y range and width-axis clip for the
-    // storey content / canvas crop. Sectioned nearby doors keep the full
-    // elevation clip and therefore use non-blue context fill.
+    // (nearby walls, slabs, devices) so we don't paint the far room.
+    // Nearby doors (context openings) match legacy behaviour for the *focal*
+    // leaf: clip in Y and along the wall-run width only — **omit** the thin
+    // facing-axis depth slice.  Applying full `elevationClip` to a sectioned
+    // context door removed transom/header triangles that sit slightly in
+    // front of the leaf in depth; front view often used `projected` (same
+    // width+Y clip) so the mismatch read as a missing top on back only.
     const focalDoorClip: WorldClip = {
         yMin: elevationClip.yMin,
         yMax: elevationClip.yMax,
@@ -2421,18 +2311,19 @@ function emitElevationSvg(
         zMin: !isXAligned ? elevationClip.zMin : undefined,
         zMax: !isXAligned ? elevationClip.zMax : undefined,
     }
-    const focalDoorRenderDecision: ElevationRenderDecision = {
-        mode: 'projected',
-        reason: 'focal door subject renders without depth clipping in elevation',
+    const nearbyDoorClippedWallTop = new Set<number>()
+    for (const d of ctx.nearbyDoors) {
+        if (nearbyDoorModes.get(d.expressId) !== 'sectioned') continue
+        const ndCenter = (d.bbox.min[facingAxisIdx] + d.bbox.max[facingAxisIdx]) / 2
+        const cameraSideOffsetDoor = (ndCenter - doorCenterFacing) * cameraSideAxisSign
+        if (cameraSideOffsetDoor > 0.05) nearbyDoorClippedWallTop.add(d.expressId)
     }
     for (const { mesh, expressId } of meshes) {
-        const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes)
+        const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes, nearbyDoorClippedWallTop)
         const nearbyDoorMode = nearbyDoorModes.get(expressId)
         const isFocalDoorMesh = expressId === ctx.door.expressId
-        const meshRenderMode = isFocalDoorMesh ? focalDoorRenderDecision.mode : nearbyDoorMode ?? 'sectioned'
-        const meshClip = meshRenderMode === 'projected'
-            ? focalDoorClip
-            : elevationClip
+        const isNearbyDoorMesh = !isFocalDoorMesh && nearbyDoorMode !== undefined
+        const meshClip = isFocalDoorMesh || isNearbyDoorMesh ? focalDoorClip : elevationClip
         const polys = projectMeshFill(mesh, cam, cls, expressId, meshClip, pixelClip)
         const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, meshClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
         if (polys.length === 0 && segs.length === 0) continue
