@@ -397,6 +397,187 @@ function dropVerticalStrokesWhenSilhouetteTooNarrow(segments: ProjectedSegment[]
     })
 }
 
+/** Wall mesh seam near the slab line is often ±2–4 px off perfect horizontal (`dy≠0`). */
+function elevSegmentEligibleForViewportHeadFlatten(s: ProjectedSegment): boolean {
+    const dxRaw = s.x2 - s.x1
+    const dyAbs = Math.abs(s.y2 - s.y1)
+    const len = Math.hypot(dxRaw, dyAbs)
+    if (len < 5) return false
+    const span = Math.abs(dxRaw)
+    const horizDominant = span / len >= 0.86
+    return horizDominant && dyAbs <= Math.max(4.5, span * 0.035)
+}
+
+/** Tile tessellation on slab underside often emits dozens of strokes within ~1–6 px vertically;
+ *  merge into spans so structural slab + IFCBUILDINGELEMENTPART overlays do not read as zebra lines. */
+function collapseNearbyHorizontalSlabBandSegments(
+    segments: ProjectedSegment[],
+    yMergePx = 6,
+    pickHz: 'axisAligned' | 'nearHorizontalViewport' = 'axisAligned',
+): ProjectedSegment[] {
+    const horizontals: ProjectedSegment[] = []
+    const rest: ProjectedSegment[] = []
+    for (const s of segments) {
+        const dyAbs = Math.abs(s.y2 - s.y1)
+        const len = Math.hypot(s.x2 - s.x1, dyAbs)
+        const axisOk = dyAbs <= 1 && len >= 2
+        const nearOk = elevSegmentEligibleForViewportHeadFlatten(s)
+        const take = pickHz === 'nearHorizontalViewport' ? nearOk : axisOk
+        if (take) horizontals.push(s)
+        else rest.push(s)
+    }
+    if (horizontals.length <= 1) return segments
+    /** Bucket strokes by quantized mid-Y so tess seams stack merge even when jitter spans > `yMergePx`. */
+    const buckets = new Map<number, ProjectedSegment[]>()
+    for (const h of horizontals) {
+        const ym = (h.y1 + h.y2) / 2
+        const bk = Math.round(ym / yMergePx)
+        const list = buckets.get(bk)
+        if (list) list.push(h)
+        else buckets.set(bk, [h])
+    }
+    const merged: ProjectedSegment[] = []
+    const gapTolPx = 3
+    function xSpan(seg: ProjectedSegment): readonly [number, number] {
+        const xa = Math.min(seg.x1, seg.x2)
+        const xb = Math.max(seg.x1, seg.x2)
+        return [xa, xb]
+    }
+    for (const b of buckets.values()) {
+        let yWeighted = 0
+        let n = 0
+        const spans = b.map(xSpan).sort((u, v) => u[0] - v[0])
+        for (const s of b) {
+            const ym = (s.y1 + s.y2) / 2
+            yWeighted += ym
+            n++
+        }
+        const yM = n > 0 ? yWeighted / n : ((b[0].y1 + b[0].y2) / 2)
+        const mergedSpans: Array<[number, number]> = []
+        for (const sp of spans) {
+            const last = mergedSpans[mergedSpans.length - 1]
+            if (!last) mergedSpans.push([sp[0], sp[1]])
+            else if (sp[0] <= last[1] + gapTolPx)
+                mergedSpans[mergedSpans.length - 1] = [last[0], Math.max(last[1], sp[1])]
+            else mergedSpans.push([sp[0], sp[1]])
+        }
+        const proto = b[0]
+        for (const [xmin, xmax] of mergedSpans) {
+            merged.push({
+                ...proto,
+                x1: xmin,
+                y1: yM,
+                x2: xmax,
+                y2: yM,
+            })
+        }
+    }
+    return [...rest, ...merged]
+}
+
+/** Wall tess + host outlines emit parallel horizontals just below viewport top (`pixelClip.minY`) where storey head meets slab. */
+function collapseHorizontalsInViewportHeadBand(segments: ProjectedSegment[], viewportTopPx: number, bandDepthPx = 260): ProjectedSegment[] {
+    const lo = viewportTopPx
+    const hi = viewportTopPx + bandDepthPx
+    const band: ProjectedSegment[] = []
+    const rest: ProjectedSegment[] = []
+    for (const s of segments) {
+        if (!elevSegmentEligibleForViewportHeadFlatten(s)) {
+            rest.push(s)
+            continue
+        }
+        const ym = (s.y1 + s.y2) / 2
+        if (ym >= lo && ym <= hi) band.push(s)
+        else rest.push(s)
+    }
+    if (band.length <= 1) return segments
+    return [...rest, ...collapseNearbyHorizontalSlabBandSegments(band, 14, 'nearHorizontalViewport')]
+}
+
+/** Coarser than slab mesh dedupe: full-width storey-head seams land in one bucket (~±7 px Y, ~±24 px X). */
+function approximateStoreyHeadHZKey(s: ProjectedSegment): string | null {
+    const x1 = Math.min(s.x1, s.x2)
+    const x2 = Math.max(s.x1, s.x2)
+    const span = x2 - x1
+    const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+    if (len < 6 || span < 44) return null
+    const horizDominant = span / len >= 0.85
+    if (!horizDominant) return null
+    const y = (s.y1 + s.y2) / 2
+    return `${Math.round(y / 14)}:${Math.round(x1 / 48)}:${Math.round(x2 / 48)}`
+}
+
+function dedupeAcrossStoreyHeadHorizontals(segments: ProjectedSegment[], seen: Set<string>): ProjectedSegment[] {
+    const out: ProjectedSegment[] = []
+    for (const s of segments) {
+        const key = approximateStoreyHeadHZKey(s)
+        if (key == null) {
+            out.push(s)
+            continue
+        }
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push(s)
+    }
+    return out
+}
+
+/** Tess often replays the structural underside as a ghost stroke slightly *below* the projected slab face (`yScreen(slab bbox min)`): fill edge reads as slab line + outline reads as stray. */
+function filterWidePhantomHorizontalsBelowSlabUnderside(
+    segments: ProjectedSegment[],
+    slabUndersideScreenY: number | null,
+    minWideSpanPx = 120,
+): ProjectedSegment[] {
+    if (slabUndersideScreenY == null || !Number.isFinite(slabUndersideScreenY)) return segments
+    const yFace = slabUndersideScreenY
+    /** Just below silhouette (px, SVG down = +). */
+    const dyMinPx = 1.1
+    const dyMaxPx = 26
+    const loY = yFace + dyMinPx
+    const hiY = yFace + dyMaxPx
+    return segments.filter((s) => {
+        const xLo = Math.min(s.x1, s.x2)
+        const xHi = Math.max(s.x1, s.x2)
+        const span = xHi - xLo
+        const dx = s.x2 - s.x1
+        const dyAbs = Math.abs(s.y2 - s.y1)
+        const len = Math.hypot(dx, dyAbs)
+        if (len < 5 || span < minWideSpanPx) return true
+        const horizDominant = span / len >= 0.82
+        if (!horizDominant) return true
+        const ym = (s.y1 + s.y2) / 2
+        if (ym <= loY || ym >= hiY) return true
+        return false
+    })
+}
+
+function approximateElevationAboveHZKey(s: ProjectedSegment): string | null {
+    const dyAbs = Math.abs(s.y2 - s.y1)
+    if (dyAbs > 1.25) return null
+    const y = (s.y1 + s.y2) / 2
+    const x1 = Math.min(s.x1, s.x2)
+    const x2 = Math.max(s.x1, s.x2)
+    const span = x2 - x1
+    if (span < 2) return null
+    /** Coarse buckets: repeats from structural slab + aggregated child geometry land on same key; real stacked layers rarely share all three. */
+    return `${Math.round(y / 5)}:${Math.round(x1 / 32)}:${Math.round(x2 / 32)}:${Math.round(span / 32)}`
+}
+
+function dedupeAcrossElevationAboveHorizontals(segments: ProjectedSegment[], seen: Set<string>): ProjectedSegment[] {
+    const out: ProjectedSegment[] = []
+    for (const s of segments) {
+        const key = approximateElevationAboveHZKey(s)
+        if (key == null) {
+            out.push(s)
+            continue
+        }
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push(s)
+    }
+    return out
+}
+
 /** Foreground “clipped top” layers (sectioned walls / camera-side sectioned doors) use
  * strokes that can cross the floor build-up band. Drop vertical-dominant strokes whose
  * midpoint sits in the bottom `bandPx` of the clip rect (same heuristic as slab ghost lines).
@@ -463,6 +644,14 @@ const ELEVATION_CLIPPED_WALL_TOP_LAYER = ELEVATION_SECTIONED_PART_LAYER + 2
 
 /** Thin slab‑below IFC floor coverings are painted after clipped foreground walls — otherwise fills sit under layer‑11 rectangles. */
 const ELEVATION_THIN_BELOW_COVER_LAYER = ELEVATION_CLIPPED_WALL_TOP_LAYER + 0.05
+
+/**
+ * Ceiling slab underside fallback draws fill at layer 9 then this stroke in a fractional layer so
+ * the outline clears other slab polygons and sits slightly inside the band (lifted −Y).
+ */
+const ELEVATION_SLAB_UNDERSIDE_STROKE_LAYER = ELEVATION_SECTIONED_PART_LAYER + 0.02
+/** Nudge underside silhouette upward (SVG −Y) so stroke isn’t half-buried under the slab polygon edge. */
+const SLAB_SILHOUETTE_LIFT_ABOVE_FILL_BOTTOM_PX = 0.95
 
 function slabPartUsesFloorBandStrip(layer: number): boolean {
     return layer === ELEVATION_SECTIONED_PART_LAYER
@@ -1717,6 +1906,9 @@ function emitElevationSvg(
         maxY: H,
     }
 
+    /** Coarse dedupe of ceiling-adjacent wall horizontals across host meshes + perpendicular walls (+ clipped-top pass). */
+    const storeyHeadHzDedupeKeys = new Set<string>()
+
     interface Group {
         layer: number
         polygons: ProjectedPolygon[]
@@ -1841,7 +2033,9 @@ function emitElevationSvg(
             const cls: MeshClassification = { fill: hostFill, layer: 1, role: 'host-wall' }
             const polys = projectMeshFill(mesh, cam, cls, ctx.hostWall.expressId, elevationClip, pixelClip)
             const segsRaw = projectMeshSegments(mesh, cam, options.colors.strokes.outline, 1, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
-            const segs = snapNearCardinalSegments(filterWallSeamSegments(segsRaw))
+            let segs = snapNearCardinalSegments(filterWallSeamSegments(segsRaw))
+            segs = collapseHorizontalsInViewportHeadBand(segs, pixelClip.minY)
+            segs = dedupeAcrossStoreyHeadHorizontals(segs, storeyHeadHzDedupeKeys)
             hostPolyCount += polys.length
             hostSegCount += segs.length
             if (polys.length === 0 && segs.length === 0) continue
@@ -1919,10 +2113,12 @@ function emitElevationSvg(
                             hostFallbackSegs.push({ x1: minX, y1: maxY, x2: maxX, y2: maxY, color: options.colors.strokes.outline, depth: 0, layer: 1, width: options.lineWidth })
                         }
                     }
+                    let hostFbSegs = collapseHorizontalsInViewportHeadBand(hostFallbackSegs, pixelClip.minY)
+                    hostFbSegs = dedupeAcrossStoreyHeadHorizontals(hostFbSegs, storeyHeadHzDedupeKeys)
                     groups.push({
                         layer: 1,
                         polygons: [{ points: hostRect, fill: hostFill, depth: 0, layer: 1, expressId: ctx.hostWall.expressId }],
-                        segments: hostFallbackSegs,
+                        segments: hostFbSegs,
                     })
                 }
             }
@@ -1936,6 +2132,39 @@ function emitElevationSvg(
     // wrong sign and walls in front of the door get classified as behind it,
     // landing on layer 1 (host-plane) instead of layer 10 (clipped-wall top).
     const cameraSideAxisSign = Math.sign(ctx.viewFrame.facing[facingAxisIdx] * cameraSign) || cameraSign
+    /** Perpendicular clipped walls tessellate many horizontals at the storey head → stacked lines under slab/ceiling overlap. Coarse dedupe uses `storeyHeadHzDedupeKeys`. */
+    const logDiagClippedWallHz = (
+        wl: number,
+        wid: number,
+        segs: readonly ProjectedSegment[],
+        wallTy: number,
+    ): void => {
+        // #region agent log
+        if (wl !== ELEVATION_CLIPPED_WALL_TOP_LAYER) return
+        const normDg = (g: string | null | undefined) => (g ?? '').replace(/\$/g, '_').toUpperCase()
+        if (normDg(ctx.guid) !== normDg('03LXkdE7pzIwdRUvkXbZKu')) return
+        let hzCt = 0
+        let nearCropTopCt = 0
+        const bandPx = 90
+        for (const s of segs) {
+            if (Math.abs(s.y2 - s.y1) > 1) continue
+            hzCt++
+            const ym = (s.y1 + s.y2) / 2
+            if (ym <= pixelClip.minY + bandPx) nearCropTopCt++
+        }
+        const dbgPayload = { sessionId: 'cfa0e2', runId: 'multi-hz-above-wall-post', hypothesisId: 'HZWALL', location: 'ifclite-renderer.ts:emitElevationSvg:nearbyWalls', message: 'clipped_wall_top_hz', data: { side, wallExpressId: wid, hzCt, nearCropTopCt, pixelClipMinY: pixelClip.minY, wallTopScreenY: wallTy, segsLen: segs.length } }
+        fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' }, body: JSON.stringify({ ...dbgPayload, timestamp: Date.now() }) }).catch(() => {})
+        try {
+            if (typeof process !== 'undefined' && process?.versions?.node !== undefined && typeof require === 'function') {
+                const fs = require('fs') as typeof import('fs')
+                const pathMod = require('path') as typeof import('path')
+                fs.appendFileSync(pathMod.join(process.cwd(), 'debug-cfa0e2.log'), `${JSON.stringify({ ...dbgPayload, timestamp: Date.now() })}\n`, 'utf8')
+            }
+        } catch {
+            //
+        }
+        // #endregion
+    }
     for (const w of ctx.nearbyWalls) {
         const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
         const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSideAxisSign
@@ -2004,9 +2233,18 @@ function emitElevationSvg(
             polysAll.push(...polys)
             segsAll.push(...segs)
         }
+        if (wallLayer === 1 || wallLayer === ELEVATION_PROJECTED_WALL_LAYER) {
+            /** Background/projected meshes keep full tess; thin only the storey-crown stripe under overhead fills. */
+            segsAll = collapseHorizontalsInViewportHeadBand(segsAll, pixelClip.minY)
+            segsAll = dedupeAcrossStoreyHeadHorizontals(segsAll, storeyHeadHzDedupeKeys)
+        }
         const wallFloorBandSilhouetteX = polygonUnionScreenXBounds(polysAll)
         if (wallLayer === ELEVATION_CLIPPED_WALL_TOP_LAYER) {
             segsAll = stripElevationVerticalStrokesInFloorBand(segsAll, pixelClip.maxY, 200, wallFloorBandSilhouetteX)
+            /** Same tessellation zebra as overhead slab bands — wall tops sit at storey head beside slab underside. */
+            if (segsAll.length >= 3) segsAll = collapseNearbyHorizontalSlabBandSegments(segsAll)
+            segsAll = dedupeAcrossStoreyHeadHorizontals(segsAll, storeyHeadHzDedupeKeys)
+            logDiagClippedWallHz(wallLayer, w.expressId, segsAll, wallTopScreenY)
         }
         if (polysAll.length === 0 && segsAll.length === 0) continue
         if (wallLayer === 8) {
@@ -2096,6 +2334,9 @@ function emitElevationSvg(
         }
     }
 
+    /** Collapse tess horizontals + drop duplicate underside keys across successive overhead draws. */
+    let slabAboveHzOutlineKeys: Set<string> | null = null
+
     function drawPartGeometry(
         part: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null },
         yLo: number,
@@ -2168,6 +2409,35 @@ function emitElevationSvg(
             polysAll.push(...polys)
             segsAll.push(...segs)
         }
+        const logDiagSlabAboveHz = (diagStage: string, segsDiag: readonly ProjectedSegment[]): void => {
+            // #region agent log
+            if (!partSourceTag.includes('above')) return
+            const normDg = (g: string | null | undefined) => (g ?? '').replace(/\$/g, '_').toUpperCase()
+            if (normDg(ctx.guid) !== normDg('03LXkdE7pzIwdRUvkXbZKu')) return
+            const byY = new Map<string, number>()
+            let hzCt = 0
+            for (const s of segsDiag) {
+                if (Math.abs(s.y2 - s.y1) > 1) continue
+                hzCt++
+                const ym = (s.y1 + s.y2) / 2
+                const k = (Math.round(ym * 4) / 4).toFixed(2)
+                byY.set(k, (byY.get(k) ?? 0) + 1)
+            }
+            const topYs = [...byY.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)
+            const sab = ctx.slabAbove?.bbox.min[1]
+            const dbgPayload = { sessionId: 'cfa0e2', runId: 'multi-hz-above-post-fix', hypothesisId: 'HZABOVE', location: 'ifclite-renderer.ts:drawPartGeometry', message: 'slab_above_hz_bucket', data: { side, diagStage, partSourceTag, expressId: part.expressId, partGuid: part.guid ?? null, polysLen: polysAll.length, segsEmitLen: segsDiag.length, hzDominantCt: hzCt, topYs, worldYBand: [yLo, yHi], slabAboveBotWorld: sab ?? null, partMinYWorldGap: sab != null ? Number((part.bbox.min[1] - sab).toFixed(5)) : null } }
+            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' }, body: JSON.stringify({ ...dbgPayload, timestamp: Date.now() }) }).catch(() => {})
+            try {
+                if (typeof process !== 'undefined' && process?.versions?.node !== undefined && typeof require === 'function') {
+                    const fs = require('fs') as typeof import('fs')
+                    const pathMod = require('path') as typeof import('path')
+                    fs.appendFileSync(pathMod.join(process.cwd(), 'debug-cfa0e2.log'), `${JSON.stringify({ ...dbgPayload, timestamp: Date.now() })}\n`, 'utf8')
+                }
+            } catch {
+                //
+            }
+            // #endregion
+        }
         const slabBandInteriorVertCull =
             addStrokes
             && segsAll.length > 0
@@ -2196,6 +2466,15 @@ function emitElevationSvg(
                 }
                 segsAll = filterInteriorVerticalSlabBandSegments(segsAll, bx.minX, bx.maxX)
             }
+        }
+        if (
+            partSourceTag.includes('above')
+            && addStrokes
+            && slabAboveHzOutlineKeys != null
+            && segsAll.length > 0
+        ) {
+            if (segsAll.length >= 3) segsAll = collapseNearbyHorizontalSlabBandSegments(segsAll)
+            segsAll = dedupeAcrossElevationAboveHorizontals(segsAll, slabAboveHzOutlineKeys)
         }
         /** Sectioned slab/part strokes (layer 9) near the viewport bottom often include
          * projected vertical seams in the structural slab + build‑up bands that do not appear
@@ -2422,67 +2701,114 @@ function emitElevationSvg(
                     const fallbackSegs: ProjectedSegment[] = []
                     const prefersAboveFaceOnly = partSourceTag.includes('above')
                     const prefersBelowFaceOnly = partSourceTag.includes('below')
-                    if (addStrokes && maxX - minX >= 0.5) {
-                        // Overhead (*above*): the visible cut is the ceiling underside — in screen
-                        // space that is the *lower* horizontal of the band rectangle (maxY), above the
-                        // door opening.  Stroking minY matched viewport top / crop and hid the real
-                        // slab-bottom line.
-                        // Below (*below*): stroke maxY at the viewport-bottom slab face (with nudge).
-                        // Tags with neither (e.g. floorCropDriver): both horizontals when not on crop edge.
-                        let allowMin = !prefersBelowFaceOnly
-                        let allowMax = !prefersAboveFaceOnly
-                        if (prefersAboveFaceOnly) {
-                            allowMin = false
-                            allowMax = true
-                        }
-                        const emitMinStroke = allowMin && !onCropEdge(minY)
-                        if (emitMinStroke) {
-                            fallbackSegs.push({
+                    /** Drawn in `ELEVATION_SLAB_UNDERSIDE_STROKE_LAYER` after the fill group. */
+                    let slabUndersideOutlineSeg: ProjectedSegment | undefined
+                    if (maxX - minX >= 0.5) {
+                        if (prefersAboveFaceOnly && !onCropEdge(maxY)) {
+                            const yOutline = maxY - SLAB_SILHOUETTE_LIFT_ABOVE_FILL_BOTTOM_PX
+                            slabUndersideOutlineSeg = {
                                 x1: minX,
-                                y1: minY,
+                                y1: yOutline,
                                 x2: maxX,
-                                y2: minY,
-                                color: slabPartStrokeOutline,
+                                y2: yOutline,
+                                color: options.colors.strokes.outline,
                                 depth: 0,
-                                layer,
+                                layer: ELEVATION_SLAB_UNDERSIDE_STROKE_LAYER,
                                 width: options.lineWidth,
-                            })
+                            }
                         }
-                        const emitMaxStroke =
-                            allowMax
-                            && (!onCropEdge(maxY) || prefersBelowFaceOnly || prefersAboveFaceOnly)
-                        if (emitMaxStroke) {
-                            // Fallback rect bottom often lands exactly on pixelClip.maxY (canvas bottom).
-                            // A stroke on that boundary is half outside the viewBox / visually lost.
-                            const maxStrokeY = prefersBelowFaceOnly
-                                ? Math.min(maxY, pixelClip.maxY - 0.75)
-                                : maxY
-                            fallbackSegs.push({
-                                x1: minX,
-                                y1: maxStrokeY,
-                                x2: maxX,
-                                y2: maxStrokeY,
-                                color: slabPartStrokeOutline,
-                                depth: 0,
-                                layer,
-                                width: options.lineWidth,
-                            })
+                        if (addStrokes) {
+                            // Overhead (*above*): the visible cut is the ceiling underside — in screen
+                            // space that is the *lower* horizontal of the band rectangle (maxY), above the
+                            // door opening.  Stroking minY matched viewport top / crop and hid the real
+                            // slab-bottom line.
+                            // Below (*below*): stroke maxY at the viewport-bottom slab face (with nudge).
+                            // Tags with neither (e.g. floorCropDriver): both horizontals when not on crop edge.
+                            let allowMin = !prefersBelowFaceOnly
+                            let allowMax = !prefersAboveFaceOnly
+                            if (prefersAboveFaceOnly) {
+                                allowMin = false
+                                allowMax = true
+                            }
+                            const emitMinStroke = allowMin && !onCropEdge(minY)
+                            if (emitMinStroke) {
+                                fallbackSegs.push({
+                                    x1: minX,
+                                    y1: minY,
+                                    x2: maxX,
+                                    y2: minY,
+                                    color: slabPartStrokeOutline,
+                                    depth: 0,
+                                    layer,
+                                    width: options.lineWidth,
+                                })
+                            }
+                            const emitMaxStroke =
+                                allowMax
+                                && (!onCropEdge(maxY) || prefersBelowFaceOnly || prefersAboveFaceOnly)
+                                && !prefersAboveFaceOnly
+                            if (emitMaxStroke) {
+                                // Fallback rect bottom often lands exactly on pixelClip.maxY (canvas bottom).
+                                // A stroke on that boundary is half outside the viewBox / visually lost.
+                                const maxStrokeY = prefersBelowFaceOnly
+                                    ? Math.min(maxY, pixelClip.maxY - 0.75)
+                                    : maxY
+                                fallbackSegs.push({
+                                    x1: minX,
+                                    y1: maxStrokeY,
+                                    x2: maxX,
+                                    y2: maxStrokeY,
+                                    color: slabPartStrokeOutline,
+                                    depth: 0,
+                                    layer,
+                                    width: options.lineWidth,
+                                })
+                            }
                         }
                     }
+                    let emittedSegs = segsAll.length > 0 ? segsAll : fallbackSegs
+                    if (
+                        partSourceTag.includes('above')
+                        && slabAboveHzOutlineKeys != null
+                        && emittedSegs.length > 0
+                    ) {
+                        if (addStrokes && emittedSegs.length >= 3)
+                            emittedSegs = collapseNearbyHorizontalSlabBandSegments(emittedSegs)
+                        emittedSegs = dedupeAcrossElevationAboveHorizontals(emittedSegs, slabAboveHzOutlineKeys)
+                    }
+                    logDiagSlabAboveHz('fallbackRect', emittedSegs)
                     groups.push({
                         layer,
                         polygons: fallbackPolys,
                         // Keep real projected outlines when present; otherwise
                         // use synthetic band edges from fallback rect.
-                        segments: segsAll.length > 0 ? segsAll : fallbackSegs,
+                        segments: emittedSegs,
                     })
-                    queuePartOverlaySegments(segsAll.length > 0 ? segsAll : fallbackSegs)
+                    if (
+                        slabUndersideOutlineSeg != null
+                        && partSourceTag.includes('above')
+                        && slabAboveHzOutlineKeys != null
+                    ) {
+                        const undersideKept = dedupeAcrossElevationAboveHorizontals(
+                            [slabUndersideOutlineSeg],
+                            slabAboveHzOutlineKeys,
+                        )
+                        if (undersideKept.length > 0) {
+                            groups.push({
+                                layer: ELEVATION_SLAB_UNDERSIDE_STROKE_LAYER,
+                                polygons: [],
+                                segments: undersideKept,
+                            })
+                        }
+                    }
+                    queuePartOverlaySegments(emittedSegs)
                     return
                 }
             }
             // If we could not synthesize a fallback fill but still have real
             // projected segments, emit those to avoid dropping visible edges.
             if (segsAll.length > 0) {
+                logDiagSlabAboveHz('polysEmptySegsOnly', segsAll)
                 groups.push({
                     layer,
                     polygons: [],
@@ -2493,6 +2819,7 @@ function emitElevationSvg(
             }
             return
         }
+        logDiagSlabAboveHz('meshPolysMain', segsAll)
         groups.push({
             layer,
             polygons: polysAll,
@@ -2639,7 +2966,9 @@ function emitElevationSvg(
         }
     }
     {
-        const slabAboveRenderDecision = ctx.slabAbove
+        slabAboveHzOutlineKeys = new Set<string>()
+        try {
+            const slabAboveRenderDecision = ctx.slabAbove
             ? decideSectionedRender(ctx.slabAbove.bbox, 'structural slab above intersects full elevation volume')
             : null
         if (ctx.slabAbove && slabAboveRenderDecision?.mode !== 'hidden') {
@@ -2707,6 +3036,9 @@ function emitElevationSvg(
                 'lib/ifclite-renderer.ts:emitElevationSvg:aboveParts',
                 renderDecision.mode === 'sectioned'
             )
+        }
+        } finally {
+            slabAboveHzOutlineKeys = null
         }
     }
 
@@ -2786,6 +3118,45 @@ function emitElevationSvg(
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
     }
+    /** Single ghost stroke under structural slab underside (wall tess), after all groups assembled. See `HZSHADOW` log for counts on debug doors. */
+    const slabUndersideScreenY = ctx.slabAbove != null ? yScreenAt(ctx.slabAbove.bbox.min[1]) : null
+    if (slabUndersideScreenY != null && Number.isFinite(slabUndersideScreenY)) {
+        let shadowDropped = 0
+        let shadowBefore = 0
+        for (const g of groups) {
+            shadowBefore += g.segments.length
+            const next = filterWidePhantomHorizontalsBelowSlabUnderside(g.segments, slabUndersideScreenY)
+            shadowDropped += g.segments.length - next.length
+            g.segments = next
+        }
+        // #region agent log
+        {
+            const normDgSz = (g: string | null | undefined) => (g ?? '').replace(/\$/g, '_').toUpperCase()
+            if (normDgSz(ctx.guid) === normDgSz('03LXkdE7pzIwdRUvkXbZKu')) {
+                const payload = {
+                    sessionId: 'cfa0e2',
+                    runId: 'slab-shadow-cull',
+                    hypothesisId: 'HZSHADOW',
+                    location: 'ifclite-renderer.ts:emitElevationSvg',
+                    message: 'phantom_hz_below_slab_face',
+                    data: { side, slabUndersideScreenY, segsBefore: shadowBefore, dropped: shadowDropped },
+                    timestamp: Date.now(),
+                }
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' }, body: JSON.stringify(payload) }).catch(() => {})
+                try {
+                    if (typeof process !== 'undefined' && process?.versions?.node !== undefined && typeof require === 'function') {
+                        const fs = require('fs') as typeof import('fs')
+                        const pathMod = require('path') as typeof import('path')
+                        fs.appendFileSync(pathMod.join(process.cwd(), 'debug-cfa0e2.log'), `${JSON.stringify(payload)}\n`, 'utf8')
+                    }
+                } catch {
+                    //
+                }
+            }
+        }
+        // #endregion
+    }
+
     groups.sort((a, b) => a.layer - b.layer)
 
     // Storey marker (▼ + label) at the storey-elevation reference Y, in the
