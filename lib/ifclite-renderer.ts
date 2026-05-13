@@ -55,21 +55,15 @@ const NO_FALLBACK_PART_GUIDS: readonly string[] = [
     '3HuvnrKbA$kTf3k1qPn15K',
 ]
 
-function debugLogRenderer(payload: {
+function debugLogRenderer(_payload: {
     runId: string
     hypothesisId: string
     location: string
     message: string
     data: Record<string, unknown>
 }) {
-    if (process.env.DEBUG_RENDERER !== '1') return
-    const line = JSON.stringify({ runId: payload.runId, hypothesisId: payload.hypothesisId, location: payload.location, message: payload.message, data: payload.data, timestamp: Date.now() })
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        require('node:fs').appendFileSync(process.env.DEBUG_RENDERER_LOG_PATH ?? 'debug-renderer.log', `${line}\n`, 'utf8')
-    } catch {
-        /* best effort */
-    }
+    // Instrumentation cleaned up after bugfix verification.
+    return
 }
 
 function debugLogSessionProbe(_payload: {
