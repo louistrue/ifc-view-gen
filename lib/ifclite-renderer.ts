@@ -1749,9 +1749,16 @@ function emitElevationSvg(
         }
     }
     const pendingOverlaySegments: PendingOverlaySegment[] = []
+    // Camera-side direction along the facing axis. cameraSide = +facing * sign
+    // (camera looks along -facing*sign at the door, so the half-space behind
+    // the camera is +facing*sign from the door). When buildDoorViewFrame flips
+    // facing via placementYAxis (e.g. facing[2] = -1), cameraSign alone has the
+    // wrong sign and walls in front of the door get classified as behind it,
+    // landing on layer 1 (host-plane) instead of layer 10 (clipped-wall top).
+    const cameraSideAxisSign = Math.sign(ctx.viewFrame.facing[facingAxisIdx] * cameraSign) || cameraSign
     for (const w of ctx.nearbyWalls) {
         const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
-        const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSign
+        const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSideAxisSign
         const bMin = w.bbox.min[facingAxisIdx]
         const bMax = w.bbox.max[facingAxisIdx]
         const depthGapToClip =
