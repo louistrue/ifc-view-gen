@@ -1769,8 +1769,17 @@ function emitElevationSvg(
                     : 0
         const wallInYAndWidth = inYAndWidthVolume(w.bbox)
         const wallInFullVolume = intersectsElevationVolume(w.bbox)
+        const wallRunWidth = Math.max(w.bbox.max[widthAxisIdx] - w.bbox.min[widthAxisIdx], 0.001)
+        const wallRunDepth = Math.max(w.bbox.max[facingAxisIdx] - w.bbox.min[facingAxisIdx], 0.001)
+        // Depth slice vs wall run: same world-frame test on front and back; each side only
+        // swaps elevationClip. Edge-on walls should read as a thin projected section; face-on
+        // runs (wide along wall line, thin in depth) must not be triangle-clipped to the thin
+        // frustum or they read as falsely "clipped" strips in one elevation.
+        const wallEdgeOnToElevation = wallRunDepth > Math.max(wallRunWidth * 1.15, 0.18)
         const renderDecision: ElevationRenderDecision = wallInFullVolume
-            ? { mode: 'sectioned', reason: 'nearby wall intersects full elevation volume' }
+            ? wallEdgeOnToElevation
+                ? { mode: 'sectioned', reason: 'nearby wall edge-on to elevation depth slice' }
+                : { mode: 'projected', reason: 'nearby wall face-on to elevation (omit depth clip like face-on nearby doors)' }
             : wallInYAndWidth && depthGapToClip <= NEARBY_WALL_PROJECTED_GAP_MAX_M
                 ? { mode: 'projected', reason: 'nearby wall near depth clip and intersects elevation y+width window' }
                 : { mode: 'hidden', reason: 'nearby wall outside elevation y+width window' }
@@ -1784,10 +1793,38 @@ function emitElevationSvg(
         const isInFrontOfDoor = cameraSideOffset > 0.05
         const wallLayer = renderDecision.mode === 'sectioned' && isInFrontOfDoor
             ? ELEVATION_CLIPPED_WALL_TOP_LAYER
-            : renderDecision.mode === 'projected'
+            : renderDecision.mode === 'projected' && isInFrontOfDoor
                 ? ELEVATION_PROJECTED_WALL_LAYER
                 : 1
         const wallTopScreenY = yScreenAt(w.bbox.max[1])
+        // #region agent log
+        if (ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt' && renderDecision.mode === 'sectioned') {
+            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
+                body: JSON.stringify({
+                    sessionId: 'cfa0e2',
+                    runId: 'post-fix-symmetric-slab-pad',
+                    hypothesisId: 'H3,H5',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyWallSectioned',
+                    message: 'nearby wall depth-sliced (edge-on classification)',
+                    data: {
+                        side,
+                        nearbyWallExpressId: w.expressId,
+                        wallGuid: w.guid ?? null,
+                        wallRunWidth,
+                        wallRunDepth,
+                        wallEdgeOnToElevation,
+                        isInFrontOfDoor,
+                        cameraSideOffset,
+                        wallLayer,
+                        reason: renderDecision.reason,
+                    },
+                    timestamp: Date.now(),
+                }),
+            }).catch(() => { })
+        }
+        // #endregion
         const polysAll: ProjectedPolygon[] = []
         const segsAll: ProjectedSegment[] = []
         const wallClip: WorldClip = renderDecision.mode === 'projected'
@@ -1837,6 +1874,35 @@ function emitElevationSvg(
                 })
             }
         }
+        // #region agent log
+        if (ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt' && wallLayer === ELEVATION_PROJECTED_WALL_LAYER) {
+            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
+                body: JSON.stringify({
+                    sessionId: 'cfa0e2',
+                    hypothesisId: 'H4,H6',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:projectedWallLayer8',
+                    message: 'layer-8 projected wall segments (possible bleed into slabs)',
+                    data: {
+                        side,
+                        nearbyWallExpressId: w.expressId,
+                        wallGuid: w.guid ?? null,
+                        wallTopScreenY,
+                        projectedSegPushCount: segsAll.filter((s0) => {
+                            const vertical = Math.abs(s0.x2 - s0.x1) < 0.75
+                            const touchesWallTopSeg =
+                                Math.abs(s0.y1 - wallTopScreenY) < 0.75
+                                || Math.abs(s0.y2 - wallTopScreenY) < 0.75
+                            return vertical && touchesWallTopSeg
+                        }).length,
+                        segsAllCount: segsAll.length,
+                    },
+                    timestamp: Date.now(),
+                }),
+            }).catch(() => { })
+        }
+        // #endregion
         groups.push({
             layer: wallLayer,
             polygons: polysAll,
@@ -1864,6 +1930,47 @@ function emitElevationSvg(
     // Strokes that would land EXACTLY on a crop edge (top of viewport at
     // screenTopWorld, bottom of viewport at canvasH) are suppressed — those
     // would read as solid lines drawn along the image crop, not real geometry.
+    // Facing axis: extend BOTH sides of the thin elevation depth slice by the same pad for
+    // horizontal floor/build-up bands only.  Asymmetric 1.35 m vs 0.58 m swaps which world
+    // side gets the small pad when front/back flips (cameraSign), so back elevations could
+    // lose slab/part meshes that still sat in the padded strip on the front view.
+    const FLOOR_BAND_CAMERA_DEPTH_PAD_M = 1.35
+    const slabBandDepthClip: { xMin?: number; xMax?: number; zMin?: number; zMax?: number } = {
+        xMin: elevationClip.xMin,
+        xMax: elevationClip.xMax,
+        zMin: elevationClip.zMin,
+        zMax: elevationClip.zMax,
+    }
+    if (isXAligned) {
+        const forwardZ = -cameraSign * ctx.viewFrame.facing[2]
+        const slabZPad = FLOOR_BAND_CAMERA_DEPTH_PAD_M
+        if (forwardZ > 0 && slabBandDepthClip.zMin != null) {
+            slabBandDepthClip.zMin -= slabZPad
+            if (slabBandDepthClip.zMax != null) slabBandDepthClip.zMax += slabZPad
+        } else if (forwardZ < 0) {
+            if (slabBandDepthClip.zMax != null) {
+                slabBandDepthClip.zMax += slabZPad
+            }
+            if (slabBandDepthClip.zMin != null) {
+                slabBandDepthClip.zMin -= slabZPad
+            }
+        }
+    } else {
+        const forwardX = -cameraSign * ctx.viewFrame.facing[0]
+        const slabXPad = FLOOR_BAND_CAMERA_DEPTH_PAD_M
+        if (forwardX > 0 && slabBandDepthClip.xMin != null) {
+            slabBandDepthClip.xMin -= slabXPad
+            if (slabBandDepthClip.xMax != null) slabBandDepthClip.xMax += slabXPad
+        } else if (forwardX < 0) {
+            if (slabBandDepthClip.xMax != null) {
+                slabBandDepthClip.xMax += slabXPad
+            }
+            if (slabBandDepthClip.xMin != null) {
+                slabBandDepthClip.xMin -= slabXPad
+            }
+        }
+    }
+
     function drawPartGeometry(
         part: { expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null },
         yLo: number,
@@ -1893,10 +2000,13 @@ function emitElevationSvg(
         const widthOnlyClip: WorldClip = {
             yMin: yLo,
             yMax: yHi,
-            xMin: isXAligned ? elevationClip.xMin : undefined,
-            xMax: isXAligned ? elevationClip.xMax : undefined,
-            zMin: !isXAligned ? elevationClip.zMin : undefined,
-            zMax: !isXAligned ? elevationClip.zMax : undefined,
+            // Width axis: same window as the elevation (no extra span along the
+            // wall run). Facing: camera-side extended + small pad past the elevation's
+            // opposite boundary so sill / build-up survives back-view depth cuts.
+            xMin: isXAligned ? elevationClip.xMin : slabBandDepthClip.xMin,
+            xMax: isXAligned ? elevationClip.xMax : slabBandDepthClip.xMax,
+            zMin: isXAligned ? slabBandDepthClip.zMin : elevationClip.zMin,
+            zMax: isXAligned ? slabBandDepthClip.zMax : elevationClip.zMax,
         }
         const partClip: WorldClip = {
             ...(clipDepthAxis
@@ -1922,6 +2032,56 @@ function emitElevationSvg(
             polysAll.push(...polys)
             segsAll.push(...segs)
         }
+        // #region agent log
+        if (
+            ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt'
+            && !clipDepthAxis
+            && partSourceTag.includes('below')
+        ) {
+            const partFMin = part.bbox.min[facingAxisIdx]
+            const partFMax = part.bbox.max[facingAxisIdx]
+            const overlapsFacingClip = !(partFMax < facingClipMin || partFMin > facingClipMax)
+            let diagSegs = 0, horizSegs = 0, vertSegs = 0
+            for (const s of segsAll) {
+                const dx = Math.abs(s.x2 - s.x1)
+                const dy = Math.abs(s.y2 - s.y1)
+                if (dx < 0.75) vertSegs++
+                else if (dy < 0.75) horizSegs++
+                else diagSegs++
+            }
+            fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
+                body: JSON.stringify({
+                    sessionId: 'cfa0e2',
+                    runId: 'post-fix-symmetric-slab-pad',
+                    hypothesisId: 'H1,H2,H3,H5',
+                    location: 'lib/ifclite-renderer.ts:drawPartGeometry:belowBandNoDepthClip',
+                    message: 'slab/part band: y slice + width elevation + symmetric facing depth pad',
+                    data: {
+                        side,
+                        slabBandDepthClip,
+                        slabBandSymmetricPadM: FLOOR_BAND_CAMERA_DEPTH_PAD_M,
+                        expressId: part.expressId,
+                        partGuid: part.guid ?? null,
+                        partSourceTag,
+                        yLo,
+                        yHi,
+                        clipDepthAxis,
+                        facingAxisIdx,
+                        facingClipMin,
+                        facingClipMax,
+                        partFacingSpan: [partFMin, partFMax],
+                        overlapsFacingClip,
+                        asymmetricFacingPadM: FLOOR_BAND_CAMERA_DEPTH_PAD_M,
+                        polyCount: polysAll.length,
+                        segCounts: { total: segsAll.length, horiz: horizSegs, vert: vertSegs, oblique: diagSegs },
+                    },
+                    timestamp: Date.now(),
+                }),
+            }).catch(() => { })
+        }
+        // #endregion
         const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
         const noFallbackForPart = !!part.guid
             && (NO_FALLBACK_PART_GUIDS.includes(part.guid) || noFallbackNorms.has(part.guid.replace(/\$/g, '_')))
@@ -2119,6 +2279,32 @@ function emitElevationSvg(
             if (yHi - yLo < 0.005) {
                 continue
             }
+            // #region agent log
+            if (ctx.guid === '3VBlDbhdEFJw8FjykwM3Bt') {
+                const fullVol = intersectsElevationVolume(part.bbox)
+                fetch('http://127.0.0.1:7398/ingest/5834f702-43d3-4b33-b0b3-25930b74e01f', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'cfa0e2' },
+                    body: JSON.stringify({
+                        sessionId: 'cfa0e2',
+                        hypothesisId: 'H1,H4',
+                        location: 'lib/ifclite-renderer.ts:emitElevationSvg:belowPartLoop',
+                        message: 'slabBelowPart elevation volume vs full-section',
+                        data: {
+                            side,
+                            expressId: part.expressId,
+                            partGuid: part.guid ?? null,
+                            yLo,
+                            yHi,
+                            bboxMin: part.bbox.min,
+                            bboxMax: part.bbox.max,
+                            intersectsFullElevationVolume: fullVol,
+                        },
+                        timestamp: Date.now(),
+                    }),
+                }).catch(() => { })
+            }
+            // #endregion
             drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, ELEVATION_SECTIONED_PART_LAYER, renderDecision.mode === 'sectioned', 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts', false)
         }
     }
