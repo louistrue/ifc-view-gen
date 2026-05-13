@@ -1515,6 +1515,53 @@ function emitElevationSvg(
     const viewportTopY = doorBottom + topDy
 
     const cam = buildElevationCamera(ctx.viewFrame, side, viewportBottomY, W, H, options.doorFootAnchor)
+    // #region agent log H84
+    debugLogSessionProbe({
+        runId,
+        hypothesisId: 'H84',
+        location: 'lib/ifclite-renderer.ts:emitElevationSvg:cropComparison',
+        message: 'upper vs lower crop driver comparison',
+        data: {
+            doorGuid: ctx.guid,
+            side,
+            floorCrop: floorCrop
+                ? {
+                    expressId: floorCrop.expressId,
+                    source: floorCrop.source,
+                    isLoadBearing: floorCrop.isLoadBearing,
+                    bbox: floorCrop.bbox,
+                    dyToDoorBottom: floorCrop.bbox.max[1] - doorBottom,
+                    thicknessM: floorCrop.bbox.max[1] - floorCrop.bbox.min[1],
+                    thicknessPx: Math.abs(cam.scaleY * (floorCrop.bbox.max[1] - floorCrop.bbox.min[1])),
+                }
+                : null,
+            overheadCrop: overheadCrop
+                ? {
+                    expressId: overheadCrop.expressId,
+                    source: overheadCrop.source,
+                    isLoadBearing: overheadCrop.isLoadBearing,
+                    bbox: overheadCrop.bbox,
+                    dyToDoorBottom: overheadCrop.bbox.min[1] - doorBottom,
+                    thicknessM: overheadCrop.bbox.max[1] - overheadCrop.bbox.min[1],
+                    thicknessPx: Math.abs(cam.scaleY * (overheadCrop.bbox.max[1] - overheadCrop.bbox.min[1])),
+                }
+                : null,
+            structBelowDy,
+            floorCropDy,
+            overheadCropDy,
+            viewportBottomY,
+            viewportTopY,
+            scaleY: cam.scaleY,
+            slabBelowPartsCount: ctx.slabBelowParts.length,
+            slabBelowPartsThicknessSummary: ctx.slabBelowParts.map((p) => ({
+                expressId: p.expressId,
+                guid: p.guid ?? null,
+                thicknessM: p.bbox.max[1] - p.bbox.min[1],
+                thicknessPx: Math.abs(cam.scaleY * (p.bbox.max[1] - p.bbox.min[1])),
+            })),
+        },
+    })
+    // #endregion
     if (debugEnabled) {
         // #region agent log H18
         debugLogRenderer({
@@ -2412,6 +2459,61 @@ function emitElevationSvg(
                     : null,
             }
         }
+        const scanlineCoverageMetrics = (polys: ProjectedPolygon[]) => {
+            const vis = polygonVisibilityMetrics(polys)
+            if (!vis.bounds) return null
+            const sampleY = (vis.bounds.minY + vis.bounds.maxY) / 2
+            const intervals: Array<{ start: number; end: number }> = []
+            for (const poly of polys) {
+                const xs: number[] = []
+                const pts = poly.points
+                for (let i = 0; i < pts.length; i++) {
+                    const a = pts[i]
+                    const b = pts[(i + 1) % pts.length]
+                    const yMin = Math.min(a.y, b.y)
+                    const yMax = Math.max(a.y, b.y)
+                    if (sampleY < yMin || sampleY >= yMax) continue
+                    const dy = b.y - a.y
+                    if (Math.abs(dy) < 1e-9) continue
+                    const t = (sampleY - a.y) / dy
+                    xs.push(a.x + t * (b.x - a.x))
+                }
+                xs.sort((x1, x2) => x1 - x2)
+                for (let i = 0; i + 1 < xs.length; i += 2) {
+                    const start = xs[i]
+                    const end = xs[i + 1]
+                    if (end - start > 0.1) intervals.push({ start, end })
+                }
+            }
+            if (intervals.length === 0) {
+                return {
+                    sampleY,
+                    boundsWidth: vis.bounds.maxX - vis.bounds.minX,
+                    coveredWidth: 0,
+                    coverageRatio: 0,
+                    intervalCount: 0,
+                }
+            }
+            intervals.sort((a, b) => a.start - b.start)
+            const merged: Array<{ start: number; end: number }> = []
+            for (const cur of intervals) {
+                const last = merged[merged.length - 1]
+                if (!last || cur.start > last.end + 0.1) {
+                    merged.push({ ...cur })
+                    continue
+                }
+                if (cur.end > last.end) last.end = cur.end
+            }
+            const coveredWidth = merged.reduce((sum, seg) => sum + Math.max(0, seg.end - seg.start), 0)
+            const boundsWidth = Math.max(0, vis.bounds.maxX - vis.bounds.minX)
+            return {
+                sampleY,
+                boundsWidth,
+                coveredWidth,
+                coverageRatio: boundsWidth > 0 ? coveredWidth / boundsWidth : 0,
+                intervalCount: merged.length,
+            }
+        }
         for (const mesh of part.meshes) {
             const cls: MeshClassification = { fill, layer, role: 'slab' }
             const meshStats = {
@@ -2482,6 +2584,8 @@ function emitElevationSvg(
             const segLengths = segsAll.map((s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1))
             const segCountGtPointFive = segLengths.filter((v) => v > 0.5).length
             const probePolyMetrics = polygonVisibilityMetrics(polysAll)
+            const probeCoverage = scanlineCoverageMetrics(polysAll)
+            const nominalBandPx = Math.abs(cam.scaleY * (yHi - yLo))
             const segBounds = segsAll.length > 0
                 ? {
                     minX: Math.min(...segsAll.map((s) => Math.min(s.x1, s.x2))),
@@ -2490,13 +2594,15 @@ function emitElevationSvg(
                     maxY: Math.max(...segsAll.map((s) => Math.max(s.y1, s.y2))),
                 }
                 : null
-            debugLogSessionProbe({ runId, hypothesisId: 'H67', location: `${debugLocation}:projection`, message: 'probe part projected geometry counts before fallback', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, clipDepthAxis, meshCount: part.meshes.length, polyCount, segCount, polysAllCount: polysAll.length, segsAllCount: segsAll.length, polyTotalAreaPx2: probePolyMetrics.totalAreaPx2, thinPolyCount: probePolyMetrics.thinPolyCount, polyBounds: probePolyMetrics.bounds, segLengthBuckets: segmentLengthBuckets(segsAll), segCountGtPointFive, segMinLength: segLengths.length ? Math.min(...segLengths) : null, segMaxLength: segLengths.length ? Math.max(...segLengths) : null, segBounds } })
+            debugLogSessionProbe({ runId, hypothesisId: 'H67', location: `${debugLocation}:projection`, message: 'probe part projected geometry counts before fallback', data: { doorGuid: ctx.guid, side, probeGuid: DEBUG_PROBE_ELEMENT_GUID, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, clipDepthAxis, meshCount: part.meshes.length, polyCount, segCount, polysAllCount: polysAll.length, segsAllCount: segsAll.length, polyTotalAreaPx2: probePolyMetrics.totalAreaPx2, thinPolyCount: probePolyMetrics.thinPolyCount, polyBounds: probePolyMetrics.bounds, scanlineCoverage: probeCoverage, nominalBandPx, strokeWidthPx: options.lineWidth, segLengthBuckets: segmentLengthBuckets(segsAll), segCountGtPointFive, segMinLength: segLengths.length ? Math.min(...segLengths) : null, segMaxLength: segLengths.length ? Math.max(...segLengths) : null, segBounds } })
             // #endregion
         }
         if (isTrackedStructuralBelow) {
             // #region agent log H76
             const slabPolyMetrics = polygonVisibilityMetrics(polysAll)
-            debugLogSessionProbe({ runId, hypothesisId: 'H76', location: `${debugLocation}:projection`, message: 'structural slab-below projected geometry counts', data: { doorGuid: ctx.guid, side, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, clipDepthAxis, meshCount: part.meshes.length, polyCount, segCount, polysAllCount: polysAll.length, segsAllCount: segsAll.length, polyTotalAreaPx2: slabPolyMetrics.totalAreaPx2, thinPolyCount: slabPolyMetrics.thinPolyCount, polyBounds: slabPolyMetrics.bounds, segLengthBuckets: segmentLengthBuckets(segsAll) } })
+            const slabCoverage = scanlineCoverageMetrics(polysAll)
+            const nominalBandPx = Math.abs(cam.scaleY * (yHi - yLo))
+            debugLogSessionProbe({ runId, hypothesisId: 'H76', location: `${debugLocation}:projection`, message: 'structural slab-below projected geometry counts', data: { doorGuid: ctx.guid, side, expressId: part.expressId, guid: part.guid ?? null, yLo, yHi, fill, layer, addStrokes, clipDepthAxis, meshCount: part.meshes.length, polyCount, segCount, polysAllCount: polysAll.length, segsAllCount: segsAll.length, polyTotalAreaPx2: slabPolyMetrics.totalAreaPx2, thinPolyCount: slabPolyMetrics.thinPolyCount, polyBounds: slabPolyMetrics.bounds, scanlineCoverage: slabCoverage, nominalBandPx, strokeWidthPx: options.lineWidth, segLengthBuckets: segmentLengthBuckets(segsAll) } })
             // #endregion
         }
         const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
@@ -2700,6 +2806,52 @@ function emitElevationSvg(
 
     // Structural slabs: real mesh only. Do not synthesize full-width cap bands.
     {
+        if (floorCrop) {
+            const floorCropPart = floorCrop.source === 'structural-slab-below'
+                ? (ctx.slabBelow
+                    ? { expressId: ctx.slabBelow.expressId, meshes: ctx.slabBelow.meshes, bbox: ctx.slabBelow.bbox, guid: ctx.slabBelow.guid ?? null }
+                    : null)
+                : (ctx.slabBelowParts.find((p) => p.expressId === floorCrop.expressId)
+                    ?? { expressId: floorCrop.expressId, meshes: [], bbox: floorCrop.bbox, guid: null })
+            if (floorCropPart) {
+                const yLo = Math.max(floorCropPart.bbox.min[1], viewportBottomY)
+                const yHi = Math.min(floorCropPart.bbox.max[1], viewportTopY)
+                // #region agent log H85
+                debugLogSessionProbe({
+                    runId,
+                    hypothesisId: 'H85',
+                    location: 'lib/ifclite-renderer.ts:emitElevationSvg:floorCropDriver',
+                    message: 'explicit lower crop driver band render',
+                    data: {
+                        doorGuid: ctx.guid,
+                        side,
+                        expressId: floorCropPart.expressId,
+                        guid: floorCropPart.guid ?? null,
+                        source: floorCrop.source,
+                        yLo,
+                        yHi,
+                        bandHeight: yHi - yLo,
+                        viewportBottomY,
+                        viewportTopY,
+                        meshCount: floorCropPart.meshes.length,
+                        bbox: floorCropPart.bbox,
+                    },
+                })
+                // #endregion
+                if (yHi - yLo >= 0.005) {
+                    drawPartGeometry(
+                        floorCropPart,
+                        yLo,
+                        yHi,
+                        options.colors.elevation.wall,
+                        ELEVATION_SECTIONED_PART_LAYER,
+                        true,
+                        'lib/ifclite-renderer.ts:emitElevationSvg:floorCropDriver',
+                        false
+                    )
+                }
+            }
+        }
         const slabBelowInYWidth = ctx.slabBelow ? inYAndWidthVolume(ctx.slabBelow.bbox) : false
         const slabBelowInFullVolume = ctx.slabBelow ? intersectsElevationVolume(ctx.slabBelow.bbox) : false
         const slabBelowRenderDecision = ctx.slabBelow
@@ -3089,6 +3241,31 @@ function emitElevationSvg(
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
     }
+    // #region agent log H83
+    debugLogSessionProbe({
+        runId,
+        hypothesisId: 'H83',
+        location: 'lib/ifclite-renderer.ts:emitElevationSvg:nearbyDoorCoverage',
+        message: 'nearby door projected/sectioned coverage summary',
+        data: {
+            doorGuid: ctx.guid,
+            side,
+            nearbyDoorCount: ctx.nearbyDoors.length,
+            stats: [...nearbyDoorRenderStats.values()].map((s) => ({
+                expressId: s.expressId,
+                renderMode: nearbyDoorRenderDecisions.get(s.expressId)?.mode ?? null,
+                renderReason: nearbyDoorRenderDecisions.get(s.expressId)?.reason ?? null,
+                meshCount: s.meshCount,
+                renderedMeshCount: s.renderedMeshCount,
+                emptyMeshCount: s.emptyMeshCount,
+                polyCount: s.polyCount,
+                segCount: s.segCount,
+                clipModeCounts: s.clipModeCounts,
+                bbox: s.bbox,
+            })),
+        },
+    })
+    // #endregion
     if (debugEnabled && nearbyDoorRenderStats.size > 0) {
         const overlap1D = (aMin: number, aMax: number, bMin: number, bMax: number) =>
             Math.min(aMax, bMax) - Math.max(aMin, bMin)
@@ -3195,6 +3372,10 @@ function emitElevationSvg(
         .filter((g) => g.layer === ELEVATION_SECTIONED_PART_LAYER)
         .flatMap((g) => g.polygons)
     const sectionFillStats = new Map<string, { count: number; totalAreaPx2: number; thinCount: number }>()
+    let sectionMinY = Infinity
+    let sectionMaxY = -Infinity
+    let sectionMinX = Infinity
+    let sectionMaxX = -Infinity
     for (const p of sectionPolys) {
         let area2 = 0
         let minX = Infinity
@@ -3210,11 +3391,50 @@ function emitElevationSvg(
             if (a.x > maxX) maxX = a.x
             if (a.y > maxY) maxY = a.y
         }
+        if (Number.isFinite(minX) && minX < sectionMinX) sectionMinX = minX
+        if (Number.isFinite(maxX) && maxX > sectionMaxX) sectionMaxX = maxX
+        if (Number.isFinite(minY) && minY < sectionMinY) sectionMinY = minY
+        if (Number.isFinite(maxY) && maxY > sectionMaxY) sectionMaxY = maxY
         const rec = sectionFillStats.get(p.fill) ?? { count: 0, totalAreaPx2: 0, thinCount: 0 }
         rec.count += 1
         rec.totalAreaPx2 += Math.abs(area2) * 0.5
         if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY) && (maxY - minY < 1 || maxX - minX < 1)) rec.thinCount += 1
         sectionFillStats.set(p.fill, rec)
+    }
+    const sectionCenterX = Number.isFinite(sectionMinX) && Number.isFinite(sectionMaxX)
+        ? (sectionMinX + sectionMaxX) / 2
+        : W / 2
+    const yCoverageIntervals: Array<{ startY: number; endY: number }> = []
+    for (const p of sectionPolys) {
+        const ys: number[] = []
+        const pts = p.points
+        for (let i = 0; i < pts.length; i++) {
+            const a = pts[i]
+            const b = pts[(i + 1) % pts.length]
+            const xMin = Math.min(a.x, b.x)
+            const xMax = Math.max(a.x, b.x)
+            if (sectionCenterX < xMin || sectionCenterX >= xMax) continue
+            const dx = b.x - a.x
+            if (Math.abs(dx) < 1e-9) continue
+            const t = (sectionCenterX - a.x) / dx
+            ys.push(a.y + t * (b.y - a.y))
+        }
+        ys.sort((y1, y2) => y1 - y2)
+        for (let i = 0; i + 1 < ys.length; i += 2) {
+            const startY = ys[i]
+            const endY = ys[i + 1]
+            if (endY - startY > 0.1) yCoverageIntervals.push({ startY, endY })
+        }
+    }
+    yCoverageIntervals.sort((a, b) => a.startY - b.startY)
+    const mergedYCoverage: Array<{ startY: number; endY: number }> = []
+    for (const cur of yCoverageIntervals) {
+        const last = mergedYCoverage[mergedYCoverage.length - 1]
+        if (!last || cur.startY > last.endY + 0.1) {
+            mergedYCoverage.push({ ...cur })
+            continue
+        }
+        if (cur.endY > last.endY) last.endY = cur.endY
     }
     debugLogSessionProbe({
         runId,
@@ -3230,6 +3450,11 @@ function emitElevationSvg(
             sectionLayer: ELEVATION_SECTIONED_PART_LAYER,
             sectionPolyCount: sectionPolys.length,
             sectionFillStats: [...sectionFillStats.entries()].map(([fill, stats]) => ({ fill, ...stats })),
+            sectionBounds: Number.isFinite(sectionMinX) && Number.isFinite(sectionMaxX) && Number.isFinite(sectionMinY) && Number.isFinite(sectionMaxY)
+                ? { minX: sectionMinX, maxX: sectionMaxX, minY: sectionMinY, maxY: sectionMaxY }
+                : null,
+            sectionCenterX,
+            sectionCenterYCoverage: mergedYCoverage,
             overlayLayer: ELEVATION_SECTIONED_PART_LAYER + 1,
             overlaySegCount: pendingOverlaySegments.length,
         },
