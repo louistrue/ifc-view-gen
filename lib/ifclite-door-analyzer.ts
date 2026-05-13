@@ -57,9 +57,24 @@ export interface DoorContextLite {
     /** IfcBuildingElementPart children of slabBelow (Unterlagsboden / floor
      *  build-up).  Rendered as separate bands on top of the structural slab
      *  in elevation views. */
-    slabBelowParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null; isLoadBearing?: boolean | null }>
+    slabBelowParts: Array<{
+        expressId: number
+        meshes: IfcLiteMesh[]
+        bbox: AABB
+        guid?: string | null
+        isLoadBearing?: boolean | null
+        /** From `Cset_StandardCH`.`CFC/BKP…` — used for IFC elevation fills (IfcCovering, etc.). */
+        cfcBkp: string | null
+    }>
     /** Same for slabAbove (suspended ceiling / build-up under the slab). */
-    slabAboveParts: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null; isLoadBearing?: boolean | null }>
+    slabAboveParts: Array<{
+        expressId: number
+        meshes: IfcLiteMesh[]
+        bbox: AABB
+        guid?: string | null
+        isLoadBearing?: boolean | null
+        cfcBkp: string | null
+    }>
 
     nearbyWalls: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
     nearbyDoors: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; cfcBkp: string | null; guid?: string | null }>
@@ -761,6 +776,7 @@ export function analyzeDoor(
             ...item,
             guid: model.attrs(item.expressId)?.globalId ?? null,
             isLoadBearing: readLoadBearing(model, item.expressId),
+            cfcBkp: readDoorBkp(model, item.expressId),
         }))
     const slabBelow = slabs.below
         ? {
@@ -852,6 +868,27 @@ export function analyzeDoor(
             cfcBkp: readDoorBkp(model, c.expressId),
             guid: model.attrs(c.expressId)?.globalId ?? null,
         }))
+    // Same IFC host wall often carries multiple openings spaced farther apart
+    // than neighbourPlanRadius; plan-radius alone drops them even though they're
+    // elevation-relevant neighbours.
+    if (hostWallId != null) {
+        for (const oid of model.byType('IFCDOOR')) {
+            if (oid === doorId) continue
+            if (nearbyDoors.some((d) => d.expressId === oid)) continue
+            if (findHostWallExpressId(model, oid) !== hostWallId) continue
+            const oMeshes = model.meshesByExpressId.get(oid)
+            if (!oMeshes || oMeshes.length === 0) continue
+            const ob = bboxOfMeshes(oMeshes)
+            if (!ob || !filterY({ bbox: ob })) continue
+            nearbyDoors.push({
+                expressId: oid,
+                meshes: oMeshes,
+                bbox: ob,
+                cfcBkp: readDoorBkp(model, oid),
+                guid: model.attrs(oid)?.globalId ?? null,
+            })
+        }
+    }
 
     const nearbyWindows = queryPlanIndex(caches.windowIndex, centre, radius)
         .filter(filterY)

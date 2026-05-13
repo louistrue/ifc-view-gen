@@ -7,7 +7,8 @@
     "anthrazit":  "#B8B8B8",
     "hellbraun":  "#D19D5A",
     "hellblau":   "#B5E1F7",
-    "graubraun":  "#D9CBBA"
+    "graubraun":  "#D9CBBA",
+    "bodenlage":  "#BEB5A9"
   },
   "plan": {
     "wallCut":             "grau",
@@ -28,6 +29,7 @@
       "drywall": "graubraun"
     },
     "suspendedCeiling": "grau",
+    "floorCovering": "bodenlage",
     "glass":            "hellblau",
     "electrical":       "gelb",
     "safety":           "pink",
@@ -47,6 +49,7 @@
     "layerKeywords": ["mobilier", "möbel", "moebel", "einrichtung"]
   },
   "strokes": {
-    "outline": "#000000"
+    "outline": "#000000",
+    "coveringOutline": "#6f6a67"
   }
 }

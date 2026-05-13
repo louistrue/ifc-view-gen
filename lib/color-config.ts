@@ -39,6 +39,8 @@ interface RenderColorsConfig {
         wall: string
         wallByBKP?: Partial<Record<WallBKPCategory, string>>
         suspendedCeiling: string
+        /** Slab‑below IFC floor finishes (IfcCovering) vs structural wall/slab greys (`wall`). */
+        floorCovering?: string
         glass: string
         electrical: string
         safety: string
@@ -56,10 +58,9 @@ interface RenderColorsConfig {
     }
     strokes: {
         outline: string
+        coveringOutline?: string
     }
 }
-
-/** Matches `config/render-colors.json` one-to-one. Kept in sync manually. */
 const FALLBACK_CONFIG: RenderColorsConfig = {
     palette: {
         grau:       '#E0E0E0',
@@ -70,6 +71,7 @@ const FALLBACK_CONFIG: RenderColorsConfig = {
         hellbraun:  '#D19D5A',
         hellblau:   '#B5E1F7',
         graubraun:  '#D9CBBA',
+        bodenlage:  '#BEB5A9',
     },
     plan: {
         wallCut:             'grau',
@@ -90,6 +92,7 @@ const FALLBACK_CONFIG: RenderColorsConfig = {
             drywall: 'graubraun',
         },
         suspendedCeiling: 'grau',
+        floorCovering:      'bodenlage',
         glass:            'hellblau',
         electrical:       'gelb',
         safety:           'pink',
@@ -107,6 +110,7 @@ const FALLBACK_CONFIG: RenderColorsConfig = {
     },
     strokes: {
         outline: '#000000',
+        coveringOutline: '#6f6a67',
     },
 }
 
@@ -139,6 +143,7 @@ export interface RenderColors {
         wall:             string
         wallByBKP:        Record<WallBKPCategory, string>
         suspendedCeiling: string
+        floorCovering:    string
         glass:            string
         electrical:       string
         safety:           string
@@ -155,6 +160,7 @@ export interface RenderColors {
     }
     strokes: {
         outline: string
+        coveringOutline: string
     }
 }
 
@@ -188,6 +194,7 @@ function resolveColors(config: RenderColorsConfig): RenderColors {
             wall:             P(config.elevation.wall),
             wallByBKP:        resolveWallBKP(config.elevation.wallByBKP, config.elevation.wall),
             suspendedCeiling: P(config.elevation.suspendedCeiling),
+            floorCovering: P(config.elevation.floorCovering ?? FALLBACK_CONFIG.elevation.floorCovering!),
             glass:            P(config.elevation.glass),
             electrical:       P(config.elevation.electrical),
             safety:           P(config.elevation.safety),
@@ -208,6 +215,7 @@ function resolveColors(config: RenderColorsConfig): RenderColors {
         },
         strokes: {
             outline: P(config.strokes.outline),
+            coveringOutline: P(config.strokes.coveringOutline ?? FALLBACK_CONFIG.strokes.coveringOutline!),
         },
     }
 }

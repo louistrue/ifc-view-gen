@@ -123,9 +123,14 @@ export interface RenderOptions {
     preferLoadBearingBottomCrop?: boolean
     /** @deprecated use preferLoadBearingOverheadCrop */
     preferConcreteOverheadCrop?: boolean
+    /**
+     * When true, neighbouring context doors never use the translucent blue “projected” style —
+     * they render as normal section‑cut openings (door BKP colours, clipped layers).
+     */
+    nearbyDoorsElevationSectionOnly?: boolean
 }
 
-const DEFAULT_OPTS: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop'>> = {
+const DEFAULT_OPTS: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop' | 'nearbyDoorsElevationSectionOnly'>> = {
     width: CANVAS_PX,
     height: CANVAS_HEIGHT_PX,
     lineWidth: 1.5,
@@ -139,6 +144,7 @@ const DEFAULT_OPTS: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth
     preferLoadBearingOverheadCrop: true,
     preferLoadBearingBottomCrop: true,
     preferConcreteOverheadCrop: false,
+    nearbyDoorsElevationSectionOnly: true,
 }
 
 interface ProjectedSegment {
@@ -183,6 +189,9 @@ interface ElevationRenderDecision {
 function isIfcCoveringPart(part: { meshes: IfcLiteMesh[] }): boolean {
     return part.meshes.some((m) => (m.ifcType?.toUpperCase() ?? '') === 'IFCCOVERING')
 }
+
+/** IFC floor coverings modelled as a few cm–tall strips can sit flush with sill / viewportBottomY — patch uses projected fill bounds. */
+const THIN_SLAB_BELOW_COVER_Y_SPAN_M = 0.26
 
 function segmentOrientationStats(segments: ProjectedSegment[]) {
     let horizontal = 0
@@ -319,6 +328,120 @@ function filterWallSeamSegments(segments: ProjectedSegment[]): ProjectedSegment[
     return out
 }
 
+/** Mesh outlines for IfcSlab / IfcBuildingElementPart in elevation: align with nearby
+ *  walls (`filterWallSeamSegments` + `snapNearCardinal` + `filterTinyOblique`).
+ *  Do **not** drop `sharp`-only edges here — on closed tessellated solids many
+ *  sole-visible edges are sharp; stripping them can remove every stroke and, when
+ *  fill+fallback are also empty, make the whole slab disappear.
+ */
+function outlineSegmentsForSlabPartMesh(raw: ProjectedSegment[]): ProjectedSegment[] {
+    let segs = snapNearCardinalSegments(filterWallSeamSegments(raw))
+    return filterTinyObliqueSegments(segs, 3, 3)
+}
+
+function polygonUnionScreenXBounds(polys: ProjectedPolygon[]): { minX: number; maxX: number } | null {
+    let minX = Infinity
+    let maxX = -Infinity
+    for (const poly of polys) {
+        for (const pt of poly.points) {
+            if (pt.x < minX) minX = pt.x
+            if (pt.x > maxX) maxX = pt.x
+        }
+    }
+    return Number.isFinite(minX) && Number.isFinite(maxX) && maxX - minX >= 2 ? { minX, maxX } : null
+}
+
+/** Thin slab/build-up meshes tessellate into many vertical seams in elevation.
+ *  Keep horizontal/oblique strokes and verticals near the projected band silhouette;
+ *  drop strokes that are mostly vertical but whose midpoint sits in the interior.
+ */
+function filterInteriorVerticalSlabBandSegments(
+    segments: ProjectedSegment[],
+    screenMinX: number,
+    screenMaxX: number,
+): ProjectedSegment[] {
+    const span = screenMaxX - screenMinX
+    if (!(span >= 2)) return segments
+    const edgeTol = Math.min(22, Math.max(8, span * 0.09))
+    return segments.filter((s) => {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) return false
+        const ax = Math.abs(dx) / len
+        const ay = Math.abs(dy) / len
+        const verticalDominant = ay >= 0.86 && ax <= 0.14
+        if (!verticalDominant) return true
+        const xm = (s.x1 + s.x2) / 2
+        const nearEdge =
+            Math.abs(xm - screenMinX) <= edgeTol || Math.abs(screenMaxX - xm) <= edgeTol
+        return nearEdge
+    })
+}
+
+/** Razor-thin slab strips (few px wide on screen) tessellate with seams at both
+ * X extents — `filterInteriorVerticalSlabBandSegments` keeps them all as “edge”.
+ * Drop vertical-only strokes so build-up tiles do not hatch incorrectly. */
+function dropVerticalStrokesWhenSilhouetteTooNarrow(segments: ProjectedSegment[], spanPx: number): ProjectedSegment[] {
+    const minSpanPx = 56
+    if (!(spanPx >= 2) || spanPx >= minSpanPx) return segments
+    return segments.filter((s) => {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) return true
+        const ax = Math.abs(dx) / len
+        const ay = Math.abs(dy) / len
+        const verticalDominant = ay >= 0.86 && ax <= 0.14
+        return !verticalDominant
+    })
+}
+
+/** Foreground “clipped top” layers (sectioned walls / camera-side sectioned doors) use
+ * strokes that can cross the floor build-up band. Drop vertical-dominant strokes whose
+ * midpoint sits in the bottom `bandPx` of the clip rect (same heuristic as slab ghost lines).
+ * When **`preserveSilhouetteX`** is set (projected‑fill xmin/xmax union), retain vertical‑dominant
+ * strokes whose X midpoint lands on silhouette **left/right** — those trace the architectural
+ * wall→slab junction; otherwise the heuristic removes them as tess “ghost seams” (same regression
+ * as thin slab‑below IFC coverings). */
+function stripElevationVerticalStrokesInFloorBand(
+    segments: ProjectedSegment[],
+    pixelClipMaxY: number,
+    bandPx: number,
+    preserveSilhouetteX?: { minX: number; maxX: number } | null,
+): ProjectedSegment[] {
+    const bandLo = pixelClipMaxY - bandPx
+    let silhouetteEdgeTol = 14
+    if (preserveSilhouetteX != null) {
+        const spanPx = preserveSilhouetteX.maxX - preserveSilhouetteX.minX
+        if (spanPx >= 2) {
+            silhouetteEdgeTol = Math.min(22, Math.max(8, spanPx * 0.09))
+        }
+    }
+    return segments.filter((s) => {
+        const dx = s.x2 - s.x1
+        const dy = s.y2 - s.y1
+        const len = Math.hypot(dx, dy)
+        if (len < 0.5) return true
+        const ax = Math.abs(dx) / len
+        const ay = Math.abs(dy) / len
+        const verticalDominant = ay >= 0.86 && ax <= 0.14
+        if (!verticalDominant) return true
+        const ym = (s.y1 + s.y2) / 2
+        if (ym < bandLo) return true
+        if (
+            preserveSilhouetteX != null
+            && preserveSilhouetteX.maxX - preserveSilhouetteX.minX >= 2
+        ) {
+            const xm = (s.x1 + s.x2) / 2
+            const nearLeft = Math.abs(xm - preserveSilhouetteX.minX) <= silhouetteEdgeTol
+            const nearRight = Math.abs(preserveSilhouetteX.maxX - xm) <= silhouetteEdgeTol
+            if (nearLeft || nearRight) return true
+        }
+        return false
+    })
+}
+
 function resolvePlanNearbyDoorColor(cfcBkp: string | null, colors: RenderColors): string {
     const cat = classifyDoorBKP(cfcBkp)
     if (cat === 'context') return colors.elevation.door.byBKP.context
@@ -337,6 +460,15 @@ const ELEVATION_PROJECTED_NEARBY_DOOR_LAYER = 8.5
 /** Outlets/switches on the host wall must not disappear behind semi-transparent projected neighbour doors. */
 const ELEVATION_DEVICE_FOREGROUND_LAYER = ELEVATION_PROJECTED_NEARBY_DOOR_LAYER + 0.05
 const ELEVATION_CLIPPED_WALL_TOP_LAYER = ELEVATION_SECTIONED_PART_LAYER + 2
+
+/** Thin slab‑below IFC floor coverings are painted after clipped foreground walls — otherwise fills sit under layer‑11 rectangles. */
+const ELEVATION_THIN_BELOW_COVER_LAYER = ELEVATION_CLIPPED_WALL_TOP_LAYER + 0.05
+
+function slabPartUsesFloorBandStrip(layer: number): boolean {
+    return layer === ELEVATION_SECTIONED_PART_LAYER
+        || layer === ELEVATION_THIN_BELOW_COVER_LAYER
+        || layer === ELEVATION_PROJECTED_WALL_LAYER
+}
 
 function classifyMesh(
     mesh: IfcLiteMesh,
@@ -487,6 +619,37 @@ function projectBoxToElevationRect(
         { x: maxX, y: maxY }, { x: minX, y: maxY },
     ]
     return clipPolygonRect(rect, pixelClip.minX, pixelClip.minY, pixelClip.maxX, pixelClip.maxY)
+}
+
+function clippedSlabPartWorldBox(part: { bbox: AABB }, partClip: WorldClip, yLo: number, yHi: number): AABB {
+    return {
+        min: [
+            Math.max(part.bbox.min[0], partClip.xMin ?? -Infinity),
+            yLo,
+            Math.max(part.bbox.min[2], partClip.zMin ?? -Infinity),
+        ],
+        max: [
+            Math.min(part.bbox.max[0], partClip.xMax ?? +Infinity),
+            yHi,
+            Math.min(part.bbox.max[2], partClip.zMax ?? +Infinity),
+        ],
+    }
+}
+
+function screenXBoundsFromWorldBoxElevation(
+    box: AABB,
+    cam: CameraSetup,
+    pixelClip: PixelClipRect,
+): { minX: number; maxX: number } | null {
+    const rect = projectBoxToElevationRect(box, cam, pixelClip)
+    if (!rect || rect.length < 3) return null
+    let minX = Infinity
+    let maxX = -Infinity
+    for (const p of rect) {
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+    }
+    return Number.isFinite(minX) && Number.isFinite(maxX) && maxX - minX >= 2 ? { minX, maxX } : null
 }
 
 interface CameraSetup {
@@ -1316,7 +1479,7 @@ function classifyNearbyDoorElevationMode(
 function emitElevationSvg(
     ctx: DoorContextLite,
     side: 'front' | 'back',
-    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop'>>,
+    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop' | 'nearbyDoorsElevationSectionOnly'>>,
 ): string {
     const W = options.width
     const H = options.height
@@ -1646,12 +1809,17 @@ function emitElevationSvg(
         const doorCenter = (dMin + dMax) / 2
         const hostCenter = (hMin + hMax) / 2
         if (sectionDecision.mode === 'hidden') return sectionDecision
-        const mode = classifyNearbyDoorElevationMode(door, hostBboxForClip, facingAxisIdx, widthAxisIdx, cameraSign)
+        const modeGeo = classifyNearbyDoorElevationMode(door, hostBboxForClip, facingAxisIdx, widthAxisIdx, cameraSign)
+        const mode: NearbyDoorElevationMode = options.nearbyDoorsElevationSectionOnly && modeGeo === 'projected'
+            ? 'sectioned'
+            : modeGeo
         return {
             mode,
             reason: mode === 'projected'
                 ? 'nearby door reads face-on in this elevation'
-                : 'nearby door reads edge-on or intersects host depth',
+                : modeGeo === 'projected'
+                    ? 'nearby door forced section cut (no translucent projected facade)'
+                    : 'nearby door reads edge-on or intersects host depth',
         }
     }
     const nearbyDoorModes = new Map<number, ElevationRenderMode>()
@@ -1787,11 +1955,14 @@ function emitElevationSvg(
         // swaps elevationClip. Edge-on walls should read as a thin projected section; face-on
         // runs (wide along wall line, thin in depth) must not be triangle-clipped to the thin
         // frustum or they read as falsely "clipped" strips in one elevation.
-        const wallEdgeOnToElevation = wallRunDepth > Math.max(wallRunWidth * 1.15, 0.18)
+        // Use the **same** depth/width ratios as `classifyNearbyDoorElevationMode` (1.25, 0.35 m
+        // floor). The older 1.15 / 0.18 bar was looser and could label a **face-on** run as
+        // "sectioned", putting it on layer 11 (clipped-wall-top) with full vertical strokes.
+        const wallEdgeOnToElevation = wallRunDepth > Math.max(wallRunWidth * 1.25, 0.35)
         const renderDecision: ElevationRenderDecision = wallInFullVolume
             ? wallEdgeOnToElevation
                 ? { mode: 'sectioned', reason: 'nearby wall edge-on to elevation depth slice' }
-                : { mode: 'projected', reason: 'nearby wall face-on to elevation (omit depth clip like face-on nearby doors)' }
+                : { mode: 'projected', reason: 'nearby wall face-on in elevation (depth still clipped to elevation volume)' }
             : wallInYAndWidth && depthGapToClip <= NEARBY_WALL_PROJECTED_GAP_MAX_M
                 ? { mode: 'projected', reason: 'nearby wall near depth clip and intersects elevation y+width window' }
                 : { mode: 'hidden', reason: 'nearby wall outside elevation y+width window' }
@@ -1810,17 +1981,12 @@ function emitElevationSvg(
                 : 1
         const wallTopScreenY = yScreenAt(w.bbox.max[1])
         const polysAll: ProjectedPolygon[] = []
-        const segsAll: ProjectedSegment[] = []
-        const wallClip: WorldClip = renderDecision.mode === 'projected'
-            ? {
-                yMin: elevationClip.yMin,
-                yMax: elevationClip.yMax,
-                xMin: isXAligned ? elevationClip.xMin : undefined,
-                xMax: isXAligned ? elevationClip.xMax : undefined,
-                zMin: !isXAligned ? elevationClip.zMin : undefined,
-                zMax: !isXAligned ? elevationClip.zMax : undefined,
-            }
-            : elevationClip
+        let segsAll: ProjectedSegment[] = []
+        // Always use the full elevation depth slice (door face → camera room).
+        // Older "projected" face-on walls omitted the facing-axis bounds on the
+        // clip box; mesh edges from geometry far along that axis still projected
+        // as vertical strokes in the slab band (reads as background wall/door).
+        const wallClip: WorldClip = elevationClip
         for (const mesh of w.meshes) {
             const cls: MeshClassification = { fill: options.colors.elevation.wall, layer: wallLayer, role: 'nearby-wall' }
             const polys = projectMeshFill(mesh, cam, cls, w.expressId, wallClip, pixelClip)
@@ -1837,6 +2003,10 @@ function emitElevationSvg(
             }
             polysAll.push(...polys)
             segsAll.push(...segs)
+        }
+        const wallFloorBandSilhouetteX = polygonUnionScreenXBounds(polysAll)
+        if (wallLayer === ELEVATION_CLIPPED_WALL_TOP_LAYER) {
+            segsAll = stripElevationVerticalStrokesInFloorBand(segsAll, pixelClip.maxY, 200, wallFloorBandSilhouetteX)
         }
         if (polysAll.length === 0 && segsAll.length === 0) continue
         if (wallLayer === 8) {
@@ -1944,10 +2114,10 @@ function emitElevationSvg(
                 const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
                 if (len <= 0.5) continue
                 pendingOverlaySegments.push({
-                    layer: ELEVATION_SECTIONED_PART_LAYER + 1,
+                    layer: layer + 1,
                     segment: {
                         ...s,
-                        layer: ELEVATION_SECTIONED_PART_LAYER + 1,
+                        layer: layer + 1,
                     },
                 })
             }
@@ -1975,17 +2145,232 @@ function emitElevationSvg(
                 }
                 : widthOnlyClip),
         }
+        /** IFC floor finishes: **sectioned** (strict clip) keeps black architectural contour;
+         * **projected** (slab-band pad) uses muted covering stroke so reads don’t imitate the focal door `#000`. */
+        const isBelowSectCover = partSourceTag.includes('belowParts:sectionedCover')
+        const isBelowProjCover = partSourceTag.includes('belowParts:projectedCover')
+        const slabPartStrokeOutline = isBelowSectCover
+            ? options.colors.strokes.outline
+            : isBelowProjCover || (partSourceTag.includes('belowParts') && isIfcCoveringPart(part))
+                ? options.colors.strokes.coveringOutline
+                : options.colors.strokes.outline
         const polysAll: ProjectedPolygon[] = []
-        const segsAll: ProjectedSegment[] = []
+        let segsAll: ProjectedSegment[] = []
         for (const mesh of part.meshes) {
             const cls: MeshClassification = { fill, layer, role: 'slab' }
             const polys = projectMeshFill(mesh, cam, cls, part.expressId, partClip, pixelClip)
             const segsRaw = addStrokes
-                ? projectMeshSegments(mesh, cam, options.colors.strokes.outline, layer, options.lineWidth, partClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+                ? projectMeshSegments(mesh, cam, slabPartStrokeOutline, layer, options.lineWidth, partClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
                 : []
-            const segs = snapNearCardinalSegments(segsRaw)
+            const segs = addStrokes && segsRaw.length > 0
+                ? outlineSegmentsForSlabPartMesh(segsRaw)
+                : []
             polysAll.push(...polys)
             segsAll.push(...segs)
+        }
+        const slabBandInteriorVertCull =
+            addStrokes
+            && segsAll.length > 0
+            && (
+                partSourceTag.includes('above')
+                || partSourceTag.includes('below')
+                || partSourceTag.includes('floorCrop')
+            )
+        if (slabBandInteriorVertCull) {
+            let bx = polygonUnionScreenXBounds(polysAll)
+            if (!bx) {
+                const wb = clippedSlabPartWorldBox(part, partClip, yLo, yHi)
+                const volumetric =
+                    wb.max[0] - wb.min[0] >= 0.005
+                    && wb.max[1] - wb.min[1] >= 0.005
+                    && wb.max[2] - wb.min[2] >= 0.005
+                if (volumetric) bx = screenXBoundsFromWorldBoxElevation(wb, cam, pixelClip)
+            }
+            if (bx) {
+                const spanPx = bx.maxX - bx.minX
+                if (
+                    !partSourceTag.includes('belowParts:sectionedCover')
+                    && !partSourceTag.includes('belowParts:projectedCover')
+                ) {
+                    segsAll = dropVerticalStrokesWhenSilhouetteTooNarrow(segsAll, spanPx)
+                }
+                segsAll = filterInteriorVerticalSlabBandSegments(segsAll, bx.minX, bx.maxX)
+            }
+        }
+        /** Sectioned slab/part strokes (layer 9) near the viewport bottom often include
+         * projected vertical seams in the structural slab + build‑up bands that do not appear
+         * on the physical section — mirror the foreground layer‑11 floor‑band heuristic. */
+        if (
+            addStrokes
+            && segsAll.length > 0
+            && slabPartUsesFloorBandStrip(layer)
+            && (partSourceTag.includes('belowParts') || partSourceTag.includes('belowStructuralSlab'))
+        ) {
+            const belowIfcCov =
+                partSourceTag.includes('belowParts:sectionedCover')
+                || partSourceTag.includes('belowParts:projectedCover')
+            /** Projected IFC sills (`:projectedCover`) still sat in layer‑8 floor‑band strip logic without silhouette context — identical bug to clipped walls (`ym` mid in bottom 200px kills corner verticals). */
+            const coverSilForStrip =
+                belowIfcCov && polysAll.length > 0
+                    ? polygonUnionScreenXBounds(polysAll)
+                    : null
+            const coverSpanOk =
+                coverSilForStrip != null && coverSilForStrip.maxX - coverSilForStrip.minX >= 2
+            if (belowIfcCov) {
+                if (coverSpanOk) {
+                    segsAll = stripElevationVerticalStrokesInFloorBand(
+                        segsAll,
+                        pixelClip.maxY,
+                        200,
+                        coverSilForStrip,
+                    )
+                }
+                /** Narrow merged hull: omit strip entirely rather than blindly wipe sill vertical tess. */
+            }
+            else {
+                segsAll = stripElevationVerticalStrokesInFloorBand(segsAll, pixelClip.maxY, 200)
+            }
+        }
+        /** Thin slab-below IFC floor finishes are almost invisible after the floor-band strip removes
+         * vertical‑dominant mesh seams; add top/bottom **horizontal** band edges from the projected fill only
+         * (no extra vertical ghosts). */
+        const thinBelowCoverStrokePatch =
+            addStrokes
+            && slabPartUsesFloorBandStrip(layer)
+            && partSourceTag.includes('belowParts')
+            && isIfcCoveringPart(part)
+            && part.bbox.max[1] - part.bbox.min[1] < THIN_SLAB_BELOW_COVER_Y_SPAN_M
+            && polysAll.length > 0
+        if (thinBelowCoverStrokePatch) {
+            let minSx = Infinity
+            let maxSx = -Infinity
+            let minSy = Infinity
+            let maxSy = -Infinity
+            for (const poly of polysAll) {
+                for (const p of poly.points) {
+                    minSx = Math.min(minSx, p.x)
+                    maxSx = Math.max(maxSx, p.x)
+                    minSy = Math.min(minSy, p.y)
+                    maxSy = Math.max(maxSy, p.y)
+                }
+            }
+            const spanX = maxSx - minSx
+            const spanY = maxSy - minSy
+            const polyBBoxOkHorizPatch =
+                Number.isFinite(minSx) && spanX >= 0.5 && spanY >= 0.5
+            /** `stripElevationVerticalStrokesInFloorBand` misses sill tess verts when midpoint sits above
+             * the fixed 200px foot band — drop vertical‑dominant **interior** seams in the sill’s projected bbox. */
+            if (polyBBoxOkHorizPatch && spanX >= 1 && spanY >= 0.35) {
+                const edgeTolX = Math.min(22, Math.max(8, spanX * 0.09))
+                const edgeTolY = Math.min(14, Math.max(4, spanY * 0.12))
+                segsAll = segsAll.filter((s) => {
+                    const dx = s.x2 - s.x1
+                    const dy = s.y2 - s.y1
+                    const len = Math.hypot(dx, dy)
+                    if (len < 0.5) return true
+                    const ax = Math.abs(dx) / len
+                    const ay = Math.abs(dy) / len
+                    const verticalDominant = ay >= 0.86 && ax <= 0.14
+                    if (!verticalDominant) return true
+                    const xm = (s.x1 + s.x2) / 2
+                    const ym = (s.y1 + s.y2) / 2
+                    const nearXEdge =
+                        Math.abs(xm - minSx) <= edgeTolX || Math.abs(maxSx - xm) <= edgeTolX
+                    const nearYEdge =
+                        Math.abs(ym - minSy) <= edgeTolY || Math.abs(maxSy - ym) <= edgeTolY
+                    return nearXEdge || nearYEdge
+                })
+            }
+            if (polyBBoxOkHorizPatch) {
+                const xb = { minX: minSx, maxX: maxSx }
+                const hasHorizontalNearY = (y: number): boolean => {
+                    const tol = 2
+                    for (const s of segsAll) {
+                        if (Math.abs(s.y1 - s.y2) > 1) continue
+                        const ym = (s.y1 + s.y2) / 2
+                        if (Math.abs(ym - y) < tol) return true
+                    }
+                    return false
+                }
+                const pushHz = (y: number): void => {
+                    if (hasHorizontalNearY(y) || onCropEdge(y)) return
+                    segsAll.push({
+                        x1: xb.minX,
+                        y1: y,
+                        x2: xb.maxX,
+                        y2: y,
+                        color: slabPartStrokeOutline,
+                        depth: 0,
+                        layer,
+                        width: options.lineWidth,
+                    })
+                }
+                pushHz(minSy)
+                if (spanY >= 1) {
+                    const prefersBelowFaceOnly = partSourceTag.includes('below')
+                    const yBottom = prefersBelowFaceOnly ? Math.min(maxSy, pixelClip.maxY - 0.75) : maxSy
+                    if (Math.abs(yBottom - minSy) >= 1) pushHz(yBottom)
+                }
+            }
+        }
+        /** Slab-below IFC sill: zero clipped mesh fills (common on **projected** front views) skip polys-only hull; **`projectBoxToElevationRect`(clipped world box)** restores left/right **`strokes.outline`** verticals. */
+        if (
+            addStrokes
+            && (
+                partSourceTag.includes('belowParts:sectionedCover')
+                || partSourceTag.includes('belowParts:projectedCover')
+            )
+        ) {
+            let minSx = +Infinity
+            let maxSx = -Infinity
+            let minSy = +Infinity
+            let maxSy = -Infinity
+            let haveBounds = false
+            let rectSil: Pt[] | null = null
+
+            const expandFromPts = (pts: readonly { x: number; y: number }[]): void => {
+                for (const p of pts) {
+                    if (p.x < minSx) minSx = p.x
+                    if (p.x > maxSx) maxSx = p.x
+                    if (p.y < minSy) minSy = p.y
+                    if (p.y > maxSy) maxSy = p.y
+                    haveBounds = true
+                }
+            }
+            for (const poly of polysAll) expandFromPts(poly.points)
+            if (
+                !haveBounds || !Number.isFinite(minSx)
+                || maxSx - minSx < 0.85
+                || maxSy - minSy < 0.04
+            ) {
+                const wbSil = clippedSlabPartWorldBox(part, partClip, yLo, yHi)
+                rectSil = projectBoxToElevationRect(wbSil, cam, pixelClip)
+                if (rectSil && rectSil.length >= 3) expandFromPts(rectSil)
+            }
+            const spanX = maxSx - minSx
+            const spanY = maxSy - minSy
+            const sillSilOk =
+                haveBounds && Number.isFinite(minSx) && spanX >= 0.85 && spanY >= 0.03
+            if (sillSilOk) {
+                const prefersBelowFaceOnly = partSourceTag.includes('below')
+                const vYTop = minSy
+                let vYBot = prefersBelowFaceOnly ? Math.min(maxSy, pixelClip.maxY - 0.75) : maxSy
+                const pushSilVert = (x: number): void => {
+                    if (Math.abs(vYBot - vYTop) < 0.06) return
+                    segsAll.push({
+                        x1: x,
+                        y1: vYTop,
+                        x2: x,
+                        y2: vYBot,
+                        color: options.colors.strokes.outline,
+                        depth: 0,
+                        layer,
+                        width: options.lineWidth,
+                    })
+                }
+                pushSilVert(minSx)
+                pushSilVert(maxSx)
+            }
         }
         const noFallbackNorms = new Set(NO_FALLBACK_PART_GUIDS.map((g) => g.replace(/\$/g, '_')))
         const noFallbackForPart = !!part.guid
@@ -2057,7 +2442,7 @@ function emitElevationSvg(
                                 y1: minY,
                                 x2: maxX,
                                 y2: minY,
-                                color: options.colors.strokes.outline,
+                                color: slabPartStrokeOutline,
                                 depth: 0,
                                 layer,
                                 width: options.lineWidth,
@@ -2077,7 +2462,7 @@ function emitElevationSvg(
                                 y1: maxStrokeY,
                                 x2: maxX,
                                 y2: maxStrokeY,
-                                color: options.colors.strokes.outline,
+                                color: slabPartStrokeOutline,
                                 depth: 0,
                                 layer,
                                 width: options.lineWidth,
@@ -2176,16 +2561,39 @@ function emitElevationSvg(
         const belowParts = ctx.slabBelowParts
             .filter((p) => {
                 const inYWidth = inYAndWidthVolume(p.bbox)
-                const inVolume = intersectsElevationVolume(p.bbox)
-                const renderDecision = inYWidth
-                    ? {
-                        mode: 'sectioned' as const,
-                        reason: 'slab-below part intersects elevation y+width window',
-                    }
-                    : {
-                        mode: 'hidden' as const,
+                const inDepthSlice = intersectsElevationVolume(p.bbox)
+                const isCoverBelow = isIfcCoveringPart(p)
+                let renderDecision: ElevationRenderDecision
+                if (!inYWidth) {
+                    renderDecision = {
+                        mode: 'hidden',
                         reason: 'slab-below part outside elevation y+width window',
                     }
+                }
+                else if (isCoverBelow) {
+                    /** Match nearby door / wall framing: edge‑on = sectioned (strict slice, black contour), face‑on / pad‑only = projected (layer‑8, slab depth pad, muted stroke). */
+                    if (!inDepthSlice) {
+                        renderDecision = {
+                            mode: 'projected',
+                            reason: 'IfcCovering in y+width band but outside strict elevation depth — draw with slab-band depth pad',
+                        }
+                    }
+                    else {
+                        const geo = classifyNearbyDoorElevationMode(p, hostBboxForClip, facingAxisIdx, widthAxisIdx, cameraSign)
+                        renderDecision = {
+                            mode: geo,
+                            reason: geo === 'sectioned'
+                                ? 'IfcCovering edge-on / section through depth slice'
+                                : 'IfcCovering face-on in depth slice (elevated like projected wall facade)',
+                        }
+                    }
+                }
+                else {
+                    renderDecision = {
+                        mode: 'sectioned',
+                        reason: 'slab-below part intersects elevation y+width window',
+                    }
+                }
                 belowPartRenderDecisions.set(p.expressId, renderDecision)
                 return renderDecision.mode !== 'hidden'
             })
@@ -2195,12 +2603,39 @@ function emitElevationSvg(
                 mode: 'sectioned',
                 reason: 'fallback after slab-below filtering',
             }
+            /** Non‑coverings (`IFCBUILDINGELEMENTPART` build‑up) stay on the padded slab‑band path; explicit cover tags drive stroke + clip. */
+            const belowPartSourceTag = isIfcCoveringPart(part)
+                ? (renderDecision.mode === 'projected'
+                    ? 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts:projectedCover'
+                    : 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts:sectionedCover')
+                : 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts'
+            /** Razor-thin IFC floor finishes sit under layer‑11 clipped walls unless bumped; projected covers use the same layer as face-on walls so sort order matches `nearbyWalls`. */
+            const thinSillIfcCoverBelow =
+                isIfcCoveringPart(part)
+                && part.bbox.max[1] - part.bbox.min[1] < THIN_SLAB_BELOW_COVER_Y_SPAN_M
+            const belowPartLayer = isIfcCoveringPart(part)
+                ? renderDecision.mode === 'projected'
+                    ? ELEVATION_PROJECTED_WALL_LAYER
+                    : thinSillIfcCoverBelow
+                        ? ELEVATION_THIN_BELOW_COVER_LAYER
+                        : ELEVATION_SECTIONED_PART_LAYER
+                : ELEVATION_SECTIONED_PART_LAYER
+            /** IfcCovering: BKP-grey like walls. */
+            const belowPartFill = isIfcCoveringPart(part)
+                ? resolveWallElevationColor(part.cfcBkp, options.colors)
+                : options.colors.elevation.wall
             const yLo = Math.max(part.bbox.min[1], viewportBottomY)
             const yHi = Math.min(part.bbox.max[1], viewportTopY)
-            if (yHi - yLo < 0.005) {
+            const skippedEmptyY = yHi - yLo < 0.005
+            if (skippedEmptyY) {
                 continue
             }
-            drawPartGeometry(part, yLo, yHi, options.colors.elevation.wall, ELEVATION_SECTIONED_PART_LAYER, renderDecision.mode === 'sectioned', 'lib/ifclite-renderer.ts:emitElevationSvg:belowParts', false)
+            const addStrokesBelow = isIfcCoveringPart(part)
+                ? renderDecision.mode === 'projected' || renderDecision.mode === 'sectioned'
+                : renderDecision.mode === 'sectioned'
+            /** Sectioned covers clip to the elevation frustum; projected covers use slab depth padding (widthOnly path). */
+            const belowPartStrictDepthClip = isIfcCoveringPart(part) && renderDecision.mode === 'sectioned'
+            drawPartGeometry(part, yLo, yHi, belowPartFill, belowPartLayer, addStrokesBelow, belowPartSourceTag, belowPartStrictDepthClip)
         }
     }
     {
@@ -2297,12 +2732,17 @@ function emitElevationSvg(
     // Focal door is the subject of the elevation — always fully drawn in
     // BOTH views.  The depth half-space clip exists for cut/section context
     // (nearby walls, slabs, devices) so we don't paint the far room.
-    // Nearby doors (context openings) match legacy behaviour for the *focal*
-    // leaf: clip in Y and along the wall-run width only — **omit** the thin
-    // facing-axis depth slice.  Applying full `elevationClip` to a sectioned
-    // context door removed transom/header triangles that sit slightly in
-    // front of the leaf in depth; front view often used `projected` (same
-    // width+Y clip) so the mismatch read as a missing top on back only.
+    // Nearby doors: `focalDoorClip` omits facing-axis bounds so fills match how
+    // mesh facets span the focal depth slab (lintels/transoms stay coherent).
+    // Use the **same** clip for strokes; tightening strokes alone with
+    // `elevationClip` drops horizontal edges whose endpoints sit outside the
+    // slab even though the filled silhouette still reads correctly.
+    // Neighbours classified `projected` (`classifyNearbyDoorElevationMode`) use the
+    // same clip; their vertical frame strokes can extend across slab/part bands.
+    // Camera-side **sectioned** meshes on foreground layer (11): vertical strokes can
+    // extend across slab/part bands; strip vertical-dominant strokes in the bottom
+    // screen band (floor build‑up), where loose depth strokes are not part of the
+    // true section cut (nearby walls and neighbour doors apply this separately).
     const focalDoorClip: WorldClip = {
         yMin: elevationClip.yMin,
         yMax: elevationClip.yMax,
@@ -2323,9 +2763,26 @@ function emitElevationSvg(
         const nearbyDoorMode = nearbyDoorModes.get(expressId)
         const isFocalDoorMesh = expressId === ctx.door.expressId
         const isNearbyDoorMesh = !isFocalDoorMesh && nearbyDoorMode !== undefined
-        const meshClip = isFocalDoorMesh || isNearbyDoorMesh ? focalDoorClip : elevationClip
-        const polys = projectMeshFill(mesh, cam, cls, expressId, meshClip, pixelClip)
-        const segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, meshClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+        let polys: ProjectedPolygon[]
+        let segs: ProjectedSegment[]
+        if (isFocalDoorMesh) {
+            polys = projectMeshFill(mesh, cam, cls, expressId, focalDoorClip, pixelClip)
+            segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, focalDoorClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+        } else if (isNearbyDoorMesh) {
+            polys = projectMeshFill(mesh, cam, cls, expressId, focalDoorClip, pixelClip)
+            segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, focalDoorClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+            if (
+                cls.role === 'nearby-door'
+                && cls.layer === ELEVATION_CLIPPED_WALL_TOP_LAYER
+                && nearbyDoorClippedWallTop.has(expressId)
+            ) {
+                const doorFloorBandSilhouetteX = polygonUnionScreenXBounds(polys)
+                segs = stripElevationVerticalStrokesInFloorBand(segs, pixelClip.maxY, 200, doorFloorBandSilhouetteX)
+            }
+        } else {
+            polys = projectMeshFill(mesh, cam, cls, expressId, elevationClip, pixelClip)
+            segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+        }
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
     }
@@ -2640,7 +3097,7 @@ function buildPlanCameraNew(
 
 function emitPlanSvg(
     ctx: DoorContextLite,
-    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop'>>,
+    options: Required<Pick<RenderOptions, 'width' | 'height' | 'lineWidth' | 'colors' | 'doorFootAnchor' | 'emitDebugAttrs' | 'preferLoadBearingOverheadCrop' | 'preferLoadBearingBottomCrop' | 'preferConcreteOverheadCrop' | 'nearbyDoorsElevationSectionOnly'>>,
 ): string {
     const W = options.width
     const H = options.height
