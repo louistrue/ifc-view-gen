@@ -124,8 +124,10 @@ export interface RenderOptions {
     /** @deprecated use preferLoadBearingOverheadCrop */
     preferConcreteOverheadCrop?: boolean
     /**
-     * When true, neighbouring context doors never use the translucent blue “projected” style —
-     * they render as normal section‑cut openings (door BKP colours, clipped layers).
+     * When true, neighbouring context doors avoid the translucent blue “projected” **frame**
+     * style — they use section‑cut fills and layers. Face‑on (**geometrically** projected)
+     * glazing panes still use the elevation glass colour so a same‑wall glass door reads
+     * as glass, not grey.
      */
     nearbyDoorsElevationSectionOnly?: boolean
 }
@@ -184,6 +186,11 @@ type NearbyDoorElevationMode = Extract<ElevationRenderMode, 'projected' | 'secti
 interface ElevationRenderDecision {
     mode: ElevationRenderMode
     reason: string
+    /**
+     * For nearby doors only: `classifyNearbyDoorElevationMode` before
+     * `nearbyDoorsElevationSectionOnly` may force paint `mode` to `sectioned`.
+     */
+    nearbyDoorGeometryMode?: NearbyDoorElevationMode
 }
 
 function isIfcCoveringPart(part: { meshes: IfcLiteMesh[] }): boolean {
@@ -667,6 +674,8 @@ function classifyMesh(
     nearbyDoorModes?: ReadonlyMap<number, ElevationRenderMode>,
     /** Camera-side sectioned nearby doors: same paint order as clipped perpendicular walls. */
     nearbyDoorClippedWallTop?: ReadonlySet<number>,
+    /** Before `nearbyDoorsElevationSectionOnly` remaps paint mode; used for glazing vs section-grey. */
+    nearbyDoorGeometryModes?: ReadonlyMap<number, NearbyDoorElevationMode>,
 ): MeshClassification {
     const id = mesh.expressId
     if (id === ctx.door.expressId) {
@@ -712,8 +721,13 @@ function classifyMesh(
                 ? ELEVATION_CLIPPED_WALL_TOP_LAYER
                 : 3
         if (elevationView && isLikelyGlazingPanelMesh(mesh)) {
-            if (mode === 'projected') {
-                return { fill: colors.elevation.glass, fillOpacity: 0.32, layer: ELEVATION_PROJECTED_NEARBY_DOOR_LAYER, role: 'nearby-door' }
+            const geometryMode = nearbyDoorGeometryModes?.get(id) ?? mode
+            if (geometryMode === 'projected') {
+                const glassLayer =
+                    mode === 'projected'
+                        ? ELEVATION_PROJECTED_NEARBY_DOOR_LAYER
+                        : sectionedFillLayer
+                return { fill: colors.elevation.glass, fillOpacity: 0.32, layer: glassLayer, role: 'nearby-door' }
             }
             return { fill: nearbyDoorFill, fillOpacity: 0.5, layer: sectionedFillLayer, role: 'nearby-door' }
         }
@@ -2012,13 +2026,18 @@ function emitElevationSvg(
                 : modeGeo === 'projected'
                     ? 'nearby door forced section cut (no translucent projected facade)'
                     : 'nearby door reads edge-on or intersects host depth',
+            nearbyDoorGeometryMode: modeGeo,
         }
     }
     const nearbyDoorModes = new Map<number, ElevationRenderMode>()
+    const nearbyDoorGeometryModes = new Map<number, NearbyDoorElevationMode>()
     for (const door of ctx.nearbyDoors) {
         const decision = decideNearbyDoorRender(door)
         if (decision.mode === 'hidden') continue
         nearbyDoorModes.set(door.expressId, decision.mode)
+        if (decision.nearbyDoorGeometryMode != null) {
+            nearbyDoorGeometryModes.set(door.expressId, decision.nearbyDoorGeometryMode)
+        }
     }
     const hostWallRenderDecision = ctx.hostWall
         ? decideSectionedRender(ctx.hostWall.bbox, 'host wall intersects full elevation volume')
@@ -3026,7 +3045,7 @@ function emitElevationSvg(
         if (cameraSideOffsetDoor > 0.05) nearbyDoorClippedWallTop.add(d.expressId)
     }
     for (const { mesh, expressId } of meshes) {
-        const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes, nearbyDoorClippedWallTop)
+        const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes, nearbyDoorClippedWallTop, nearbyDoorGeometryModes)
         const nearbyDoorMode = nearbyDoorModes.get(expressId)
         const isFocalDoorMesh = expressId === ctx.door.expressId
         const isNearbyDoorMesh = !isFocalDoorMesh && nearbyDoorMode !== undefined
