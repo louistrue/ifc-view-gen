@@ -2212,11 +2212,8 @@ function emitElevationSvg(
             : renderDecision.mode === 'projected' && isInFrontOfDoor
                 ? ELEVATION_PROJECTED_WALL_LAYER
                 : 1
-        /** Same metal context fill on both elevations for edge-on section cuts (avoids front/back mismatch). */
-        const wallFill =
-            renderDecision.mode === 'sectioned' && wallEdgeOnToElevation
-                ? options.colors.elevation.door.byBKP.metal
-                : options.colors.elevation.wall
+        /** Nearby wall fills always use palette `elevation.wall` (light grey); edge-on section cuts no longer use door metal. */
+        const wallFill = options.colors.elevation.wall
         const wallTopScreenY = yScreenAt(w.bbox.max[1])
         const polysAll: ProjectedPolygon[] = []
         let segsAll: ProjectedSegment[] = []
