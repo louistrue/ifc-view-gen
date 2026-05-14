@@ -78,7 +78,7 @@ export interface DoorContextLite {
 
     nearbyWalls: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
     nearbyDoors: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; cfcBkp: string | null; guid?: string | null }>
-    nearbyWindows: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB }>
+    nearbyWindows: Array<{ expressId: number; meshes: IfcLiteMesh[]; bbox: AABB; guid?: string | null }>
     nearbyDevices: Array<{
         expressId: number
         meshes: IfcLiteMesh[]
@@ -638,6 +638,13 @@ export function buildAnalyzerCaches(model: IfcLiteModel, elec: IfcLiteModel | nu
             wallIndex.bins.set(k, [...merged, ...arr])
         }
     }
+    if (model.byType('IFCCURTAINWALL').length > 0) {
+        const cwIndex = buildPlanIndex(model, 'IFCCURTAINWALL', 1.5)
+        for (const [k, arr] of cwIndex.bins) {
+            const merged = wallIndex.bins.get(k) ?? []
+            wallIndex.bins.set(k, [...merged, ...arr])
+        }
+    }
     const slabIndex = buildPlanIndex(model, 'IFCSLAB', 2.0)
     const buildingPartIndex = buildPlanIndex(model, 'IFCBUILDINGELEMENTPART', 1.5)
     const coveringIndex = buildPlanIndex(model, 'IFCCOVERING', 1.5)
@@ -892,7 +899,12 @@ export function analyzeDoor(
 
     const nearbyWindows = queryPlanIndex(caches.windowIndex, centre, radius)
         .filter(filterY)
-        .map((c) => ({ expressId: c.expressId, meshes: c.meshes, bbox: c.bbox }))
+        .map((c) => ({
+            expressId: c.expressId,
+            meshes: c.meshes,
+            bbox: c.bbox,
+            guid: model.attrs(c.expressId)?.globalId ?? null,
+        }))
 
     const nearbyDevices: DoorContextLite['nearbyDevices'] = []
     const elecIndices = caches.elecIndices

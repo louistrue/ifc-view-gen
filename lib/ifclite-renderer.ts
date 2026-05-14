@@ -676,6 +676,8 @@ function classifyMesh(
     nearbyDoorClippedWallTop?: ReadonlySet<number>,
     /** Before `nearbyDoorsElevationSectionOnly` remaps paint mode; used for glazing vs section-grey. */
     nearbyDoorGeometryModes?: ReadonlyMap<number, NearbyDoorElevationMode>,
+    /** Camera-side nearby windows: layer 8 (projected) / 11 (sectioned), matching nearby walls. */
+    nearbyWindowElevationLayers?: ReadonlyMap<number, number>,
 ): MeshClassification {
     const id = mesh.expressId
     if (id === ctx.door.expressId) {
@@ -706,6 +708,12 @@ function classifyMesh(
         // Glass blue is reserved for the FOCAL door's own glazing — adjacent
         // windows render in the wall context colour so the eye stays on the
         // door being reviewed.
+        if (elevationView) {
+            const wLayer = nearbyWindowElevationLayers?.get(id)
+            if (wLayer != null) {
+                return { fill: colors.elevation.door.byBKP.metal, fillOpacity: 0.5, layer: wLayer, role: 'window' }
+            }
+        }
         return { fill: colors.elevation.wall, fillOpacity: 0.5, layer: 4, role: 'window' }
     }
     const nearbyDoor = ctx.nearbyDoors.find((d) => d.expressId === id)
@@ -2144,6 +2152,15 @@ function emitElevationSvg(
         }
     }
     const pendingOverlaySegments: PendingOverlaySegment[] = []
+    /** Skip facing-axis depth bounds so edge-on wall tessellation isn't fully culled by the shallow door-face slab (`DEPTH_FAR`); same Y + width-axis window as `elevationClip`. Mirrors `focalDoorClip` for doors/windows. */
+    const elevationMeshClipNoFacingDepth: WorldClip = {
+        yMin: elevationClip.yMin,
+        yMax: elevationClip.yMax,
+        xMin: isXAligned ? elevationClip.xMin : undefined,
+        xMax: isXAligned ? elevationClip.xMax : undefined,
+        zMin: !isXAligned ? elevationClip.zMin : undefined,
+        zMax: !isXAligned ? elevationClip.zMax : undefined,
+    }
     // Camera-side direction along the facing axis. cameraSide = +facing * sign
     // (camera looks along -facing*sign at the door, so the half-space behind
     // the camera is +facing*sign from the door). When buildDoorViewFrame flips
@@ -2190,11 +2207,16 @@ function emitElevationSvg(
         // straddling doorMid (host wall, walls in/around the host plane)
         // stay at layer 1 so the door reads through the host wall opening.
         const isInFrontOfDoor = cameraSideOffset > 0.05
-        const wallLayer = renderDecision.mode === 'sectioned' && isInFrontOfDoor
+        const wallLayer = renderDecision.mode === 'sectioned' && wallEdgeOnToElevation
             ? ELEVATION_CLIPPED_WALL_TOP_LAYER
             : renderDecision.mode === 'projected' && isInFrontOfDoor
                 ? ELEVATION_PROJECTED_WALL_LAYER
                 : 1
+        /** Same metal context fill on both elevations for edge-on section cuts (avoids front/back mismatch). */
+        const wallFill =
+            renderDecision.mode === 'sectioned' && wallEdgeOnToElevation
+                ? options.colors.elevation.door.byBKP.metal
+                : options.colors.elevation.wall
         const wallTopScreenY = yScreenAt(w.bbox.max[1])
         const polysAll: ProjectedPolygon[] = []
         let segsAll: ProjectedSegment[] = []
@@ -2202,9 +2224,12 @@ function emitElevationSvg(
         // Older "projected" face-on walls omitted the facing-axis bounds on the
         // clip box; mesh edges from geometry far along that axis still projected
         // as vertical strokes in the slab band (reads as background wall/door).
-        const wallClip: WorldClip = elevationClip
+        const wallClip: WorldClip =
+            renderDecision.mode === 'sectioned' && wallEdgeOnToElevation
+                ? elevationMeshClipNoFacingDepth
+                : elevationClip
         for (const mesh of w.meshes) {
-            const cls: MeshClassification = { fill: options.colors.elevation.wall, layer: wallLayer, role: 'nearby-wall' }
+            const cls: MeshClassification = { fill: wallFill, layer: wallLayer, role: 'nearby-wall' }
             const polys = projectMeshFill(mesh, cam, cls, w.expressId, wallClip, pixelClip)
             const segsRaw = projectMeshSegments(mesh, cam, options.colors.strokes.outline, wallLayer, options.lineWidth, wallClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
             const segsSnapped = snapNearCardinalSegments(filterWallSeamSegments(segsRaw))
@@ -2272,6 +2297,49 @@ function emitElevationSvg(
                 segments,
             })
         }
+    }
+    /** Perpendicular / face-on camera-side IfcWindow neighbours: same layer rules as nearby walls
+     * (8 = projected foreground, 11 = section). Raster path uses `focalDoorClip` for these so openings
+     * are not eaten by the strict facing-axis depth clip (mirrors nearby doors). */
+    const nearbyWindowElevationLayers = new Map<number, number>()
+    for (const w of ctx.nearbyWindows) {
+        const wallCentreFacing = (w.bbox.min[facingAxisIdx] + w.bbox.max[facingAxisIdx]) / 2
+        const cameraSideOffset = (wallCentreFacing - doorCenterFacing) * cameraSideAxisSign
+        const bMin = w.bbox.min[facingAxisIdx]
+        const bMax = w.bbox.max[facingAxisIdx]
+        const depthGapToClip =
+            bMax < facingClipMin
+                ? facingClipMin - bMax
+                : bMin > facingClipMax
+                    ? bMin - facingClipMax
+                    : 0
+        const wallInYAndWidth = inYAndWidthVolume(w.bbox)
+        const wallInFullVolume = intersectsElevationVolume(w.bbox)
+        const wallRunWidth = Math.max(w.bbox.max[widthAxisIdx] - w.bbox.min[widthAxisIdx], 0.001)
+        const wallRunDepth = Math.max(w.bbox.max[facingAxisIdx] - w.bbox.min[facingAxisIdx], 0.001)
+        const wallEdgeOnToElevation = wallRunDepth > Math.max(wallRunWidth * 1.25, 0.35)
+        const winDecision: ElevationRenderDecision = wallInFullVolume
+            ? wallEdgeOnToElevation
+                ? { mode: 'sectioned', reason: 'nearby window edge-on to elevation depth slice' }
+                : { mode: 'projected', reason: 'nearby window face-on in elevation (depth still clipped to elevation volume)' }
+            : wallInYAndWidth && depthGapToClip <= NEARBY_WALL_PROJECTED_GAP_MAX_M
+                ? { mode: 'projected', reason: 'nearby window near depth clip and intersects elevation y+width window' }
+                : { mode: 'hidden', reason: 'nearby window outside elevation y+width window' }
+        if (winDecision.mode === 'hidden') continue
+        const isInFrontOfDoorWin = cameraSideOffset > 0.05
+        const sectionedBehindDoorPlaneWin =
+            winDecision.mode === 'sectioned' && !isInFrontOfDoorWin && wallEdgeOnToElevation
+        /** Far-side face-on / near-clip windows were still layer 4 (wall tint); match behind-plane wall band (3) + metal. */
+        const projectedBehindDoorPlaneWin = winDecision.mode === 'projected' && !isInFrontOfDoorWin
+        const winLayer =
+            winDecision.mode === 'sectioned' && isInFrontOfDoorWin
+                ? ELEVATION_CLIPPED_WALL_TOP_LAYER
+                : winDecision.mode === 'projected' && isInFrontOfDoorWin
+                    ? ELEVATION_PROJECTED_WALL_LAYER
+                    : sectionedBehindDoorPlaneWin || projectedBehindDoorPlaneWin
+                        ? 3
+                        : 0
+        if (winLayer !== 0) nearbyWindowElevationLayers.set(w.expressId, winLayer)
     }
     // Horizontal band rendering: a full-canvas-width strip clipped to the
     // [yMinWorld, yMaxWorld] range, painted with `fill` at the given layer,
@@ -3029,14 +3097,7 @@ function emitElevationSvg(
     // extend across slab/part bands; strip vertical-dominant strokes in the bottom
     // screen band (floor build‑up), where loose depth strokes are not part of the
     // true section cut (nearby walls and neighbour doors apply this separately).
-    const focalDoorClip: WorldClip = {
-        yMin: elevationClip.yMin,
-        yMax: elevationClip.yMax,
-        xMin: isXAligned ? elevationClip.xMin : undefined,
-        xMax: isXAligned ? elevationClip.xMax : undefined,
-        zMin: !isXAligned ? elevationClip.zMin : undefined,
-        zMax: !isXAligned ? elevationClip.zMax : undefined,
-    }
+    const focalDoorClip: WorldClip = elevationMeshClipNoFacingDepth
     const nearbyDoorClippedWallTop = new Set<number>()
     for (const d of ctx.nearbyDoors) {
         if (nearbyDoorModes.get(d.expressId) !== 'sectioned') continue
@@ -3045,7 +3106,7 @@ function emitElevationSvg(
         if (cameraSideOffsetDoor > 0.05) nearbyDoorClippedWallTop.add(d.expressId)
     }
     for (const { mesh, expressId } of meshes) {
-        const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes, nearbyDoorClippedWallTop, nearbyDoorGeometryModes)
+        const cls = classifyMesh(mesh, ctx, true, options.colors, nearbyDoorModes, nearbyDoorClippedWallTop, nearbyDoorGeometryModes, nearbyWindowElevationLayers)
         const nearbyDoorMode = nearbyDoorModes.get(expressId)
         const isFocalDoorMesh = expressId === ctx.door.expressId
         const isNearbyDoorMesh = !isFocalDoorMesh && nearbyDoorMode !== undefined
@@ -3066,8 +3127,23 @@ function emitElevationSvg(
                 segs = stripElevationVerticalStrokesInFloorBand(segs, pixelClip.maxY, 200, doorFloorBandSilhouetteX)
             }
         } else {
-            polys = projectMeshFill(mesh, cam, cls, expressId, elevationClip, pixelClip)
-            segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, elevationClip, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+            const winFgLayer = nearbyWindowElevationLayers.get(expressId)
+            const clipForMesh =
+                cls.role === 'window' && winFgLayer != null ? focalDoorClip : elevationClip
+            polys = projectMeshFill(mesh, cam, cls, expressId, clipForMesh, pixelClip)
+            segs = projectMeshSegments(mesh, cam, options.colors.strokes.outline, cls.layer, options.lineWidth, clipForMesh, W, H, pixelClip.minY, pixelClip.minX, pixelClip.maxX)
+            if (cls.role === 'window' && winFgLayer === ELEVATION_CLIPPED_WALL_TOP_LAYER) {
+                const windowFloorBandSilhouetteX = polygonUnionScreenXBounds(polys)
+                segs = stripElevationVerticalStrokesInFloorBand(segs, pixelClip.maxY, 200, windowFloorBandSilhouetteX)
+            } else if (
+                cls.role === 'window'
+                && (winFgLayer === ELEVATION_PROJECTED_WALL_LAYER || winFgLayer === 3)
+            ) {
+                let segsW = snapNearCardinalSegments(filterWallSeamSegments(segs))
+                segsW = filterTinyObliqueSegments(segsW, 3, 3)
+                segsW = collapseHorizontalsInViewportHeadBand(segsW, pixelClip.minY)
+                segs = dedupeAcrossStoreyHeadHorizontals(segsW, storeyHeadHzDedupeKeys)
+            }
         }
         if (polys.length === 0 && segs.length === 0) continue
         groups.push({ layer: cls.layer, polygons: polys, segments: segs })
